@@ -62,6 +62,7 @@ listas-p*.txt
 !/INSTALL.md
 !/INSTALAR.md
 !/AVISOS.md
+!/TRIAGEM.md
 /docs/*.md
 /design/**/*.md
 /tests/*.md
