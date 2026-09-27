@@ -283,20 +283,29 @@ def gerar_comentario(grupos, triagens):
 
 
 def postar_comentario(comentario):
-    """Post comment to the pinned triagem issue."""
-    # This would use GitHub API; for now, just print
+    """Save comment to file for GitHub workflow to pick up."""
+    saida_dir = os.path.expanduser("~/.triagem")
+    os.makedirs(saida_dir, exist_ok=True)
+
+    saida_arquivo = os.path.join(saida_dir, "comentario.md")
+    with open(saida_arquivo, "w", encoding="utf-8") as f:
+        f.write(comentario)
+
+    print(f"\n✓ Comentário salvo em {saida_arquivo}")
+    # Also print to stdout for workflow to see
     print("\n=== Comentário para GitHub ===")
     print(comentario)
-    print("=" * 30)
+    print("=" * 50)
 
 
 def main():
     parser = argparse.ArgumentParser(description="Automatic log triage")
     parser.add_argument("--test", action="store_true", help="Test mode (don't write to DB)")
+    parser.add_argument("--arquivo", help="Read registros from JSON file instead of D1")
     args = parser.parse_args()
 
     # Check environment
-    if not os.environ.get("CLOUDFLARE_API_TOKEN"):
+    if not args.arquivo and not os.environ.get("CLOUDFLARE_API_TOKEN"):
         print("Erro: CLOUDFLARE_API_TOKEN não definido", file=sys.stderr)
         sys.exit(1)
 
@@ -304,16 +313,36 @@ def main():
 
     try:
         # Get last processed log
-        ultimo_id = obter_ultimo_log()
-        print(f"Último log processado: ID {ultimo_id}")
+        if args.test:
+            ultimo_id = 0  # In test mode, don't query DB
+        else:
+            try:
+                ultimo_id = obter_ultimo_log()
+                print(f"Último log processado: ID {ultimo_id}")
+            except RuntimeError as e:
+                print(f"Aviso: não foi possível obter último ID (primeira execução?): {e}", file=sys.stderr)
+                ultimo_id = 0
 
         # Read new logs
-        registros = ler_novos_registros(ultimo_id)
+        if args.arquivo:
+            # Load from file
+            with open(args.arquivo, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and "results" in data:
+                registros = data["results"]
+            elif isinstance(data, list):
+                registros = data
+            else:
+                registros = []
+            print(f"Carregados {len(registros)} registros do arquivo")
+        else:
+            registros = ler_novos_registros(ultimo_id)
+
         if not registros:
             print("Nenhum novo registro.")
             return
 
-        print(f"Processando {len(registros)} novos registros...")
+        print(f"Processando {len(registros)} registros...")
 
         # Group by pattern
         grupos = agrupar_registros(registros)
@@ -326,14 +355,23 @@ def main():
         for (padrao, versao, plataforma), dados in grupos.items():
             triagens[(padrao, versao, plataforma)] = dados
 
+        print(f"\nDetectados {len(triagens)} grupos únicos:")
+        for (padrao, versao, plataforma), dados in sorted(triagens.items()):
+            print(f"  - {padrao} ({versao}/{plataforma}): {dados['ocorrencias']} ocorrências, {len(dados['pessoas'])} pessoas")
+
         if not args.test:
-            gravar_triagem(triagens)
+            try:
+                gravar_triagem(triagens)
+            except RuntimeError as e:
+                print(f"Aviso: não foi possível gravar triagem: {e}", file=sys.stderr)
+        else:
+            print("\n[TESTE] Não gravando em D1 (modo --test)")
 
         # Generate and post comment
         comentario = gerar_comentario(grupos, triagens)
         postar_comentario(comentario)
 
-        print(f"\n✓ Triagem concluída: {len(grupos)} padrões únicos")
+        print(f"\n✓ Triagem concluída: {len(triagens)} padrões únicos")
 
     except Exception as e:
         print(f"Erro fatal: {e}", file=sys.stderr)
