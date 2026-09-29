@@ -38,6 +38,39 @@ namespace NuvioTpk
         volatile bool fim;
         NuiTimer vigia;
         Video video;
+        AudioStreamPolicy foco;
+        string logArq;
+
+        void Log(string t)
+        {
+            try { if (logArq != null) File.AppendAllText(logArq, DateTime.Now.ToString("HH:mm:ss.fff") + " " + t + "\n"); } catch { }
+        }
+
+        // Foco de audio de midia: sem ele o audio de outro app (YouTube, canal
+        // ao vivo) continua tocando por baixo do Nuvio ate um filme comecar.
+        // Tirado uma vez ao abrir e devolvido ao sair; qualquer falha so vai
+        // para o log e nunca impede o app de abrir.
+        void PegaFoco()
+        {
+            try
+            {
+                if (foco == null) foco = new AudioStreamPolicy(AudioStreamType.Media);
+                foco.AcquireFocus(AudioStreamFocusOptions.Playback, (AudioStreamBehaviors)0, null);
+                Log("foco de audio: tomado");
+            }
+            catch (Exception e) { Log("foco de audio: " + e.GetType().Name + ": " + e.Message); }
+        }
+
+        void SoltaFoco()
+        {
+            try
+            {
+                if (foco == null) return;
+                foco.ReleaseFocus(AudioStreamFocusOptions.Playback, (AudioStreamBehaviors)0, null);
+                Log("foco de audio: devolvido");
+            }
+            catch (Exception e) { Log("soltar foco: " + e.GetType().Name + ": " + e.Message); }
+        }
 
         protected override void OnCreate()
         {
@@ -47,6 +80,7 @@ namespace NuvioTpk
 
             string dados = DirectoryInfo.Data;
             string arte = IOPath.Combine(DirectoryInfo.Resource, "art");
+            logArq = IOPath.Combine(dados, "tpk-host.log");
 
             // A .so aberta por caminho absoluto ANTES do primeiro DllImport, como
             // no pacote do Tizen 4/5: se o launcher desta TV nao procurar no lib/
@@ -88,6 +122,7 @@ namespace NuvioTpk
                 return;
             }
 
+            PegaFoco();
             try
             {
                 CriaJanelaGL();
@@ -162,6 +197,12 @@ namespace NuvioTpk
             return r > 0 ? 1 : 0;
         }
 
+        protected override void OnResume()
+        {
+            base.OnResume();
+            PegaFoco();
+        }
+
         protected override void OnPause()
         {
             video?.PausarPeloSistema();
@@ -171,6 +212,7 @@ namespace NuvioTpk
         protected override void OnTerminate()
         {
             video?.Parar();
+            SoltaFoco();
             base.OnTerminate();
         }
 
