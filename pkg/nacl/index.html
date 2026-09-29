@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Nuvio</title>
+<style>
+  html, body { margin: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+  /* O <embed> do .nexe fica POR CIMA, com fundo transparente (ALPHA_SIZE=8 no
+     Graphics3D), para o plano de video do AVPlay aparecer atras da interface. */
+  #nacl { position: absolute; left: 0; top: 0; width: 1920px; height: 1080px; z-index: 2; }
+  #log  { position: absolute; left: 30px; top: 20px; z-index: 5; color: #b8f5c0;
+          font: 22px/1.4 monospace; white-space: pre-wrap; text-shadow: 0 0 4px #000;
+          pointer-events: none; }
+</style>
+</head>
+<body>
+<embed id="nacl" src="app.nmf" type="application/x-nacl" width="1920" height="1080">
+<div id="log"></div>
+<script>
+// Ponte da pagina para o modulo .nexe. Espelha o hibrido do alvo emscripten
+// (tools/tizen-shell.html): a PAGINA e dona da rede (XHR) e do video (AVPlay);
+// o modulo desenha a interface em GLES2 por cima e conversa por postMessage.
+var mod = document.getElementById('nacl'), L = document.getElementById('log');
+var linhas = [];
+function log(s) { linhas.push(s); if (linhas.length > 12) linhas.shift(); L.textContent = linhas.join('\n'); }
+
+log('plugin x-nacl: ' + !!(navigator.mimeTypes && navigator.mimeTypes['application/x-nacl']));
+['loadstart','load','error','abort','crash','loadend'].forEach(function (e) {
+  mod.addEventListener(e, function () {
+    log('nacl ' + e + (e === 'crash' ? ' exit=' + mod.exitStatus : '')
+                     + (e === 'error' ? ' ' + mod.lastError : ''));
+  }, true);
+});
+
+// --- REDE: XHR assincrono; a resposta volta como dicionario com ArrayBuffer ---
+function fetchPedido(d) {
+  var x = new XMLHttpRequest();
+  try { x.open(d.m || 'GET', d.u, true); } catch (e) { return responder(d.id, 0, null, '', ''); }
+  x.responseType = 'arraybuffer';
+  x.timeout = 20000;
+  if (d.h) d.h.split('\n').forEach(function (linha) {
+    var i = linha.indexOf(':'); if (i <= 0) return;
+    try { x.setRequestHeader(linha.slice(0, i).trim(), linha.slice(i + 1).trim()); } catch (e) {}
+  });
+  x.onload = function () {
+    responder(d.id, x.status, x.response, x.responseURL || '', x.getResponseHeader('etag') || '');
+  };
+  x.onerror = x.ontimeout = function () { responder(d.id, 0, null, '', ''); };
+  try { x.send(d.b ? d.b : null); } catch (e) { responder(d.id, 0, null, '', ''); }
+}
+function responder(id, status, buf, final, etag) {
+  mod.postMessage({ t: 'fetched', id: id, status: status,
+                    b: buf || new ArrayBuffer(0), final: final, etag: etag });
+}
+
+// --- VIDEO: AVPlay (mesmo motor do alvo WASM em tizen-shell.html) ------------
+// Placeholder do controle de video; a integracao completa reaproveita o codigo
+// de tools/tizen-shell.html (avplay_abrir/parar/faixas). Deixado como gancho.
+function video(d) { log('video ' + d.op); /* TODO: reusar AVPlay de tizen-shell.html */ }
+
+mod.addEventListener('message', function (ev) {
+  var d = ev.data;
+  if (typeof d === 'string') { log('mod: ' + d); return; }
+  if (!d || !d.t) return;
+  if (d.t === 'fetch') fetchPedido(d);
+  else if (d.t === 'video') video(d);
+});
+
+// --- ENTRADA: teclas do controle remoto -> postMessage ----------------------
+// O modulo tambem pode receber foco e ler PPB_InputEvent direto; esta ponte
+// cobre as teclas que o Tizen entrega so no nivel do documento.
+document.addEventListener('keydown', function (e) {
+  mod.postMessage({ t: 'key', code: e.keyCode, down: 1 });
+});
+document.addEventListener('keyup', function (e) {
+  mod.postMessage({ t: 'key', code: e.keyCode, down: 0 });
+});
+try {
+  // Registra as teclas de midia do controle Samsung, se a API existir.
+  if (window.tizen && tizen.tvinputdevice) {
+    ['MediaPlayPause','MediaPlay','MediaPause','MediaStop','MediaRewind',
+     'MediaFastForward','ColorF0Red','ColorF1Green','ColorF2Yellow','ColorF3Blue'
+    ].forEach(function (k) { try { tizen.tvinputdevice.registerKey(k); } catch (e) {} });
+  }
+} catch (e) {}
+</script>
+</body>
+</html>

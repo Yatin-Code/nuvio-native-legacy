@@ -5,7 +5,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <dlfcn.h>
+#ifndef NV_NACL
+#include <dlfcn.h>  /* so o caminho da libcurl (dlopen) usa; newlib arm-nacl nao tem */
+#endif
 #include <time.h>
 
 /* Controle local da requisicao corrente. O estado nunca e compartilhado
@@ -22,8 +24,13 @@ static long redeLimiteAtual(void) {
   return rede_teto > 0 ? rede_teto : 0;
 }
 
-#ifdef __EMSCRIPTEN__
-// ---------------------------------------------------------------- EMSCRIPTEN
+#if defined(__EMSCRIPTEN__) || defined(NV_NACL)
+// -------------------------------------------------------- EMSCRIPTEN / NACL
+// Caminho de rede dos alvos hibridos (a PAGINA faz a requisicao): WASM
+// (emscripten, XHR sincrono) e Native Client (Tizen 4/5, ponte postMessage com
+// espera por condvar em plat_nacl.c). Toda a maquina de pedir2/pedir/rede_* e
+// COMPARTILHADA; so muda a funcao de transporte (nv_http / nv_http_contar).
+//
 // Caminho de rede do alvo Tizen (WASM).
 //
 // POR QUE NAO DA PARA REAPROVEITAR O DE BAIXO: o de baixo faz dlopen da libcurl
@@ -53,6 +60,11 @@ static long redeLimiteAtual(void) {
 // InvalidAccessError). O parametro `segundos` e aceito e ignorado; quem corta a
 // espera e o navegador.
 
+#ifdef NV_NACL
+#include "plat_nacl.h"
+#endif
+
+#ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 
 // Faz a requisicao e devolve um buffer de malloc com o corpo (com um NUL extra
@@ -108,6 +120,15 @@ EM_JS(char *, nv_http, (const char *metodo, const char *url, const char *cabs,
   if (tam) HEAP32[tam >> 2] = n;
   return p;
 });
+#else  /* NV_NACL: transporte pela ponte postMessage (plat_nacl.c) */
+// Mesma assinatura da versao EM_JS; corpo e string C (corpos de POST sao texto).
+static char *nv_http(const char *metodo, const char *url, const char *cabs,
+                     const char *corpo, int *tam, int *status,
+                     char *urlFinal, int urlFinalTam, char *etag, int etagTam) {
+  return nvnacl_http(metodo, url, cabs, corpo, corpo ? (int)strlen(corpo) : 0,
+                     tam, status, urlFinal, urlFinalTam, etag, etagTam);
+}
+#endif  /* __EMSCRIPTEN__ */
 
 _Thread_local long rede_teto = 0;
 // Destino do endereco final do proximo pedido (so rede_baixar_trecho_st liga).
@@ -337,6 +358,7 @@ int rede_url_final(const char *url, int segundos, char *dst, unsigned tam) {
 // Mesma limitacao ja escrita em pedir2: servidor que IGNORA o Range manda o
 // arquivo inteiro, e a chamada so volta depois. Os CDNs de debrid honram
 // Range; se um nao honrar, o teste trava o fio dele ate o navegador desistir.
+#ifdef __EMSCRIPTEN__
 EM_JS(int, nv_http_contar, (const char *url, const char *cabs, double ini,
                             double fim, int *status, char *urlFinal,
                             int urlFinalTam), {
@@ -360,6 +382,31 @@ EM_JS(int, nv_http_contar, (const char *url, const char *cabs, double ini,
   var s = xhr.responseText || "";
   return s.length;
 });
+#else  /* NV_NACL */
+// Conta bytes de um trecho (Range) pela mesma ponte; descarta o corpo.
+static int nv_http_contar(const char *url, const char *cabs, double ini,
+                          double fim, int *status, char *urlFinal,
+                          int urlFinalTam) {
+  char *corpo, *cabs2;
+  char faixa[64];
+  int tam = 0, st = 0;
+  size_t base = cabs ? strlen(cabs) : 0;
+  if (status) *status = 0;
+  snprintf(faixa, sizeof faixa, "Range: bytes=%.0f-%.0f", ini, fim);
+  cabs2 = (char *)malloc(base + strlen(faixa) + 2);
+  if (!cabs2) return -1;
+  cabs2[0] = 0;
+  if (cabs) { strcpy(cabs2, cabs); strcat(cabs2, "\n"); }
+  strcat(cabs2, faixa);
+  corpo = nvnacl_http("GET", url, cabs2, NULL, 0, &tam, &st, urlFinal,
+                      urlFinalTam, NULL, 0);
+  free(cabs2);
+  if (status) *status = st;
+  if (!corpo && st == 0) return -1;
+  free(corpo);
+  return tam;
+}
+#endif  /* __EMSCRIPTEN__ */
 
 int rede_medir_vazao(const char *url, const char *const *cab, int segundos,
                      long inicio, long long maxBytes, volatile int *cancelado,
