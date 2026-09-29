@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<widget xmlns="http://www.w3.org/ns/widgets"
+        xmlns:tizen="http://tizen.org/ns/widgets"
+        id="http://nuvio.tv/naclspike" version="0.0.1" viewmodes="maximized">
+  <!-- Mesma forma do moonlight-tizen-nacl (config.xml do ramo samsung_nacl):
+       perfil tv-samsung, privilegio network.public (nivel PUBLIC), sem entrada
+       especifica de NaCl. required_version 4.0 = TVs 2018. -->
+  <tizen:application id="NuvioNcl2.NaclSpike" package="NuvioNcl2" required_version="4.0"/>
+  <tizen:profile name="tv-samsung"/>
+  <name>Nuvio NaCl spike</name>
+  <icon src="icon.png"/>
+  <content src="index.html"/>
+  <access origin="*" subdomains="true"/>
+  <tizen:allow-navigation>*</tizen:allow-navigation>
+  <tizen:privilege name="http://developer.samsung.com/privilege/network.public"/>
+  <tizen:privilege name="http://tizen.org/privilege/tv.inputdevice"/>
+  <tizen:setting screen-orientation="landscape" context-menu="disable" background-support="disable" hwkey-event="enable"/>
+</widget>
