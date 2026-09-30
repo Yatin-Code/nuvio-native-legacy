@@ -188,11 +188,17 @@ namespace NuvioTpk
             principal(() => { try { a(); } catch (Exception e) { Log("principal: " + e); } });
         }
 
+        // Ultimo pedido de abertura, para a segunda tentativa depois de um
+        // ResourceConflict (ver PlaybackInterrupted abaixo).
+        string ultimaUrl, ultimosCab;
+        int retentouSessao = -1;
+
         async void Abrir(string url, string cabecalhos)
         {
             Parar();
             int minha = ++sessao;
             posMs = 0;
+            ultimaUrl = url; ultimosCab = cabecalhos;
             try
             {
                 var p = new Player();
@@ -200,7 +206,32 @@ namespace NuvioTpk
                 p.PlaybackCompleted += (s, e) => { if (minha == sessao) NvVid.Evento(EV_FIM, 0, 0); };
                 p.ErrorOccurred += (s, e) => { if (minha == sessao) { Log("erro " + e.Error); NvVid.Evento(EV_ERRO, (int)e.Error, 0); } };
                 p.BufferingProgressChanged += (s, e) => { if (minha == sessao) NvVid.Evento(EV_BUFFER, e.Percent, 0); };
-                p.PlaybackInterrupted += (s, e) => { if (minha == sessao) { Log("interrompido: " + e.Reason); NvVid.Evento(EV_PAUSADO, 0, 0); } };
+                p.PlaybackInterrupted += (s, e) =>
+                {
+                    if (minha != sessao) return;
+                    Log("interrompido: " + e.Reason);
+                    // CANARIO (#178/#170): outro app (o YouTube em segundo plano)
+                    // tomou o video da TV no COMECO da reproducao — o trailer, em
+                    // geral. Uma segunda tentativa, 800 ms depois, pede o recurso
+                    // de novo. So com menos de 5 s tocados: num filme adiantado
+                    // reabrir voltaria ao zero, entao ali fica a pausa de sempre.
+                    if (e.Reason.ToString() == "ResourceConflict" && posMs < 5000 &&
+                        retentouSessao != minha && ultimaUrl != null)
+                    {
+                        retentouSessao = minha;
+                        string u = ultimaUrl, c = ultimosCab;
+                        Log("conflito de recurso no comeco: tenta de novo em 800 ms");
+                        Principal(async () =>
+                        {
+                            await System.Threading.Tasks.Task.Delay(800);
+                            if (minha != sessao) return;
+                            Abrir(u, c);
+                            retentouSessao = sessao;   // a nova sessao nao tenta de novo
+                        });
+                        return;
+                    }
+                    NvVid.Evento(EV_PAUSADO, 0, 0);
+                };
                 p.SubtitleUpdated += (s, e) => { if (minha == sessao) NvVid.Legenda(e.Text ?? "", (int)e.Duration); };
                 foreach (var linha in (cabecalhos ?? "").Split('\n'))
                 {

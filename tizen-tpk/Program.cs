@@ -769,9 +769,14 @@ namespace NuvioTpk
             return r > 0 ? 1 : 0;
         }
 
+        // Ja houve uma pausa de verdade nesta execucao (a primeira retomada
+        // chega logo no arranque e ja tem o prime proprio, em AgendaPrime).
+        bool pausouAlgumaVez;
+
         protected override void OnPause()
         {
             pausado = true;
+            pausouAlgumaVez = true;
             Etapa("note pause" + Contagem() + " mainVisible=" + principalVisivel + (JanelaUnica ? " (glview)" : " glVisible=" + glVisivel));
             video?.PausarPeloSistema();
             base.OnPause();
@@ -781,6 +786,12 @@ namespace NuvioTpk
         {
             pausado = false;
             Etapa("note resume" + Contagem() + " mainVisible=" + principalVisivel + (JanelaUnica ? " (glview)" : " glVisible=" + glVisivel));
+            // CANARIO (#178/#170): voltar ao Nuvio depois do YouTube deixava o
+            // player do YouTube com o video da TV (log: "interrompido:
+            // ResourceConflict") e o trailer nao tocava. O prime de abertura
+            // nao roda de novo numa retomada; agora roda (so depois de uma
+            // pausa real, e o PrimeAudio pula sozinho se um filme estiver aberto).
+            if (pausouAlgumaVez) { Janela("retomada: prime de audio de novo"); AgendaPrime(); }
             base.OnResume();
         }
 
