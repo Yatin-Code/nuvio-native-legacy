@@ -429,7 +429,7 @@ namespace NuvioTpk
             try
             {
                 gl.VisibilityChanged += (s, e) => { glVisivel = e.Visibility; Etapa("note gl-window visible=" + e.Visibility + Contagem()); Janela("gl visivel=" + e.Visibility, false); };
-                gl.FocusChanged += (s, e) => Etapa("note gl-window focus=" + e.FocusGained + Contagem());
+                gl.FocusChanged += (s, e) => { Etapa("note gl-window focus=" + e.FocusGained + Contagem()); if (e.FocusGained) ReerguePrincipal("gl focus"); };
             }
             catch (Exception e) { Etapa("note gl-window events unavailable " + e.GetType().Name + ": " + e.Message); }
             gl.Show();
@@ -531,6 +531,72 @@ namespace NuvioTpk
                 catch (Exception e) { Janela("principal nao reabriu " + e.GetType().Name + ": " + e.Message); }
             }
             try { gl.Show(); gl.Raise(); } catch (Exception e) { Etapa("note raise failed " + e.GetType().Name + ": " + e.Message); }
+        }
+
+        // ============ CANARIO (#195): principal de volta DEPOIS do resume ============
+        // Medido na QA55LS03B (Tizen 6.5, api9), canario-janela-tpk.3 (D1
+        // 14331/14335/14381): Show+Raise+Activate da principal e
+        // ecore_wl2_window_iconified_set(false) rodaram, e 1 s e 2 s depois
+        // "evento=False IsVisible=False pausado=False". A desiconificacao nao
+        // muda nada: a hipotese "so iconificada" caiu. O que se ve (fotos da
+        // issue) e a tela da TV no furo do GL, nao preto: a principal (opaca,
+        // dona do plano de video) nao esta entre o GL e a tela da TV.
+        // Suspeita (NAO provada): o reabrir roda em t=4,2 s com o app AINDA
+        // pausado (o resume vem em 4,4 s) e o gerenciador nao sobe a principal
+        // de um app em segundo plano; o GL volta porque e a janela de cima que
+        // o proprio lancador ativa. Aqui, so com o app em primeiro plano
+        // (resume e foco do GL), em ate 3 tentativas, cada uma conferida 1 s
+        // depois: (1) Activate da principal e Raise do GL; (2) Hide+Show da
+        // principal (remapeia a superficie, ela entra no topo da pilha) e
+        // Raise do GL; (3) o mesmo (2). Fora da API8.
+#if NV_API8
+        const bool REERGUE_PRINCIPAL = false;
+#else
+        const bool REERGUE_PRINCIPAL = true;
+#endif
+        int reergueTentativa;
+        bool reergueAgendado;
+
+        static string VisivelDali(NuiWindow w)
+        {
+            try { return w.IsVisible().ToString(); } catch (Exception e) { return "?(" + e.GetType().Name + ")"; }
+        }
+
+        void ReerguePrincipal(string porque)
+        {
+            if (!REERGUE_PRINCIPAL || gl == null || erroNaTela || saindo || pausado || principalVisivel) return;
+            if (reergueAgendado || reergueTentativa >= 3) return;
+            reergueAgendado = true;
+            try
+            {
+                var t = new NuiTimer(200);
+                t.Tick += (s, e) =>
+                {
+                    reergueAgendado = false;
+                    if (gl == null || saindo || pausado || principalVisivel) return false;
+                    int n = ++reergueTentativa;
+                    var w = NuiWindow.Instance;
+                    try
+                    {
+                        if (n == 1) { w.Show(); w.Activate(); }
+                        else { w.Hide(); w.Show(); w.Raise(); }
+                        try { gl.Show(); gl.Raise(); } catch { }
+                        Janela("principal reerguida #" + n + " (" + porque + ", " + (n == 1 ? "Activate" : "Hide+Show") + ") IsVisible=" + VisivelDali(w));
+                    }
+                    catch (Exception x) { Janela("principal reerguida #" + n + " falhou " + x.GetType().Name + ": " + x.Message); }
+                    var c = new NuiTimer(1000);
+                    c.Tick += (s2, e2) =>
+                    {
+                        Janela("principal 1 s depois do reerguer #" + n + ": evento=" + principalVisivel + " IsVisible=" + VisivelDali(NuiWindow.Instance) + " glVisivel=" + glVisivel + " pausado=" + pausado);
+                        if (!principalVisivel && !pausado) ReerguePrincipal("sem efeito #" + n);
+                        return false;
+                    };
+                    c.Start();
+                    return false;
+                };
+                t.Start();
+            }
+            catch (Exception e) { reergueAgendado = false; Janela("principal: reerguer falhou " + e.GetType().Name + ": " + e.Message); }
         }
 
         void SobeGlSePreciso(string porque)
@@ -825,6 +891,8 @@ namespace NuvioTpk
             pausado = false;
             Etapa("note resume" + Contagem() + " mainVisible=" + principalVisivel + (JanelaUnica ? " (glview)" : " glVisible=" + glVisivel));
             base.OnResume();
+            reergueTentativa = 0;   // cada volta ao primeiro plano tem as suas 3
+            ReerguePrincipal("resume");
         }
 
         protected override void OnTerminate()
