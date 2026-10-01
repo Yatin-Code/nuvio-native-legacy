@@ -300,6 +300,18 @@ namespace NuvioTpk
             Log("[audio] prime released");
         }
 
+        public bool TemPlayer { get { return player != null; } }
+
+        // Variante B (#195): o player aberto passa a desenhar na janela que
+        // fazDisplay devolve agora. Devolve o que aconteceu, para o log.
+        public string TrocaDisplay()
+        {
+            var p = player;
+            if (p == null) return "nenhum aberto";
+            try { p.Display = fazDisplay(); p.DisplaySettings.Mode = PlayerDisplayMode.LetterBox; return "trocado (" + p.State + ")"; }
+            catch (Exception e) { return "troca falhou " + e.GetType().Name + ": " + e.Message; }
+        }
+
         public void Parar()
         {
             SoltaPrimer();
