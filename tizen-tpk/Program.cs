@@ -269,6 +269,7 @@ namespace NuvioTpk
                 video = new Video(() => new Display(janelaVideo ?? NuiWindow.Instance),
                                   a => { if (principal != null) principal.Post(_ => a(), null); else a(); },
                                   dados, W, H);
+                video.AoTocar = () => PrincipalSobeNoPlayer("player tocando");
             }
             catch (Exception e)
             {
@@ -665,6 +666,45 @@ namespace NuvioTpk
             catch (Exception e) { Janela("video: criar janela propria falhou " + e.GetType().Name + ": " + e.Message + " (fica na principal)"); janelaVideo = null; }
         }
 
+        // ============ CANARIO (#203, #193 caso 2; #195): janela do video acima do lancador ============
+        // #203 (QE65Q80A, Tizen 6.0, api8), fotos: com o filme tocando, a barra
+        // do Smart Hub / tela "Apps" aparece no furo do GL com o OSD do Nuvio
+        // POR CIMA: a janela do lancador ficou ENTRE a principal (dona do plano
+        // de video) e o GL, com a principal visivel=True a sessao inteira (D1
+        // 14551, 14652). (veio de 75807f2, agente/i203)
+        // CANARIO 6 (#195, api9): ligado tambem na 6.5, sobre a janela que tem o
+        // video (a propria da variante B, se existir). Medido na QA55LS03B
+        // (canario-janela-tpk.5, D1 14876/14884/14891): a janela de video
+        // propria nasce IsVisible=True, evento=True, gl=True, o filme abre nela e
+        // toca (pipeline 737 -> 767 s), e a pessoa ainda ve a tela da TV.
+        // Visibilidade de janela nao e o problema; sobra a ordem. NAO provado que
+        // subir resolve: "[janela] player: ..." diz que rodou.
+#if NV_API8 || NV_API9
+        const bool PRINCIPAL_SOBE_NO_PLAYER = true;
+#else
+        const bool PRINCIPAL_SOBE_NO_PLAYER = false;
+#endif
+
+        void PrincipalSobeNoPlayer(string porque)
+        {
+            if (!PRINCIPAL_SOBE_NO_PLAYER || gl == null || erroNaTela || saindo || pausado) return;
+            try
+            {
+                var jv = janelaVideo ?? NuiWindow.Instance;
+#if NV_API9
+                // 6.5: Activate (sobe por cima de outra janela ativa) da janela
+                // do video, e depois o GL por cima.
+                jv.Activate();
+                gl.Activate();
+#else
+                jv.Raise();
+#endif
+                gl.Raise();
+                Janela("player: " + (janelaVideo != null ? "janela de video" : "principal") + " e gl subidos (" + porque + ") mainVisible=" + principalVisivel + " glVisible=" + glVisivel + " videoIsVisible=" + VisivelDali(jv));
+            }
+            catch (Exception e) { Janela("player: subir a janela do video falhou " + e.GetType().Name + ": " + e.Message); }
+        }
+
         void SobeGlSePreciso(string porque)
         {
 #if NV_API8
@@ -947,6 +987,7 @@ namespace NuvioTpk
         protected override void OnPause()
         {
             pausado = true;
+            if (!jaPausou) { jaPausou = true; Janela("primeira pausa (canario 6: sem a subida do gl no arranque, ela ainda vem?)"); }
             Etapa("note pause" + Contagem() + " mainVisible=" + principalVisivel + (JanelaUnica ? " (glview)" : " glVisible=" + glVisivel));
             video?.PausarPeloSistema();
             base.OnPause();
@@ -976,6 +1017,13 @@ namespace NuvioTpk
             base.OnTerminate();
         }
 
+#if NV_API9
+        const bool SEM_SOBE_GL_NO_ARRANQUE = true;
+#else
+        const bool SEM_SOBE_GL_NO_ARRANQUE = false;
+#endif
+        bool jaPausou;
+
         protected override void OnAppControlReceived(Tizen.Applications.AppControlReceivedEventArgs e)
         {
             string op = "?";
@@ -984,6 +1032,16 @@ namespace NuvioTpk
             try { base.OnAppControlReceived(e); } catch (Exception x) { Etapa("note appcontrol base threw " + x.GetType().Name + ": " + x.Message); }
             if (JanelaUnica) { Janela("appcontrol: janela unica (GLView), nada a subir"); return; }
             if (!JANELA_SOBE_GL_APPCONTROL || gl == null) return;
+            // CANARIO 6 (#195, api9): SEM subir o GL no appcontrol do ARRANQUE.
+            // Medido: na 6.5 todo arranque tem "raise gl-window #1 (appcontrol)"
+            // em ~0,4 s e, 1,5-2 s depois, pause + as duas janelas invisiveis +
+            // um segundo appcontrol (QA55LS03B e QE55QN95B, toda sessao); na 6.0
+            // (api8, que nao sobe o GL no appcontrol) essa pausa nao existe.
+            // Suspeita (NAO provada): o Raise do GL antes do lancador terminar o
+            // arranque o faz tomar a tela e deixar a camada dele entre o video e
+            // o GL. O appcontrol antes da primeira pausa so registra; os
+            // seguintes sobem como antes.
+            if (SEM_SOBE_GL_NO_ARRANQUE && !jaPausou) { Janela("appcontrol: arranque, gl NAO subido (canario 6)"); return; }
             try
             {
                 var t = new NuiTimer(300);

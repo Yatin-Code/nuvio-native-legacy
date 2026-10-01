@@ -86,6 +86,9 @@ namespace NuvioTpk
         // Referencias vivas: o C guarda os ponteiros, o GC nao pode recolher.
         FnAbrir fAbrir; FnSemArg fParar; FnInt fPausar, fBuscar, fVolume; FnRet fJanela; FnPos fPos; FnEscolher fEscolher;
 
+        // Chamado no fio principal logo depois do Start() de cada filme (#203).
+        public Action AoTocar;
+
         Player player;
         int sessao;
         volatile int posMs;
@@ -223,6 +226,7 @@ namespace NuvioTpk
                 NvVid.Evento(EV_PRONTO, dur, 0);
                 p.Start();
                 NvVid.Evento(EV_TOCANDO, 0, 0);
+                try { AoTocar?.Invoke(); } catch (Exception e) { Log("ao tocar: " + e.Message); }
                 // Alguns contêineres/HLS so publicam as faixas de audio depois
                 // que a reproducao comeca: le de novo, uma vez.
                 if (nAudio == 0)
