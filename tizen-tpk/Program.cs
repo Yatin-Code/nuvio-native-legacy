@@ -269,6 +269,7 @@ namespace NuvioTpk
                 video = new Video(() => new Display(NuiWindow.Instance),
                                   a => { if (principal != null) principal.Post(_ => a(), null); else a(); },
                                   dados, W, H);
+                video.AoTocar = () => PrincipalSobeNoPlayer("player tocando");
             }
             catch (Exception e)
             {
@@ -531,6 +532,37 @@ namespace NuvioTpk
                 catch (Exception e) { Janela("principal nao reabriu " + e.GetType().Name + ": " + e.Message); }
             }
             try { gl.Show(); gl.Raise(); } catch (Exception e) { Etapa("note raise failed " + e.GetType().Name + ": " + e.Message); }
+        }
+
+        // ============ CANARIO (#203, #193 caso 2): principal acima do lancador ============
+        // Medido na QE65Q80A (Tizen 6.0, api8), fotos das issues: com o filme
+        // tocando, a barra do Smart Hub (abrindo pela TV ao vivo, #203) ou a tela
+        // "Apps" (abrindo pelo menu de apps, #193) aparece no furo do GL, com o
+        // OSD/selos do Nuvio POR CIMA dela. Ou seja, a janela do lancador ficou
+        // ENTRE a principal (dona do plano de video) e o GL. No navegar nao se ve:
+        // o GL cobre a tela inteira. O rastro dessas sessoes (D1 14551, 14652)
+        // tem principal visivel=True do inicio ao fim, entao o SobeGl (que so
+        // reabre a principal quando ela fica invisivel) nunca a sobe; e o
+        // "frames stalled" no inicio do filme sobe so o GL. Aqui: a cada filme
+        // que comeca, Raise da principal e logo depois do GL. NAO provado que o
+        // Raise passa a principal por cima do lancador nessa TV: a linha
+        // "[janela] player: ..." diz que rodou. So na api8 (a 6.5 e da #195).
+#if NV_API8
+        const bool PRINCIPAL_SOBE_NO_PLAYER = true;
+#else
+        const bool PRINCIPAL_SOBE_NO_PLAYER = false;
+#endif
+
+        void PrincipalSobeNoPlayer(string porque)
+        {
+            if (!PRINCIPAL_SOBE_NO_PLAYER || gl == null || erroNaTela || saindo || pausado) return;
+            try
+            {
+                NuiWindow.Instance.Raise();
+                gl.Raise();
+                Janela("player: principal e gl subidos (" + porque + ") mainVisible=" + principalVisivel + " glVisible=" + glVisivel);
+            }
+            catch (Exception e) { Janela("player: subir a principal falhou " + e.GetType().Name + ": " + e.Message); }
         }
 
         void SobeGlSePreciso(string porque)
