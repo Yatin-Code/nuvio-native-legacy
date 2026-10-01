@@ -266,7 +266,7 @@ namespace NuvioTpk
             Etapa("begin video-init");
             try
             {
-                video = new Video(() => new Display(NuiWindow.Instance),
+                video = new Video(() => new Display(janelaVideo ?? NuiWindow.Instance),
                                   a => { if (principal != null) principal.Post(_ => a(), null); else a(); },
                                   dados, W, H);
             }
@@ -588,7 +588,11 @@ namespace NuvioTpk
                     c.Tick += (s2, e2) =>
                     {
                         Janela("principal 1 s depois do reerguer #" + n + ": evento=" + principalVisivel + " IsVisible=" + VisivelDali(NuiWindow.Instance) + " glVisivel=" + glVisivel + " pausado=" + pausado);
-                        if (!principalVisivel && !pausado) ReerguePrincipal("sem efeito #" + n);
+                        if (!principalVisivel && !pausado)
+                        {
+                            if (n >= 3) CriaJanelaVideo("principal nao voltou em 3 tentativas");
+                            else ReerguePrincipal("sem efeito #" + n);
+                        }
                         return false;
                     };
                     c.Start();
@@ -597,6 +601,68 @@ namespace NuvioTpk
                 t.Start();
             }
             catch (Exception e) { reergueAgendado = false; Janela("principal: reerguer falhou " + e.GetType().Name + ": " + e.Message); }
+        }
+
+        // ============ VARIANTE B (#195): janela de video PROPRIA ============
+        // Se as 3 tentativas acima nao trazem a principal de volta, o video
+        // deixa de depender dela: uma janela NUI nova, opaca e preta, criada
+        // AGORA (app em primeiro plano, depois do resume), mapeada no topo da
+        // pilha, com o GL subido por cima dela. O Player.Display de todo player
+        // aberto daqui em diante aponta para ela (fazDisplay), e o que ja estiver
+        // aberto e trocado na hora (Video.TrocaDisplay). A cada resume em que ela
+        // estiver invisivel e sem player, e recriada. So na api9 (Tizen 6.5/7).
+        // NAO PROVADO em TV: cada passo escreve "[janela] video: ...".
+#if NV_API9
+        const bool JANELA_VIDEO_PROPRIA = true;
+#else
+        const bool JANELA_VIDEO_PROPRIA = false;
+#endif
+        NuiWindow janelaVideo;
+        bool videoVisivel;
+
+        void CriaJanelaVideo(string porque)
+        {
+            if (!JANELA_VIDEO_PROPRIA || gl == null || erroNaTela || saindo || pausado) return;
+            try
+            {
+                var velha = janelaVideo;
+                if (velha != null)
+                {
+                    if (videoVisivel) return;
+                    if (video != null && video.TemPlayer)
+                    {
+                        velha.Show(); velha.Raise();
+                        try { gl.Show(); gl.Raise(); } catch { }
+                        Janela("video: janela propria invisivel com player aberto, so Show+Raise (" + porque + ") IsVisible=" + VisivelDali(velha));
+                        return;
+                    }
+                    janelaVideo = null;
+                    try { velha.Hide(); velha.Dispose(); } catch { }
+                    Janela("video: janela propria antiga descartada (" + porque + ")");
+                }
+                var j = new NuiWindow("nuvio-video", new NuiRect(0, 0, W, H), false);
+                j.BackgroundColor = NuiColor.Black;
+                videoVisivel = true;
+                try
+                {
+                    j.VisibilityChanged += (s, e) => { if (j == janelaVideo) videoVisivel = e.Visibility; Janela("video: janela propria visivel=" + e.Visibility); };
+                    j.KeyEvent += (s, e) => Tecla(e.Key, "video");
+                }
+                catch { }
+                j.Show();
+                janelaVideo = j;
+                try { gl.Show(); gl.Raise(); } catch (Exception e) { Janela("video: gl.Raise falhou " + e.GetType().Name + ": " + e.Message); }
+                string troca = video != null ? video.TrocaDisplay() : "sem video";
+                Janela("video: janela propria criada (" + porque + ") IsVisible=" + VisivelDali(j) + " player=" + troca);
+                var c = new NuiTimer(1000);
+                c.Tick += (s, e) =>
+                {
+                    Janela("video: 1 s depois de criar: janela video IsVisible=" + VisivelDali(j) + " evento=" + videoVisivel + " principal=" + principalVisivel + " gl=" + glVisivel + " pausado=" + pausado);
+                    return false;
+                };
+                c.Start();
+            }
+            catch (Exception e) { Janela("video: criar janela propria falhou " + e.GetType().Name + ": " + e.Message + " (fica na principal)"); janelaVideo = null; }
         }
 
         void SobeGlSePreciso(string porque)
@@ -892,7 +958,14 @@ namespace NuvioTpk
             Etapa("note resume" + Contagem() + " mainVisible=" + principalVisivel + (JanelaUnica ? " (glview)" : " glVisible=" + glVisivel));
             base.OnResume();
             reergueTentativa = 0;   // cada volta ao primeiro plano tem as suas 3
-            ReerguePrincipal("resume");
+            if (janelaVideo != null)
+            {
+                // Variante B ja ligada nesta sessao: nao volta a depender da principal.
+                var t = new NuiTimer(300);
+                t.Tick += (s, e) => { if (!videoVisivel) CriaJanelaVideo("resume"); else { try { gl?.Raise(); } catch { } Janela("video: resume, janela propria visivel"); } return false; };
+                t.Start();
+            }
+            else ReerguePrincipal("resume");
         }
 
         protected override void OnTerminate()
@@ -950,6 +1023,7 @@ namespace NuvioTpk
 #if NV_API11
             try { glView?.Hide(); } catch { }
 #endif
+            try { if (janelaVideo != null) { janelaVideo.Hide(); Janela("saida: janela de video escondida"); } } catch { }
             try { gl?.Hide(); Janela("saida: gl escondido"); } catch (Exception e) { Janela("saida: gl.Hide falhou " + e.GetType().Name + ": " + e.Message); }
             try { NuiWindow.Instance.Hide(); Janela("saida: principal escondida"); } catch (Exception e) { Janela("saida: principal.Hide falhou " + e.GetType().Name + ": " + e.Message); }
         }
