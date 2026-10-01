@@ -519,6 +519,19 @@ namespace NuvioTpk
             // Samsung. Medido na QE55QN95B (Tizen 6.5, api9), 1.6.1: todas as
             // sessoes terminam com "principal visivel=False" depois de
             // "appcontrol: sobe o gl". Sobe a principal e so entao o GL por cima.
+            //
+            // CANARIO (#195, QA55LS03B Tizen 6.5, 1.6.4 e canario-janela-tpk.2):
+            // Show()+Raise() NAO bastaram. Medido: depois de "principal reaberta"
+            // o VisibilityChanged da principal nunca volta a True na sessao
+            // inteira (o do GL volta), o video toca (posicao anda) e o furo
+            // abre — e a pessoa ve a tela da TV. Suspeita (NAO provada): a TV
+            // ICONIFICOU a principal (e a pausa ~2 s depois de todo arranque no
+            // 6.5); Show() numa janela iconificada nao a desiconifica (o DALi
+            // so emite visivel=True no OnIconifyChanged) e Raise() so muda a
+            // ordem. Window.Activate() e documentado "ate se estiver
+            // iconificada". Se 1 s depois ainda nao voltou, desiconifica pelo
+            // ecore_wl2 todas as janelas do processo. Cada passo vira
+            // "[janela] ..." para o proximo log dizer qual funcionou.
             if (!principalVisivel)
             {
                 try
@@ -526,11 +539,65 @@ namespace NuvioTpk
                     var w = NuiWindow.Instance;
                     w.Show();
                     w.Raise();
-                    Janela("principal reaberta (" + porque + ")");
+                    if (PRINCIPAL_ACTIVATE) w.Activate();
+                    Janela("principal reaberta (" + porque + ")" + (PRINCIPAL_ACTIVATE ? " +Activate" : "") + " IsVisible=" + VisivelDali(w));
+                    ConfereReabertura(porque);
                 }
                 catch (Exception e) { Janela("principal nao reabriu " + e.GetType().Name + ": " + e.Message); }
             }
             try { gl.Show(); gl.Raise(); } catch (Exception e) { Etapa("note raise failed " + e.GetType().Name + ": " + e.Message); }
+        }
+
+        // PRINCIPAL_ACTIVATE / PRINCIPAL_DESICONIFICA: ver o CANARIO acima. Fora
+        // da API8 (6.0 funciona; la o SobeGl so roda no vigia de quadro parado).
+#if NV_API8
+        const bool PRINCIPAL_ACTIVATE = false, PRINCIPAL_DESICONIFICA = false;
+#else
+        const bool PRINCIPAL_ACTIVATE = true, PRINCIPAL_DESICONIFICA = true;
+#endif
+        [DllImport("libecore_wl2.so.1")] static extern void ecore_wl2_window_iconified_set(IntPtr win, byte iconified);
+        bool conferindo;
+
+        static string VisivelDali(NuiWindow w)
+        {
+            try { return w.IsVisible().ToString(); } catch (Exception e) { return "?(" + e.GetType().Name + ")"; }
+        }
+
+        // 1 s depois de reabrir: diz se a principal voltou e, se nao, tenta o
+        // ecore_wl2 (uma vez por reabertura) e confere de novo.
+        void ConfereReabertura(string porque)
+        {
+            if (conferindo) return;
+            conferindo = true;
+            int passo = 0;
+            try
+            {
+                var t = new NuiTimer(1000);
+                t.Tick += (s, e) =>
+                {
+                    passo++;
+                    var w = NuiWindow.Instance;
+                    Janela("principal " + passo + " s depois de reabrir (" + porque + "): evento=" + principalVisivel + " IsVisible=" + VisivelDali(w) + " pausado=" + pausado);
+                    if (principalVisivel || pausado || saindo || passo >= 2 || !PRINCIPAL_DESICONIFICA) { conferindo = false; return false; }
+                    int n = 0;
+                    try
+                    {
+                        for (uint id = 0; id < 64; id++)
+                        {
+                            IntPtr j = ecore_wl2_window_find(id);
+                            if (j == IntPtr.Zero) continue;
+                            ecore_wl2_window_iconified_set(j, 0);
+                            n++;
+                        }
+                        Janela("principal: ecore_wl2_window_iconified_set(false) em " + n + " janela(s) wl2");
+                    }
+                    catch (Exception x) { Janela("principal: desiconificar falhou " + x.GetType().Name + ": " + x.Message); }
+                    try { gl?.Raise(); } catch { }
+                    return true;
+                };
+                t.Start();
+            }
+            catch (Exception e) { conferindo = false; Janela("principal: conferencia falhou " + e.GetType().Name + ": " + e.Message); }
         }
 
         void SobeGlSePreciso(string porque)
