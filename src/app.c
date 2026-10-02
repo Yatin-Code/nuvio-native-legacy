@@ -52,6 +52,7 @@
 #include "agendaviso.h"
 #include "perfil.h"
 #include "salvos.h"
+#include "seek.h"
 #include "recomenda.h"
 #include "recenviar.h"
 #include "pessoas.h"
@@ -1134,6 +1135,11 @@ static void guiaComCanalNoAr(void) {
 static int homePronta;
 
 int app_iniciar(const char *dirArte) {
+  // A POLITICA DO AVANCO do player e lida do ambiente (seek.h), antes de tudo:
+  // o perfil precisa estar valido antes que a primeira reproducao ocorra, e nao
+  // ha nada aqui que dependa de tela ou de rede. Sem NV_SEEK_PROFILE no
+  // ambiente, seek_iniciar() deixa a politica de AVANCO como ela esta no 1.6.x.
+  seek_iniciar();
   diagnostico_recuperar_checkpoint();
   homePronta = home_iniciar(dirArte);
   novidades148_dir(dirArte);
