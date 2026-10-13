@@ -5357,7 +5357,11 @@ static void desenhaElenco(float x, float y, int c, float f, float a) {
     GfxRect info = {x-12,top,NV_DETP_EL_W+24,76};
     gfx_cor(info,18.0f/info.h,.19f,.21f,.23f,.6f*f*a);
   }
-  GfxRect av = { x + (NV_DETP_EL_W-NV_DETP_EL_AVATAR)*.5f, y, NV_DETP_EL_AVATAR, NV_DETP_EL_AVATAR };
+  // Avatar ALINHADO A ESQUERDA do card (P3): 140 em x, na medida do web
+  // (.movie-cast-card, ver NV_DETP_EL_* em detail.h). O leiaute Apple
+  // (DINAMICA) mantem o centrado, que e o desenho dele.
+  GfxRect av = { x + (epApple() ? (NV_DETP_EL_W-NV_DETP_EL_AVATAR)*.5f : 0.0f),
+                 y, NV_DETP_EL_AVATAR, NV_DETP_EL_AVATAR };
   // Foco da Home (focoprof.h): anel so com o ajuste ligado, senao o avatar
   // cresce; a profundidade segue o ajuste de Elenco.
   if (epApple()) { if (ajustes_borda_foco() && f > 0.01f) gfx_anel(av,.5f,1.5f,1,1,1,.22f*f*a); }
@@ -6724,7 +6728,8 @@ static void desenhaEsqueletoElenco(float a) {
     txt_desenhar_alpha(lc, NV_DETP_X, y - lc.h - NV_DETF_CAB_GAP, a); }
   for (int c = 0; c < 6; c++) {
     float x = NV_DETP_X + c * NV_DETP_EL_PASSO;
-    GfxRect av = { x + (NV_DETP_EL_W-NV_DETP_EL_AVATAR)*.5f, y, NV_DETP_EL_AVATAR, NV_DETP_EL_AVATAR };
+    GfxRect av = { x + (epApple() ? (NV_DETP_EL_W-NV_DETP_EL_AVATAR)*.5f : 0.0f),
+                     y, NV_DETP_EL_AVATAR, NV_DETP_EL_AVATAR };
     GfxRect nome = { x, y + NV_DETP_EL_AVATAR + NV_DETP_EL_NOME_DY + 4.0f,
                      c % 2 ? 150.0f : 184.0f, 20.0f };
     GfxRect papel = { x, nome.y + NV_DETP_EL_PAPEL_DY, 110.0f, 16.0f };

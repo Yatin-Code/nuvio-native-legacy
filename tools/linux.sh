@@ -34,8 +34,12 @@ done < "$ENVF"
 read -r -a DEP_CFLAGS <<< "$(pkg-config --cflags "${DEPS[@]}")"
 read -r -a DEP_LIBS <<< "$(pkg-config --libs "${DEPS[@]}")"
 mkdir -p build/linux
+# NUVIO_EXTRA_CFLAGS: bandeiras a mais para uma build de teste (ex.
+# NUVIO_EXTRA_CFLAGS="-DNV_EVIDENCIA_MOLA" bash tools/linux.sh --build),
+# sem tocar no .sh — mesmo padrao de tools/arm.sh. Nunca definido nas
+# builds de release.
 "$CC" src/*.c src/dts/*.c -Isrc -o build/linux/nuvio-native-legacy -O1 -g \
-  "${DEFINES[@]}" "${DEP_CFLAGS[@]}" "${DEP_LIBS[@]}" -ldl -pthread -lm
+  "${DEFINES[@]}" "${DEP_CFLAGS[@]}" ${NUVIO_EXTRA_CFLAGS:-} "${DEP_LIBS[@]}" -ldl -pthread -lm
 echo "Linux UI build: $PWD/build/linux/nuvio-native-legacy"
 if [ "$BUILD_ONLY" = 1 ]; then exit 0; fi
 

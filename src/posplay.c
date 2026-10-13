@@ -43,11 +43,15 @@
 #define PP_CARD_W  212.0f
 #define PP_CARD_H  318.0f
 #define PP_GAP      24.0f
-#define PP_MAX       8    // quantos cartazes cabem na ilha de 1728 (182 + 30)
+#define PP_MAX       8    // P5: quantos cartazes cabem na ilha de 1812 (182 + 30)
 #define PP_PAD      32.0f
 #define PP_ROTULO_H 44.0f
 // Cartao do proximo episodio, no molde do de episodios.c (thumb 184x130),
 // ampliado para a distancia de quem esta deitado no sofa.
+// P5 (auditoria): o cartao oficial e um canto W420dp r14 pad 10x9/10x6
+// (-> 840px r28) com thumb 112x64 r9 (-> 224x128 r18). A ilha Glass abaixo e
+// intencional (mockup aprovado em 03/10, mesma janela do cartao antigo de
+// ofertaProximo): trocar o formato e decisao de design, adiada — ver P5.
 #define PP_EP_W     980.0f
 #define PP_EP_H     260.0f
 #define PP_EP_PAD    18.0f
@@ -283,6 +287,9 @@ void posplay_atualizar(float dt, Uint32 agora, double posSeg, double durSeg,
   // tem capitulo nenhum para ler.
   double creditosSeg = video_creditos();
   if (creditosSeg <= 1.0) creditosSeg = intro_creditos_seg();
+  // P5 (movimento): o deslize do cartao e NV_MOLA_TELA 9.0 (alvo oficial overlay400),
+  // k CONGELADO (nao recalibrar pelo wall-time sob llvmpipe, ver layout.h).
+  // Mapa oficial: entrada deslize 260ms (offset metade) + fade 220ms, saida 200/160ms.
   anim = anim_mola(anim, visivel ? 1.0f : 0.0f, dt, NV_MOLA_TELA);
   // A CADA QUADRO, e nao so na abertura do painel (#190): com o cartao no ar o
   // `idx` guardado envelhecia junto com o catalogo.
@@ -506,7 +513,7 @@ void posplay_desenhar(Uint32 agora, float baseY) {
   ESCALA_FIM();
 }
 static void posplay_desenharCorpo_(Uint32 agora, float baseY) {
-  float a = anim, x = 96.0f;
+  float a = anim, x = 54.0f;   // P5: margem lateral (end 26-28dp -> 52-56px)
   (void)baseY;
   if (a < 0.01f) return;
   if (visivel) ponteiro_alvo(0, 0, NV_TELA_W, NV_TELA_H, NULL, NULL, 0, 0);   // anteparo
@@ -585,7 +592,7 @@ static void posplay_desenharCorpo_(Uint32 agora, float baseY) {
   // FILME: os relacionados que o Trakt ja deu ao abrir o titulo.
   { int n = extras_n_relacionados(), i;
     float sobe = (1.0f - a) * 20.0f;
-    GfxRect ilha = { x, NV_TELA_H - 444.0f + sobe, NV_TELA_W - 192.0f, 444.0f - 40.0f };   // 636 em 1080
+    GfxRect ilha = { x, NV_TELA_H - 444.0f + sobe, NV_TELA_W - 108.0f, 444.0f - 40.0f };   // 636 em 1080
     float y = ilha.y + 26.0f, cx;
     if (n > PP_MAX) n = PP_MAX;
     plrui_material(ilha, 36.0f, 0, a);

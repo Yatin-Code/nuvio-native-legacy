@@ -416,7 +416,12 @@
 // exatamente o defeito que apareceu na primeira tentativa.
 #define NV_DESTAQUE_W    419.0f
 #define NV_CW_PAD          18.0f
-#define NV_CW_BAR_H         4.0f
+// Barra de progresso: 8px = token progress 4dp x 2 (paridade P1; era 4.0f, o
+// valor em dp usado como px). No canvas de 1080p 1dp = 2px — a mesma conta do
+// raio do cartaz (12dp x 2 = 24px, raioDe em home.c). Mapa de tracos P1: fino
+// 1.5dp -> 3px, medio/foco 2dp -> 4px (NV_ANEL_FOCO), progresso 4dp -> 8px.
+// O desenho multiplica por esc, entao a barra engrossa junto com o foco.
+#define NV_CW_BAR_H         8.0f
 #define NV_CW_BAR_BOTTOM   10.0f
 #define NV_CW_BADGE_PAD_X  14.0f
 #define NV_CW_BADGE_PAD_Y   8.0f
@@ -567,7 +572,7 @@
 // solidos de branco puro, sem rampa, por fora da caixa do elemento. Vale para
 // card de home, card de episodio, botao de detalhe e tecla de teclado — um
 // numero so. NV_DETW_ANEL ja era 4 e so era aplicado no detalhe.
-#define NV_ANEL_FOCO      4.0f
+#define NV_ANEL_FOCO      4.0f   // P1: token medio/foco 2dp x 2; sem mudanca (cartoes/posters/campos; botoes = fill-acento sem anel)
 
 // Area util explicita da home: a rail pode variar, mas o texto e o foco nunca
 // encostam na safe area direita.
@@ -695,9 +700,19 @@ extern float nv_cor_fundo_viva[3];   // corviva.c
 // aqui vinha do HIG do tvOS, nao desta interface: na referencia os dois lados
 // levam o mesmo tempo, e com tempos diferentes existe um instante com DOIS
 // aneis na tela, que a referencia nunca mostra.
-#define NV_MOLA_FOCO     25.0f    // entrando no foco  (95% em 120ms)
-#define NV_MOLA_DESFOCO  25.0f    // saindo dele       (mesmo tempo: ver acima)
-#define NV_MOLA_SCROLL    8.0f
+// P1 (paridade, tokens globais de movimento). Alvo OFICIAL de cada familia —
+// a tween que a mola reimplementa, para conferir duracao na referencia:
+// FOCO/DESFOCO = fast180, SCROLL = medium350, MOLA2_SCROLL = slow450,
+// TELA = overlay400, PAGINA = hero450 (tabela completa: ver cada define).
+//
+// NAO MEXER NOS k. O lane de evidencia (docs/parity-evidencia.md) mostrou
+// estiramento de wall-time sob llvmpipe: o assentamento MEDIDO no emulador nao
+// bate com o alvo, e recalibrar o k pelo medido quebraria a TV de verdade. O k
+// e o instrumento calibrado na referencia; o alvo e a intencao. Pelo mesmo
+// motivo NV_HOLD_MS continua 700 (fix de controle remoto; NAO baixar p/ 360ms).
+#define NV_MOLA_FOCO     25.0f    // entrando no foco  (95% em 120ms; alvo fast180)
+#define NV_MOLA_DESFOCO  25.0f    // saindo dele       (mesmo tempo: ver acima; alvo fast180)
+#define NV_MOLA_SCROLL    8.0f    // alvo medium350
 // Quanto a pagina de titulo espera, assentada e no topo, antes de trocar a
 // arte pelo trailer mudo (trailer.h). Tempo de ler o titulo e a sinopse.
 #define NV_TRAILER_ESPERA_MS 2500
@@ -732,14 +747,14 @@ extern float nv_cor_fundo_viva[3];   // corviva.c
 // faz a curva inteira bater, porque nessa mola a cauda e so metade do ajuste:
 // p(t)=1-(1+wt)e^-wt cruza a metade em 1,678/w = 146 ms com w=11,5, e o medido
 // foi ~145 ms. Ver anim_mola2() em anim.h para o porque da troca de mola.
-#define NV_MOLA2_SCROLL  11.5f
-#define NV_MOLA_TELA      9.0f
+#define NV_MOLA2_SCROLL  11.5f   // alvo slow450
+#define NV_MOLA_TELA      9.0f    // alvo overlay400
 // Abertura da PAGINA de secoes do detalhe. MEDIDO na folha do app web:
 // `.series-detail-shell.detail-scrolled .series-detail-backdrop` vai a
 // `opacity: 0.15` em 0.8s cubic-bezier(0.4, 0, 0.2, 1). exp(-3.8*0.8) = 0.05,
 // ou seja 95% do caminho em 800ms. Com NV_MOLA_TELA (9.0) a mola assenta em
 // ~330ms e a arte apaga num piscar, que e menos da metade do tempo do web.
-#define NV_MOLA_PAGINA    3.8f
+#define NV_MOLA_PAGINA    3.8f   // alvo hero450
 
 // Tela de detalhe: um CARTAO da arte cobrindo quase tudo, com a home aparecendo
 // pela moldura. O voo do card usa NV_MOLA_TELA, mais lenta que a do foco de

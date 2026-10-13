@@ -33,7 +33,7 @@
 // segmentado das temporadas, EP_VIS linhas de EP_ROW (still 240x135 com o
 // progresso e o disco de assistido sobre ela) e o rodape com a posicao e a
 // dica do "Segure OK". O menu de visto continua MODAL, dentro da ilha.
-#define EP_W     820.0f
+#define EP_W     720.0f   // P5: sidePanel oficial 360dp -> 720px (1dp = 2px no canvas 1080p)
 #define EP_PAD_X  18.0f
 #define EP_PAD_Y  22.0f
 #define EP_TIT_H  64.0f

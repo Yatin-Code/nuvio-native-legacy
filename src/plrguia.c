@@ -34,9 +34,9 @@ static void corpo(GfxRect c, float a, void *u) {
     TxtLinha lr, lg;
     if (ag <= 0.004f) continue;
     if (i) gfx_cor((GfxRect){ c.x + LADO, yl, c.w - 2.0f * LADO, 1.0f }, 0.0f, 1, 1, 1, 0.07f * ag);
-    lr = txt_linha_corta(TXT_G22M, parental_rotulo(i), 243, 242, 239, 255, c.w - 2.0f * LADO - 160.0f);
-    lg = forte ? txt_linha(TXT_ILHA_SUB, gv, 240, 185, 74, 255)
-               : txt_linha(TXT_ILHA_SUB, gv, 243, 242, 239, 140);
+    lr = txt_linha_corta(TXT_PG_ROTULO, parental_rotulo(i), 243, 242, 239, 255, c.w - 2.0f * LADO - 160.0f);
+    lg = forte ? txt_linha(TXT_PG_GRAV, gv, 240, 185, 74, 255)
+               : txt_linha(TXT_PG_GRAV, gv, 243, 242, 239, 140);   // P1.5: .player-parental-severity 22
     txt_desenhar_alpha(lr, c.x + LADO, yl + LIN_H * 0.5f - (float)lr.h * 0.5f, ag);
     txt_desenhar_alpha(lg, c.x + c.w - LADO - (float)lg.w, yl + LIN_H * 0.5f - (float)lg.h * 0.5f, ag);
   }

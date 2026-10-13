@@ -8,6 +8,59 @@
 #define NV_ANIM_H
 #include <math.h>
 
+// EVIDENCE-Affordance P0.5, remove before merge
+//
+// Settle-time logging for the motion-evidence gate: for each spring family,
+// measures the wall time from a retarget until 95 percent of the initial
+// distance is covered, and prints it on stdout -- the same channel as
+// captura: (capturaSeSolicitado in src/main.c), so it lands in the app log
+// next to the frame captures. Opt-in via NV_SHOT_HOOKS (existing test/shot
+// flag) or NV_EVIDENCIA_MOLA; no release script defines either, so the
+// release path is untouched. Map k/w to constant: 25.0 = NV_MOLA_FOCO and
+// NV_MOLA_DESFOCO (~120 ms), 8.0 = NV_MOLA_SCROLL, 11.5 = NV_MOLA2_SCROLL,
+// 9.0 = NV_MOLA_TELA, 3.8 = NV_MOLA_PAGINA (~800 ms).
+#if defined(NV_SHOT_HOOKS) || defined(NV_EVIDENCIA_MOLA)
+#include <stdio.h>
+#include <time.h>
+
+#define ANIM_EVIDENCIA_N 16
+
+typedef struct { const void *tok; float k; float alvo; float dist0; double t0; int ativo; } AnimEvidencia;
+
+static inline double anim_evidencia_agora_ms(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+// EVIDENCE-Affordance P0.5, remove before merge
+static inline void anim_evidencia_passo(AnimEvidencia *tab, const void *tok, const char *tag,
+                                        float k, float atual, float alvo) {
+  float dist = atual > alvo ? atual - alvo : alvo - atual;
+  double agora = anim_evidencia_agora_ms();
+  int i, livre = -1;
+  for (i = 0; i < ANIM_EVIDENCIA_N; i++) {
+    if (tab[i].ativo && tab[i].tok == tok && tab[i].k == k && tab[i].alvo == alvo) break;
+    if (!tab[i].ativo && livre < 0) livre = i;
+  }
+  if (i < ANIM_EVIDENCIA_N) {
+    if (dist > tab[i].dist0 * 1.5f) { tab[i].dist0 = dist; tab[i].t0 = agora; return; }
+    if (agora - tab[i].t0 > 5000.0) { tab[i].ativo = 0; return; }
+    if (dist <= tab[i].dist0 * 0.05f) {
+      printf("mola-evidencia: %s k=%.1f settle95=%.0fms (dist0=%.1f)\n",
+             tag, (double)k, agora - tab[i].t0, (double)tab[i].dist0);
+      fflush(stdout);
+      tab[i].ativo = 0;
+    }
+    return;
+  }
+  if (livre >= 0 && dist > 0.5f) {
+    tab[livre].tok = tok; tab[livre].k = k; tab[livre].alvo = alvo;
+    tab[livre].dist0 = dist; tab[livre].t0 = agora; tab[livre].ativo = 1;
+  }
+}
+#endif
+
 // POLITICA DE ANIMACOES REDUZIDAS, num lugar so.
 //
 // Metade das telas (busca, biblioteca, detalhe, menu, player, guia, avisos...)
@@ -21,9 +74,19 @@
 // os testes linkam subconjuntos de src/ e nao pode faltar o simbolo em nenhum.
 __attribute__((weak)) int anim_politica_reduzida = 0;
 
+// P1: cada familia de mola tem um alvo OFICIAL (tabela em layout.h, bloco
+// NV_MOLA_*: FOCO/DESFOCO = fast180, SCROLL = medium350, MOLA2_SCROLL =
+// slow450, TELA = overlay400, PAGINA = hero450). Os k/w abaixo sao o
+// instrumento calibrado na referencia — nao recalibrar pelo wall-time medido
+// sob llvmpipe (ver docs/parity-evidencia.md).
 // Independente de framerate: usa exp(-k*dt), nao um passo fixo por quadro.
 static inline float anim_mola(float atual, float alvo, float dt, float rigidez) {
   if (anim_politica_reduzida) return alvo;
+  // EVIDENCE-Affordance P0.5, remove before merge
+#if defined(NV_SHOT_HOOKS) || defined(NV_EVIDENCIA_MOLA)
+  { static AnimEvidencia tab[ANIM_EVIDENCIA_N];
+    anim_evidencia_passo(tab, __builtin_return_address(0), "mola1", rigidez, atual, alvo); }
+#endif
   return atual + (alvo - atual) * (1.0f - expf(-rigidez * dt));
 }
 static inline float anim_clamp(float v, float lo, float hi) {
@@ -62,6 +125,11 @@ static inline float anim_mola2(float *v, float atual, float alvo, float dt, floa
   if (anim_politica_reduzida) { *v = 0.0f; return alvo; }
   if (dt <= 0.0f || w <= 0.0f) return atual;
   if (dt > 0.05f) dt = 0.05f;
+  // EVIDENCE-Affordance P0.5, remove before merge
+#if defined(NV_SHOT_HOOKS) || defined(NV_EVIDENCIA_MOLA)
+  { static AnimEvidencia tab[ANIM_EVIDENCIA_N];
+    anim_evidencia_passo(tab, __builtin_return_address(0), "mola2", w, atual, alvo); }
+#endif
   if ((alvo - atual) * (*v) < 0.0f) *v = 0.0f;
   float x = atual - alvo;
   float e = expf(-w * dt);

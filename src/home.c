@@ -2953,10 +2953,14 @@ void home_atualizar(float dt, Uint32 agora) {
     expAbre = 0.0f; expFileira = expColuna = -1;
   }
 
+  // P2: APAGAR -> VAZIO -> CORTE SECO (NV_HERO_FADE_MS 220ms fade-out +
+  // hard cut-in, SEM crossfade — ver medida em layout.h). A arte nova fica
+  // escondida (heroEntra 0) enquanto a velha apaga, e entra de uma vez quando
+  // o esvanecimento termina; sem isso as duas artes se misturam por ~220ms.
   if (heroSai > 0.0f) {
     heroSai -= dt * (1000.0f / NV_HERO_FADE_MS);
     if (heroSai < 0.0f) heroSai = 0.0f;
-    heroEntra = motionReduzido ? 1.0f : 1.0f - heroSai;
+    heroEntra = motionReduzido ? 1.0f : (heroSai <= 0.0f ? 1.0f : 0.0f);
   } else {
     heroEntra = 1.0f;
   }
@@ -3235,7 +3239,8 @@ static HeroCopyLayout heroCopyLayout(float base, float hSin, int hasMeta,
 static float heroPontosPos = -1.0f;
 static Uint32 heroPontosT;
 static void desenhaPontosHero(float xDir, float yc, int n, int atual, float a) {
-  const float d = 8.0f, gap = 10.0f, larga = 26.0f, seta = 22.0f, folga = 14.0f;
+  // P2: pontos 9px gap 14 (NV_HERO_DOT/GAP; era 8/10 hardcoded, tokens sem uso).
+  const float d = NV_HERO_DOT, gap = NV_HERO_DOT_GAP, larga = 26.0f, seta = 22.0f, folga = 14.0f;
   Uint32 agora = SDL_GetTicks();
   float dt = heroPontosT ? (float)(agora - heroPontosT) / 1000.0f : 0.0f;
   int m, ini, i;

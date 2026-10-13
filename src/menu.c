@@ -118,6 +118,7 @@ static float menuEscala(void) {
 // pouco do alvo e volta. Na Moderna o painel "pula" como a ilha do relogio; na
 // Padrao ele e uma gaveta presa na borda e anda na mesma frequencia, criticamente
 // amortecido (sem repique contra a borda).
+// P2 (comment-map only, k congelado): expansao da sidebar = emphasized ~345ms oficial; w=10/z=0.72 e o instrumento calibrado aqui (~NV_MOLA_TELA 9.0). Rotulos in/out 125/145ms oficiais = NV_MOLA_FOCO 25 (entrada NV_MOLA_FOCO, saida NV_MOLA_MENU_DESFOCO 60). 
 #define NV_MENU_MOLA_W    10.0f
 #define NV_MENU_MOLA_Z     0.72f
 

@@ -105,8 +105,8 @@ typedef enum {
   TXT_G23B,   // linha do menu de visto           23 / 600
   TXT_G26B,   // tempo do Seekr, "Abrindo fonte"  26 / 600-700
   TXT_G28B,   // titulo do lembrete               28 / 700
-  TXT_G30B,   // "T1 E3" do OSD                   30 / 600
-  TXT_G30M,   // "· The Head" do OSD              30 / 500
+  TXT_G30B,   // "T1 E3" do OSD                   30 / 600 (P1.5: OSD do player usa TXT_PLR_CORPO 32)
+  TXT_G30M,   // "· The Head" do OSD              30 / 500 (P1.5: OSD do player usa TXT_PLR_CORPO 32)
   TXT_G52B,   // programa no OSD do canal         52 / 700
   // REGISTRO DO APP NO GLASS UI (logs-mockup.html, 03/10). TXT_MONO* sao a
   // JetBrains Mono embarcada (fonts/JetBrainsMonoNL-*.ttf, a variante SEM ligaduras: o "->" do log tem de sair como dois caracteres): SO as linhas do log

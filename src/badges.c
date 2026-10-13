@@ -221,7 +221,7 @@ float badges_desenhar_escura(uint64_t mask,float x,float y,float maxW,float h,fl
 float badges_desenhar_tom(uint64_t mask,float x,float y,float maxW,float h,float r,float g,float b,float a) {
   float start=x;int c=(int)(r*255.0f+.5f);
   for(size_t i=0;i<NB;i++)if(mask&(UINT64_C(1)<<i)) {
-    GLuint t=art[i].image[0]?tex_obter_larg(art[i].image,128):0;
+    GLuint t=art[i].image[0]?tex_obter_larg(art[i].image,256):0;   // P4: pre-upscale 2x (era 128)
     float aspect=art[i].image[0]?tex_aspecto(art[i].image):0,w;
     if(t&&aspect>0){w=h*aspect;if(w>160)w=160;if(x+w>start+maxW)break;
       float height=w/aspect;gfx_rect((GfxRect){x,y+(h-height)*.5f,w,height},t,GFX_MARCA,0,0,0,0,r,g,b,a);}
@@ -301,7 +301,7 @@ float badges_desenhar_selos(uint64_t mask, float x, float y, float maxW, float h
   float start = x;
   size_t i;
   for (i = 0; i < NB; i++) if ((mask & (UINT64_C(1) << i)) && art[i].image[0]) {
-    GLuint t = tex_obter_larg(art[i].image, 128);
+    GLuint t = tex_obter_larg(art[i].image, 256);   // P4: pre-upscale 2x (era 128)
     float aspect = tex_aspecto(art[i].image), w = aspect > 0 ? h * aspect : 80;
     float r, g, b, br, bg, bb, l;
     GfxRect p;

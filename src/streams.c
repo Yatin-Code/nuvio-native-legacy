@@ -54,11 +54,15 @@
 // A ILHA DO MOCKUP APROVADO (Glass UI, design/glass-ilha "Fontes", e o
 // player-mockup de 03/10): 820 de largura, a 40 das bordas, raio 36 — a
 // mesma folha dos Episodios no player.
+// P4 (paridade, folha = ilha): geometria nos tokens NV_FOLHA_* (layout.h).
+// Oficial sidePanel maxW 420dp r20 pad20 (x2 = 840/40/40px) mapeado na ilha:
+// margem 24, pad 40, raio 28. W 820 MANTIDO (nao 840): e a mesma folha dos
+// Episodios no player, e as duas dividem a ilha (ver cabecalho acima).
 #define FOLHA_W        820.0f
-#define FOLHA_MARGEM    40.0f
-#define FOLHA_RAIO_IL   36.0f
-#define FOLHA_PAD_E     48.0f  // da borda da folha ao cartao da linha
-#define FOLHA_PAD_D     56.0f
+#define FOLHA_MARGEM    NV_FOLHA_MARGEM   // P4: 24 (era 40)
+#define FOLHA_RAIO_IL   NV_FOLHA_RAIO     // P4: 28 (era 36)
+#define FOLHA_PAD_E     NV_FOLHA_PAD      // P4: 40 (era 48)
+#define FOLHA_PAD_D     NV_FOLHA_PAD      // P4: 40 (era 56)
 #define FOLHA_TXT       26.0f  // do cartao ao texto
 // NO PLAYER A FOLHA NASCE DA ILHA DO RELOGIO (dono, 03/10: "no player o
 // componente do source tem que sair da ilha do relogio"), como Audio,
@@ -86,10 +90,12 @@ static void medirCabecalho(void);
 #define FOLHA_MARCA_H   30.0f  // "SUA ESCOLHA ANTERIOR" / "REPRODUZINDO AGORA"
 #define FOLHA_ARQ_H     34.0f  // nome do arquivo, so na linha em foco
 #define FOLHA_FIT_H     32.0f  // StreamFit: evidencia da conexao, so na linha em foco
-#define FOLHA_LINHA_GAP  4.0f
+// P4: vao entre linhas = NV_LINHA_VAO (12; oficial 16dp, fork 12 verificado).
+#define FOLHA_LINHA_GAP  NV_LINHA_VAO   // P4: era 4.0f
 #define FOLHA_SEC_H     64.0f  // cabecalho "4K  ULTRA HD ... 3 fontes"
 #define FOLHA_SEC_GAP   26.0f
-#define FOLHA_RAIO      22.0f
+// P4: raio da linha 18px = NV_LINHA_RAIO_PX (era 22).
+#define FOLHA_RAIO      NV_LINHA_RAIO_PX
 #define FOLHA_SELO_H    24.0f  // logos menores (dono, 02/10: "ficaram muito grande")
 #define FOLHA_AUDIO_W  60.0f
 #define FOLHA_AUDIO_N   8
@@ -2891,6 +2897,11 @@ void stream_folha_atualizar(float dt, Uint32 agora) {
   medirCabecalho();
   folhaGeometria();
   (void)agora;
+  // P4 (comment-map only, k congelados): fades oficiais 300/260/120ms vivem
+  // nas molas existentes — abertura/expansao da linha = NV_MOLA_TELA (alvo
+  // overlay400), rolagem = NV_MOLA2_SCROLL (alvo slow450), foco = NV_MOLA_FOCO
+  // (alvo fast180, 95 por cento em 120ms). Linha da fonte sem escala (1.0);
+  // acao e chip sem escala: foco pela pilula de acento (P1 sem anel), nao 1.05.
   anim=anim_mola(anim,aberta?1:0,dt,NV_MOLA_TELA);
   // FOLHA FECHADA E JA FORA DA TELA: nada a montar. Esta funcao roda todo
   // quadro em qualquer tela (app.c), e montar + stream_automatico percorrem
@@ -2954,6 +2965,8 @@ static void desenharOnde(GfxRect r, float tx, float tr, const OndeVer *o, int se
   const int c = selected ? 255 : 205;
   const int cd = selected ? 180 : 130;
   const int cp = selected ? 150 : 110;
+  // P4: logo quadrada de servico 56 (sem thumb 224x128 aqui: a linha da fonte
+  // nao tem arte, so logos; verificado, sem mudanca).
   const float side = 56.0f;   // era 40 (dono, 05/10: "muito pequeno"); cabe nos 112 da linha
   float colW, cy = r.y + 16.0f;
   const char *action;
@@ -2996,7 +3009,7 @@ static float desenharSelosPacote(const Stream *s, float x, float y, float maxW, 
     // A resolucao e o grupo da folha (e o titulo da fonte): fora da fileira.
     if (semResolucao && f->resolucao) continue;
     if (f->imagem[0]) {
-      GLuint t = tex_obter_larg(f->imagem, 128);
+      GLuint t = tex_obter_larg(f->imagem, 256);   // P4: pre-upscale 2x dos logos (era 128)
       float asp = t ? tex_aspecto(f->imagem) : 0.0f;
       if (t && asp > 0.01f && f->arte != SELO_ARTE_PACOTE) {
         // PACOTES EMBUTIDOS (selospacote.h). Padrao: a arte e branca e a forma
@@ -3095,8 +3108,10 @@ static float caixaAlta(const char *s, int r, int g, int b, float x, float y, flo
 // acento com a tinta calculada, e `ligado` (o filtro MP4 ativo) num acento a
 // 22% com texto no acento: estado, nao foco. Com icone E rotulo (o filtro em
 // foco na fileira compacta), o icone vai a esquerda do rotulo.
-#define FOLHA_CHIP_H 56.0f
-#define FOLHA_CHIP_GAP 10.0f
+// P4: chip H56 = NV_CTRL_H (mantido); vao 12 = NV_CTRL_VAO (era 10).
+// Foco do chip = pilula cheia no acento (chipFolha); regra P1 sem anel.
+#define FOLHA_CHIP_H NV_CTRL_H
+#define FOLHA_CHIP_GAP NV_CTRL_VAO
 #define FOLHA_LOGO_H 36.0f   // logo do titulo na linha: caixa da altura do nome
 #define FOLHA_LOGO_VAO 12.0f // folga da logo ate a fileira de selos (dono, 05/10: "grudada")
 #define FOLHA_LOGO_W 220.0f
@@ -3114,7 +3129,7 @@ static void chipFolha(GfxRect r, const char *rot, float rotW, const char *icone,
   else gfx_cor(r, .5f, .14f, .148f, .17f, a);
   cr = cg = cb = c;
   if (!foco && ligado) { cr = (int)(ar * 255); cg = (int)(ag * 255); cb = (int)(ab * 255); }
-  float g = r.h * .42f;
+  float g = r.h * .5f;   // P4: icone 28px em H56 = 14dp x 2 (era .42 = 23.5)
   if (icone && !rot) {
     gfx_icone((GfxRect){ r.x + (r.w - g) * .5f, r.y + (r.h - g) * .5f, g, g }, icone,
               cr / 255.0f, cg / 255.0f, cb / 255.0f, a);
@@ -3219,6 +3234,8 @@ static void stream_folha_desenharCorpo_(Uint32 agora) {
       plrilha_pedir(&p); }
     return;
   }
+  // P4: veu preto 30 por cento vidro / 42 por cento solido (abaixo, sem
+  // mudanca), sem contorno, shader com dither (gfx_cor passa por nv_dither).
   float x=NV_TELA_W-FOLHA_W-FOLHA_MARGEM+(1-anim)*(FOLHA_W+FOLHA_MARGEM);
   // A FOLHA E UMA ILHA (dono, 02/10, mockups "Glass UI — ilha"): flutua a
   // NV_FOLHA_MARGEM das tres bordas, raio NV_FOLHA_RAIO, sombra curta e uma
@@ -3382,7 +3399,7 @@ static void corpoFolha(float x, float w, float anim, Uint32 agora, int ilha) {
       OndeVer o;
       if (ptr) ponteiro_alvo(r.x,r.y,r.w,r.h,ponteiroFolhaLinha,NULL,row,0);
       if (sel) {
-        if (ajustes_vidro()) gfx_cor(r,FOLHA_RAIO/h,1,1,1,.12f*anim);
+        if (ajustes_vidro()) gfx_cor(r,FOLHA_RAIO/h,1,1,1,.12f*anim);   // P4: ROW em foco = superficie um degrau mais clara (branco 12-14 por cento; solido .17/.176/.204), sem acento e sem contorno
         else gfx_cor(r,FOLHA_RAIO/h,.17f,.176f,.204f,anim);
       }
       if (ondever_item(alvoPedido,-i-2,&o)) desenharOnde(r,tx,tr,&o,sel,anim);
@@ -3397,8 +3414,9 @@ static void corpoFolha(float x, float w, float anim, Uint32 agora, int ilha) {
     }
     if(sel){
       // Foco so pela superficie clara: o contorno saiu a pedido do dono (02/10).
+      // P4: ROW em foco = superficie clara, sem acento e sem contorno (verificado, sem mudanca).
       // No solido a superficie e um cinza opaco um degrau acima do miolo.
-      if (ajustes_vidro()) gfx_cor(r,FOLHA_RAIO/h,1,1,1,.12f*anim);
+      if (ajustes_vidro()) gfx_cor(r,FOLHA_RAIO/h,1,1,1,.12f*anim);   // P4: ROW em foco = superficie um degrau mais clara (branco 12-14 por cento; solido .17/.176/.204), sem acento e sem contorno
       else gfx_cor(r,FOLHA_RAIO/h,.17f,.176f,.204f,anim);
     }
     // COLUNA DA DIREITA: tamanho grande, addon embaixo. Medida primeiro: o
@@ -3529,8 +3547,8 @@ static void corpoFolha(float x, float w, float anim, Uint32 agora, int ilha) {
         for(int pc=0;pc<ls[k].n && maxw-(px-tx)>30;pc++){
           if(ls[k].ic[pc]){
             // O icone na altura do texto, na mesma tinta; so vale se couber.
-            gfx_icone((GfxRect){px,ly+3,22,22},ls[k].ic[pc],c/255.0f,c/255.0f,c/255.0f,ak);
-            px+=22+8;
+            gfx_icone((GfxRect){px,ly,28,28},ls[k].ic[pc],c/255.0f,c/255.0f,c/255.0f,ak);   // P4: icone 14dp x 2 = 28px (era 22)
+            px+=28+8;
           }
           if(ls[k].tx[pc][0] && maxw-(px-tx)>30){
             TxtLinha lp=txt_linha_corta(TXT_PG_FIM,ls[k].tx[pc],c,c,c,255,maxw-(px-tx));
@@ -3571,6 +3589,7 @@ static void corpoFolha(float x, float w, float anim, Uint32 agora, int ilha) {
       // todas brancas"). A rodada de "cor so no premium" deixava uns logos no
       // acento e outros brancos, e na TV isso lia como inconsistencia, nao
       // como hierarquia. O peso vem do brilho: apagado fora do foco, claro nele.
+      // P4: logos de qualidade sempre brancos (verificado, sem mudanca).
       // SELOS COLORIDOS (Ajustes, #198): o dono manteve a opcao (03/10). Ligada,
       // cada selo na peca da cor do seu grupo; desligada (o padrao do Glass
       // UI), todos na mesma tinta branca.

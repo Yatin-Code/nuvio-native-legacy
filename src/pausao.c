@@ -28,7 +28,7 @@
 // rosto e a barra e a MESMA do OSD (plrui_barra), na margem de 96. A hora vai
 // para a pilula da ilha, que diz "Pausado". Tudo ancorado na base: o bloco
 // termina a 150 px dela.
-#define PAUSAO_X          96.0f    // mesmo recuo do conteudo do player (PLR_MARGEM)
+#define PAUSAO_X          96.0f    // P5: a pausa segue o mockup (96); o OSD foi a end 54 (oficial 26-28dp)
 #define PAUSAO_BASE      150.0f    // margem inferior da ficha
 #define PAUSAO_LARG      900.0f    // largura da sinopse
 #define PAUSAO_LD_SIN     36.0f    // 23 px x 1,55

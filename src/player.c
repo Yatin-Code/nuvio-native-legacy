@@ -118,10 +118,16 @@ static void avisarCascaAberto(int v) { (void)v; }
 #include "reacao.h"
 #include "bidi.h"
 
-// Quanto tempo os controles ficam de pe sem receber tecla. Medido a olho no
-// aparelho: perto de 4s. Menos que isso e o usuario perde a barra no meio de
+// Quanto tempo os controles ficam de pe sem receber tecla. Paridade P1.5:
+// 5000 ms (era 4000). Menos que isso e o usuario perde a barra no meio de
 // uma leitura; muito mais e a interface some tarde demais e atrapalha a cena.
-#define PLR_ESCONDE_MS   4000u
+#define PLR_ESCONDE_MS   5000u
+// Fade do OSD (paridade P1.5): rampa linear de alpha, nao mola — 250 ms para
+// entrar, 200 ms para sair (anim_rampa, que tambem respeita a politica de
+// animacoes reduzidas). Vale para o chrome com os veus; a abertura da tela
+// e os focos continuam nas molas.
+#define PLR_OSD_ENTRA_MS  250.0f
+#define PLR_OSD_SAI_MS    200.0f
 // Salto de 10s (SALTO_SEG, salto.h) do avanca/retrocede. E o passo do controle da Apple, e ele so
 // vale com os controles em pe: cegamente, seta seria um pulo invisivel.
 // AVANCO SEGURADO: o passo cresce com o TEMPO de tecla segurada (nao com a
@@ -141,24 +147,27 @@ static void avisarCascaAberto(int v) { (void)v; }
 // video real entrar, a duracao vem do decodificador e esta constante morre.
 #define PLR_DUR_PADRAO   (114.0f * 60.0f)
 // GEOMETRIA DO OSD — GLASS UI (mockup aprovado em 03/10, player-mockup.html).
-// Uma margem so, 96, para titulo, barra, botoes, tempo, selos e a ilha da hora
-// (era 64 em parte disso e a barra ia de ponta a ponta). A barra tem cantos
-// redondos (plrui_barra, a mesma da pausa e do ao vivo), os botoes sao discos
-// de 68 no material da ilha e o focado vira a pilula no acento com o nome.
-#define PLR_PAD_X         96.0f
-#define PLR_PAD_Y         48.0f
-#define PLR_MARGEM        96.0f
-#define PLR_BTN_D         68.0f
+// P5 (paridade, oficial dp x2 = fork px no canvas 1080p): margens laterais
+// (end) 26-28dp -> 52-56px (54); controle 44dp -> 88px (disco do transporte).
+// A barra tem cantos redondos (plrui_barra, a mesma da pausa e do ao vivo)
+// e o botao focado vira a pilula no acento com o nome.
+#define PLR_PAD_X         54.0f
+#define PLR_PAD_Y         60.0f
+#define PLR_MARGEM        54.0f
+#define PLR_BTN_D         88.0f
 #define PLR_BTN_GAP       12.0f
 #define PLR_GAP_ROW       38.0f   // topo da barra -> topo dos botoes
 // Onde a barra fica (topo do trilho): com o OSD inteiro, e na busca so com a
 // barra (#128) — mais baixa, sem nada embaixo dela alem do tempo. Com o Seekr
 // ligado a busca deixa 30 px a mais para a ilha da miniatura.
 // Ancoradas na BASE da tela do OSD: o OSD e camada ampliada (escala.h) e mede
-// pela tela virtual. Em 1080 sao 902, 960 e 930, como no mockup.
-#define PLR_BARRA_Y      (NV_VTELA_H - 178.0f)
-#define PLR_BARRA_Y_SO   (NV_VTELA_H - 120.0f)
-#define PLR_BARRA_Y_SEEKR (NV_VTELA_H - 150.0f)
+// pela tela virtual. Em 1080 sao 836, 1020 e 990: barra a 122dp da base
+// com o OSD cheio (-> 244px) e a 30dp so com a barra (-> 60px, P5); o Seekr
+// fica 30px acima da so-barra. Topo oficial 44/80/128dp -> 88/160/256px:
+// os selos vao a 88 e a ilha da hora a Y_TOPO 88 (plrilha.c).
+#define PLR_BARRA_Y      (NV_VTELA_H - 244.0f)
+#define PLR_BARRA_Y_SO   (NV_VTELA_H - 60.0f)
+#define PLR_BARRA_Y_SEEKR (NV_VTELA_H - 90.0f)
 // De quanto o bloco desliza para baixo quando escondido. Pequeno de proposito:
 // o que faz o movimento ser lido nao e a distancia, e a mola somada ao fade.
 #define PLR_DESLIZE       46.0f
@@ -252,7 +261,7 @@ static char retidoConta[96], retidoUrl[4096];
 // que nove de cada dez aberturas quer: o dedo para no centro e o OK decide.
 static int   botao = PLR_PLAY;
 // A barra de progresso e um alvo de foco, como no web: `.player-progress-shell`
-// engorda de 6 para 10px e clareia o trilho quando focada. Fica FORA do enum
+// engorda de 8 para 10px e clareia o trilho quando focada. Fica FORA do enum
 // dos botoes porque nao e um botao — o OK nela nao 'aperta' nada, e o
 // ESQUERDA/DIREITA muda de significado (procura, em vez de trocar de foco).
 static int   barraFoco = 0;
@@ -3377,8 +3386,8 @@ void player_atualizar(float dt, Uint32 agora) {
   // controles (posplay_evento responde 2), que e a saida documentada.
   if (posplay_visivel()) visivel = 0;
 
-  anim = anim_mola(anim, visivel ? 1.0f : 0.0f, dt,
-                   visivel ? NV_MOLA_FOCO : NV_MOLA_DESFOCO);
+  anim = anim_rampa(anim, visivel ? 1.0f : 0.0f, dt,
+                    visivel ? PLR_OSD_ENTRA_MS : PLR_OSD_SAI_MS);
   // ABRINDO A FONTE, SO A ILHA (dono, 03/10: "quando clicar para ver o filme
   // so mostrar o componente de carregando sem mostrar o player; agora o player
   // fica sempre visivel"). player_abrir pede os controles (visivel = 1) e o
@@ -4837,7 +4846,7 @@ static void desenharOsdCorpo(Uint32 agora, float a, float ac, const CatItem *c) 
   // (O dono tinha pedido texto em 2026-09; o mockup aprovado em 03/10 volta ao
   // logo, que e o que o resto do app mostra. Logo escuro sai tingido de
   // claro, GFX_MARCA, como no detalhe.) Embaixo do logo, a linha do episodio
-  // ("T1E3 · The Head", o codigo em negrito e o nome apagado) ou, num filme,
+  // ("T1E3 · The Head", 32/400 TXT_PLR_CORPO, o codigo claro e o nome apagado) ou, num filme,
   // a meta do catalogo com pontos entre os campos.
   { float yBase = yBarra - 36.0f;
     const char *marca = (!canalSessao && c) ? artehero_logo_sessao(c) : NULL;
@@ -4848,8 +4857,8 @@ static void desenharOsdCorpo(Uint32 agora, float a, float ac, const CatItem *c) 
       size_t nc = sep ? (size_t)(sep - linhaEp) : strlen(linhaEp);
       if (nc >= sizeof cod) nc = sizeof cod - 1;
       memcpy(cod, linhaEp, nc); cod[nc] = 0;
-      { TxtLinha l1 = txt_linha(TXT_G30B, cod, 243, 242, 239, 255);
-        TxtLinha l2 = sep ? txt_linha_corta(TXT_G30M, sep + 1, 243, 242, 239, 153, cw * 0.6f - l1.w)
+      { TxtLinha l1 = txt_linha(TXT_PLR_CORPO, cod, 243, 242, 239, 255);
+        TxtLinha l2 = sep ? txt_linha_corta(TXT_PLR_CORPO, sep + 1, 243, 242, 239, 153, cw * 0.6f - l1.w)
                           : (TxtLinha){ 0 };
         yBase -= (float)l1.h;
         txt_desenhar_alpha(l1, cx, yBase, ac);
@@ -4857,10 +4866,10 @@ static void desenharOsdCorpo(Uint32 agora, float a, float ac, const CatItem *c) 
         yBase -= 16.0f; }
     } else if (!canalSessao && c && c->meta[0]) {
       // "2026 · 2h 37min · Aventura": os campos do catalogo separados por um
-      // ponto de 4 px a 40%, 21/400 a 66%.
+      // ponto de 4 px a 40%, 32/400 (TXT_PLR_CORPO) a 66%.
       char m[sizeof c->meta];
       char *q = m, *fimp;
-      float x = cx, h = (float)txt_linha(TXT_CAPTION2, "Ag", 243, 242, 239, 168).h;
+      float x = cx, h = (float)txt_linha(TXT_PLR_CORPO, "Ag", 243, 242, 239, 168).h;
       int prim = 1;
       snprintf(m, sizeof m, "%s", c->meta);
       yBase -= h;
@@ -4872,7 +4881,7 @@ static void desenharOsdCorpo(Uint32 agora, float a, float ac, const CatItem *c) 
           gfx_cor((GfxRect){ x + 10.0f, yBase + h * 0.5f - 2.0f, 4.0f, 4.0f }, 0.5f, 0.953f, 0.949f, 0.937f, 0.40f * ac);
           x += 24.0f;
         }
-        { TxtLinha l = txt_linha(TXT_CAPTION2, q, 243, 242, 239, 168);
+        { TxtLinha l = txt_linha(TXT_PLR_CORPO, q, 243, 242, 239, 168);
           if (x + l.w > cx + cw * 0.6f) break;
           txt_desenhar_alpha(l, x, yBase, ac); x += l.w; }
         prim = 0;
@@ -4930,7 +4939,7 @@ static void desenharOsdCorpo(Uint32 agora, float a, float ac, const CatItem *c) 
 
   // --- tempo -----------------------------------------------------------------
   // Com o OSD inteiro: "1:12:40 / 2:37:00" na linha dos botoes, o decorrido
-  // claro (24/600 a 92%) e "/ total" apagado. Na busca so com a barra: o
+  // claro (32/400 TXT_PLR_CORPO a 92%) e "/ total" apagado. Na busca so com a barra: o
   // decorrido a esquerda e, a direita, o que falta ("-1:16:40") — ou o total,
   // com o Seekr, cuja ilha ja diz o que falta.
   {
@@ -4943,18 +4952,18 @@ static void desenharOsdCorpo(Uint32 agora, float a, float ac, const CatItem *c) 
       plrui_tempo(d, sizeof d, duracaoSeg);
       snprintf(t2, sizeof t2, "/ %s", d);
       if (cheio > 0.01f) {
-        TxtLinha l2 = txt_linha(TXT_ILHA_NOME, t2, 243, 242, 239, 128);
-        TxtLinha l1 = txt_linha(TXT_ILHA_NOME, t1, 243, 242, 239, 235);
+        TxtLinha l2 = txt_linha(TXT_PLR_CORPO, t2, 243, 242, 239, 128);
+        TxtLinha l1 = txt_linha(TXT_PLR_CORPO, t1, 243, 242, 239, 235);
         float xr = cx + cw - l2.w, y = cyBotoes - (float)l1.h * 0.5f;
         txt_desenhar_alpha(l2, xr, y, a * cheio);
         txt_desenhar_alpha(l1, xr - 8.0f - l1.w, y, a * cheio);
       }
       if (cheio < 0.99f) {
         char r[32];
-        TxtLinha l1 = txt_linha(TXT_ILHA_NOME, t1, 243, 242, 239, 235), l2;
+        TxtLinha l1 = txt_linha(TXT_PLR_CORPO, t1, 243, 242, 239, 235), l2;
         if (ajustes_seekr_ligado()) snprintf(r, sizeof r, "%s", d);
         else { char f[24]; plrui_tempo(f, sizeof f, duracaoSeg - posSeg); snprintf(r, sizeof r, "\xe2\x88\x92%s", f); }
-        l2 = txt_linha(TXT_ILHA_NOME, r, 243, 242, 239, 128);
+        l2 = txt_linha(TXT_PLR_CORPO, r, 243, 242, 239, 128);
         txt_desenhar_alpha(l1, cx, yBarra + 32.0f, a * (1.0f - cheio));
         txt_desenhar_alpha(l2, cx + cw - l2.w, yBarra + 32.0f, a * (1.0f - cheio));
       }
@@ -5013,7 +5022,7 @@ static void desenharOsdCorpo(Uint32 agora, float a, float ac, const CatItem *c) 
         float ts = anim_clamp((t0 - i * 0.09f) / 0.26f, 0.0f, 1.0f);
         float e  = 1.0f - (1.0f - ts) * (1.0f - ts);
         if (e > 0.004f)
-          marca_formato(selos[i], x, 58.0f + desce + (1.0f - e) * 10.0f, mh,
+          marca_formato(selos[i], x, 88.0f + desce + (1.0f - e) * 10.0f, mh,
                         0.953f, 0.949f, 0.937f, ac * 0.82f * e);
         x += w[i] + 22.0f;
       }
@@ -5021,7 +5030,7 @@ static void desenharOsdCorpo(Uint32 agora, float a, float ac, const CatItem *c) 
         float ts = anim_clamp((t0 - nSelos * 0.09f) / 0.26f, 0.0f, 1.0f);
         float e  = 1.0f - (1.0f - ts) * (1.0f - ts);
         if (e > 0.004f)
-          txt_desenhar_alpha(lAudio, x, 58.0f + desce + (mh - (float)lAudio.h) * 0.5f + (1.0f - e) * 10.0f,
+          txt_desenhar_alpha(lAudio, x, 88.0f + desce + (mh - (float)lAudio.h) * 0.5f + (1.0f - e) * 10.0f,
                              ac * 0.82f * e);
       } }
   }

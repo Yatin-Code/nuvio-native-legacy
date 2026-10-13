@@ -25,8 +25,8 @@
 // A mola da ilha (ilha.c, ILHA_MOLA_W/Z; o Spotlight usa a mesma, SP_MOLA).
 #define MOLA_W 10.0f
 #define MOLA_Z 0.72f
-#define X_ESQ   96.0f      // PLR_MARGEM: a coluna do OSD
-#define Y_TOPO  48.0f      // PLR_PAD_Y
+#define X_ESQ   54.0f      // P5: PLR_MARGEM (end 26-28dp -> 52-56px): a coluna do OSD
+#define Y_TOPO  88.0f      // P5: topo oficial 44dp -> 88px (era PLR_PAD_Y 48)
 #define CAB_H   64.0f      // cabecalho do corpo = a pilula aberta
 #define PIL_H   56.0f
 #define RAIO_CORPO 36.0f
@@ -154,7 +154,7 @@ static float montar(const PlrIlhaPedido *p, Linha *L) {
   L->temIcone = p && p->icone;
   L->temTxt = p && p->texto;
   L->temFim = (!p || !p->semFim) && fim[0];
-  L->hora = txt_linha(TXT_ILHA_NOME, h, 243, 242, 239, 255);
+  L->hora = txt_linha(TXT_PG_RELOGIO, h, 243, 242, 239, 255);   // P1.5: .player-clock 26
   if (L->temIcone) w += 24.0f + 12.0f;
   if (p && p->respira) w += 10.0f + 14.0f;
   if (L->temTxt) {
@@ -165,7 +165,7 @@ static float montar(const PlrIlhaPedido *p, Linha *L) {
   if (L->temTxt || (p && p->pontos > 0)) w += 1.0f + 12.0f;   // separador
   w += (float)L->hora.w;
   if (L->temFim) {
-    L->fim = txt_linha(TXT_G19M, fim, 243, 242, 239, 153);
+    L->fim = txt_linha(TXT_PG_FIM, fim, 243, 242, 239, 153);   // P1.5: .player-ends-at 22
     w += 12.0f + 1.0f + 12.0f + (float)L->fim.w;
   }
   if (velCent != VEL_NORMAL) {
