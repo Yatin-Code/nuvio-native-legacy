@@ -669,6 +669,17 @@ void video_pausar(int p) { pausaPedida = p != 0; vigiaAtiva = 0; if (hPausar) hP
 int video_pausa_confirmada(void) { return 0; } // host nao fornece ack por sessao
 void video_volume(int pct) { if (hVolume) hVolume(pct); }
 void video_buscar(double s) {
+  // Seek para o ultimo segundo do arquivo concorre com o stream-completed do
+  // player: o alvo para em duracao-1. Sem duracao (EV_PRONTO ainda nao veio)
+  // o alvo passa como veio.
+  double dur = video_duracao();
+  if (s < 0) s = 0;
+  if (dur > 1.0 && s > dur - 1.0) {
+    printf("[video] tpk busca: alvo %.0fs preso em %.0fs (duracao %.0fs)\n",
+           s, dur - 1.0, dur);
+    fflush(stdout);
+    s = dur - 1.0;
+  }
   progressoEm = SDL_GetTicks(); progressoPos = video_pos(); vigiaAtiva = 1;
   seekAlvoS = s; seekPedidoEm = SDL_GetTicks(); seekAcompanhar = 1;
   if (hBuscar) hBuscar((int)(s * 1000.0));

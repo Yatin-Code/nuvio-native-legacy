@@ -110,6 +110,15 @@ namespace NuvioTpk
         // sessao antiga nao vale na nova.
         volatile int seekAlvoMs = -1;
         long seekAlvoTicks;
+        // SERIALIZACAO DO SEEK (defensiva): o SetPlayPositionAsync do firmware
+        // pode ficar em voo por segundos e um segundo pedido disparado por cima
+        // concorre com o primeiro. Em voo, o alvo novo so fica guardado
+        // (newest-wins, no maximo um comando extra) e sai quando o anterior
+        // termina. Tudo no fio da sessao: o await volta pela mesma fila e a
+        // guarda sob trocaTrava impede um seek da sessao antiga de disparar na
+        // nova.
+        bool seekEmVoo;
+        volatile int seekPendente = -1;
 
         // Um contexto por sessao mantem comandos e continuacoes async no mesmo
         // fio. Fechar descarta a fila antiga; nunca espera uma API presa.
@@ -364,7 +373,9 @@ namespace NuvioTpk
             lock (trocaTrava)
             {
                 minha = Interlocked.Increment(ref sessao);
-                seekAlvoMs = -1;   // seek pendente nao sobrevive a troca de sessao
+                seekAlvoMs = -1;    // seek pendente nao sobrevive a troca de sessao
+                seekPendente = -1;
+                seekEmVoo = false;
                 fio?.Fechar();
                 var velho = player; player = null;
                 var prime = primer; primer = null; primerGen++;
@@ -579,21 +590,64 @@ namespace NuvioTpk
         async void Buscar(int ms)
         {
             if (player == null) return;
-            windowMetrics.Invalidate();
-            long inicio = Stopwatch.GetTimestamp();
-            seekAlvoMs = ms;
-            seekAlvoTicks = inicio;
-            try
+            int minha = Volatile.Read(ref sessao);
+            long inicio;
+            Player p;
+            lock (trocaTrava)
             {
-                posMs = ms;
-                await player.SetPlayPositionAsync(ms, false);
-                Log("[video] tpk seek firmware " + ms + " levou " +
-                    (Stopwatch.GetTimestamp() - inicio) * 1000 / Stopwatch.Frequency + " ms");
+                // Sessao trocou enquanto o comando esperava na fila: nao dispara.
+                if (minha != sessao || player == null) return;
+                // Referencia presa: o await so pode acabar no player DESTA
+                // sessao, nunca no da sessao nova que Trocar publicar depois.
+                p = player;
+                if (seekEmVoo)
+                {
+                    // Ja existe um SetPlayPositionAsync em voo: guarda so o
+                    // ULTIMO alvo (newest-wins); ele sai quando o atual
+                    // terminar, no maximo um comando extra.
+                    seekPendente = ms;
+                    posMs = ms;
+                    inicio = -1;
+                }
+                else
+                {
+                    seekEmVoo = true;
+                    inicio = seekAlvoTicks = Stopwatch.GetTimestamp();
+                    seekAlvoMs = ms;
+                    posMs = ms;
+                }
             }
-            catch (Exception e)
+            windowMetrics.Invalidate();
+            if (inicio < 0)
             {
-                seekAlvoMs = -1;   // a TV recusou: o relogio chegar ao alvo nao e prova
-                Log("buscar: " + e.Message);
+                Log("buscar: " + ms + " ms aguardando o seek em voo");
+                return;
+            }
+            while (true)
+            {
+                try
+                {
+                    await p.SetPlayPositionAsync(ms, false);
+                    Log("[video] tpk seek firmware " + ms + " levou " +
+                        (Stopwatch.GetTimestamp() - inicio) * 1000 / Stopwatch.Frequency + " ms");
+                }
+                catch (Exception e)
+                {
+                    seekAlvoMs = -1;   // a TV recusou: o relogio chegar ao alvo nao e prova
+                    Log("buscar: " + e.Message);
+                }
+                lock (trocaTrava)
+                {
+                    // Sessao trocada durante o await: Trocar ja zerou o estado;
+                    // este comando nunca chega ao player da sessao nova.
+                    if (minha != sessao || player == null) return;
+                    if (seekPendente < 0) { seekEmVoo = false; return; }
+                    ms = seekPendente;
+                    seekPendente = -1;
+                    inicio = seekAlvoTicks = Stopwatch.GetTimestamp();
+                    seekAlvoMs = ms;
+                    posMs = ms;
+                }
             }
         }
 
