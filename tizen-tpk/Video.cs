@@ -105,6 +105,11 @@ namespace NuvioTpk
         Player player;
         int sessao, playerSessao;
         volatile int posMs;
+        // CUSTO DO SEEK: alvo do ultimo Buscar e quando ele foi pedido, ate o
+        // relogio do player alcancar (fechado em Tique). Trocar zera: alvo da
+        // sessao antiga nao vale na nova.
+        volatile int seekAlvoMs = -1;
+        long seekAlvoTicks;
 
         // Um contexto por sessao mantem comandos e continuacoes async no mesmo
         // fio. Fechar descarta a fila antiga; nunca espera uma API presa.
@@ -313,6 +318,12 @@ namespace NuvioTpk
                     if (p != null && playerSessao == minha && minha == Volatile.Read(ref sessao) && p.State == PlayerState.Playing) {
                         int ms = p.GetPlayPosition();
                         lock (trocaTrava) { if (minha == sessao && player == p) posMs = ms; }
+                        int alvo = seekAlvoMs;
+                        if (alvo >= 0 && ms >= alvo) {
+                            seekAlvoMs = -1;
+                            long levou = (Stopwatch.GetTimestamp() - seekAlvoTicks) * 1000 / Stopwatch.Frequency;
+                            Log("[video] tpk relogio alcancou " + alvo + " em " + levou + " ms");
+                        }
                     }
                 } catch { }
                 finally {
@@ -353,6 +364,7 @@ namespace NuvioTpk
             lock (trocaTrava)
             {
                 minha = Interlocked.Increment(ref sessao);
+                seekAlvoMs = -1;   // seek pendente nao sobrevive a troca de sessao
                 fio?.Fechar();
                 var velho = player; player = null;
                 var prime = primer; primer = null; primerGen++;
@@ -568,8 +580,21 @@ namespace NuvioTpk
         {
             if (player == null) return;
             windowMetrics.Invalidate();
-            try { posMs = ms; await player.SetPlayPositionAsync(ms, false); }
-            catch (Exception e) { Log("buscar: " + e.Message); }
+            long inicio = Stopwatch.GetTimestamp();
+            seekAlvoMs = ms;
+            seekAlvoTicks = inicio;
+            try
+            {
+                posMs = ms;
+                await player.SetPlayPositionAsync(ms, false);
+                Log("[video] tpk seek firmware " + ms + " levou " +
+                    (Stopwatch.GetTimestamp() - inicio) * 1000 / Stopwatch.Frequency + " ms");
+            }
+            catch (Exception e)
+            {
+                seekAlvoMs = -1;   // a TV recusou: o relogio chegar ao alvo nao e prova
+                Log("buscar: " + e.Message);
+            }
         }
 
         // Host 4/5 (Program40): move/redimensiona a janela ElmSharp do video.

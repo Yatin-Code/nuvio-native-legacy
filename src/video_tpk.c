@@ -125,6 +125,15 @@ static double progressoPos;
 static int vigiaAtiva, pausaPedida;
 static atomic_int vigiaReiniciar;
 
+// CUSTO DO SEEK: o app pede em video_buscar e o relogio que ele le
+// (hPos()->posMs, Video.cs) so alcanca o alvo depois. A linha
+// "pedido->relogio" mede esse atraso; o host mede o SetPlayPositionAsync e o
+// mesmo relogio por dentro. Acompanha so o ULTIMO pedido (o novo substitui o
+// antigo) e uma sessao nova cancela o que sobrou da anterior.
+static Uint32 seekPedidoEm;
+static double seekAlvoS;
+static int seekAcompanhar;
+
 // CABECALHO DO MKV (#206). O player do host so da o idioma de cada faixa; o
 // Name ("Forced", "DD 5.1"), a FlagForced e os canais estao nas TrackEntry, e
 // o .wgt ja os mostra por isso. Fonte, nesta ordem: o trecho que a pre-busca
@@ -371,6 +380,7 @@ static int abrirSessao(void) {
   mkvass_aceitar_texto(1);
   atomic_store(&temErroDetalhe, 0);
   vigiaAtiva = pausaPedida = 0;
+  seekAcompanhar = 0;   // relogio novo: o alvo da sessao anterior nao vale
   atomic_store(&vigiaReiniciar, 1);
   ativo = 1; pronto = falhou = terminou = tocando = 0;
   largura = altura = durMs = 0; bufferando = 1; bufferDesde = SDL_GetTicks(); bufPct = 0;
@@ -596,6 +606,13 @@ void video_bombear(void) {
     hEscolher(3, velEnviada);
   }
   double pos = video_pos();
+  // O relogio do host alcancou o alvo do ultimo seek: fecha a conta.
+  if (seekAcompanhar && pos >= seekAlvoS) {
+    seekAcompanhar = 0;
+    printf("[video] tpk busca %.0fs: pedido->relogio %u ms\n", seekAlvoS,
+           (unsigned)(SDL_GetTicks() - seekPedidoEm));
+    fflush(stdout);
+  }
   vigiarPlayer(pos);
   sondaMkv(pos);
   if (pronto && pos > 0.5) reconIniciou = 1;
@@ -644,6 +661,7 @@ void video_parar(void) {
   legendaLimpar(1);
   nv_recon_zerar(&recon);
   reconErroPend = 0; reconFaixasPend = 0; reconBuscarMs = -1;
+  seekAcompanhar = 0;   // pedido pendente nao sobrevive a fonte
   if (ativo && hParar) hParar();
   ativo = pronto = tocando = 0;
 }
@@ -652,6 +670,7 @@ int video_pausa_confirmada(void) { return 0; } // host nao fornece ack por sessa
 void video_volume(int pct) { if (hVolume) hVolume(pct); }
 void video_buscar(double s) {
   progressoEm = SDL_GetTicks(); progressoPos = video_pos(); vigiaAtiva = 1;
+  seekAlvoS = s; seekPedidoEm = SDL_GetTicks(); seekAcompanhar = 1;
   if (hBuscar) hBuscar((int)(s * 1000.0));
   terminou = 0;
 }
