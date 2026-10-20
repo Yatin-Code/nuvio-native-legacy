@@ -162,9 +162,9 @@ for tela in $SCREENS; do
   case "$tela" in
     player)
       injeta_tecla "up"   # D-pad sobe o OSD, igual ao usuario
-      sleep 7             # a 0,6 fps a tecla assenta e o fade precisa de quadros
+      sleep 2             # OSD esconde em 5 s: captura com o fade (250 ms) assentado
       captura_quadro "$tela-1-osd"
-      sleep 3
+      sleep 1.5           # segunda captura ainda dentro da janela de 5 s
       captura_quadro "$tela-2-osd"
       ;;
     search)
