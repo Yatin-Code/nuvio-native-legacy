@@ -873,6 +873,9 @@ extern float nv_cor_fundo_viva[3];   // corviva.c
 // de ~1008 px (5 colunas de 180, BU_* em busca.c) e nao na largura cheia:
 // campo 1396, cards 248 / passo 280 e fileira 562.4 nao cabem nela. O estado
 // vazio USA as cotas desta secao (NV_BUSCA_VAZIO_* em desenhaVazio).
+// REFERENCIA/WEB: as cotas de largura cheia abaixo (HEAD/CAMPO/ROW/CARD/
+// POSTER) nao sao usadas pelo fork com teclado on-screen — nao aplicar por
+// "limpeza" (ver o paragrafo P6a acima).
 #define NV_BUSCA_HEAD_Y     22.0f
 #define NV_BUSCA_HEAD_H    110.0f
 #define NV_BUSCA_BTN       110.0f
@@ -880,8 +883,9 @@ extern float nv_cor_fundo_viva[3];   // corviva.c
 #define NV_BUSCA_BTN_ICONE  54.0f
 #define NV_BUSCA_RAIO       22.0f
 #define NV_BUSCA_CAMPO_PADX 32.0f
-#define NV_BUSCA_VAZIO_Y   148.0f
+#define NV_BUSCA_VAZIO_Y   148.0f   // topo do bloco medido (.search-empty-state)
 #define NV_BUSCA_VAZIO_ICO 136.0f
+#define NV_BUSCA_VAZIO_ICO_Y (NV_BUSCA_VAZIO_Y + 72.5f) // 220.5 medido
 #define NV_BUSCA_VAZIO_TIT 378.5f
 #define NV_BUSCA_VAZIO_SUB 446.7f
 #define NV_BUSCA_ROW_SUB    55.8f   // topo do titulo -> topo do subtitulo
