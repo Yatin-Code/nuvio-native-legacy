@@ -1122,6 +1122,7 @@
   T("Coleção", "合集"),
   T("Coleções", "合集"),
   T("Coleções e sagas", "合集和系列"),
+  T("Coleções…", "合集…"),
   T("Coluna", "列"),
   T("Colômbia", "哥伦比亚"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "到提供商的速度为 %s 时，%s 是能流畅播放的分辨率。"),

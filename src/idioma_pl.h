@@ -1122,6 +1122,7 @@
   T("Coleção", "Kolekcja"),
   T("Coleções", "Kolekcje"),
   T("Coleções e sagas", "Kolekcje i sagi"),
+  T("Coleções…", "Kolekcje…"),
   T("Coluna", "Kolumna"),
   T("Colômbia", "Kolumbia"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Przy %s do dostawcy %s to rozdzielczość, która gra bez zacięć."),

@@ -1122,6 +1122,7 @@
   T("Coleção", "Kolekcija"),
   T("Coleções", "Kolekcijos"),
   T("Coleções e sagas", "Kolekcijos ir sagos"),
+  T("Coleções…", "Kolekcijos…"),
   T("Coluna", "Stulpelis"),
   T("Colômbia", "Kolumbija"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Esant %s iki tiekėjo, %s yra skiriamoji geba, kuri groja nestringant."),

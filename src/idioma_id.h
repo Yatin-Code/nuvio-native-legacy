@@ -1122,6 +1122,7 @@
   T("Coleção", "Koleksi"),
   T("Coleções", "Koleksi"),
   T("Coleções e sagas", "Koleksi dan saga"),
+  T("Coleções…", "Koleksi…"),
   T("Coluna", "Kolom"),
   T("Colômbia", "Kolombia"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Dengan %s ke penyedia, %s adalah resolusi yang diputar tanpa tersendat."),

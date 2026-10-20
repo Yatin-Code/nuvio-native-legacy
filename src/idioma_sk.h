@@ -1122,6 +1122,7 @@
   T("Coleção", "Kolekcia"),
   T("Coleções", "Kolekcie"),
   T("Coleções e sagas", "Kolekcie a ságy"),
+  T("Coleções…", "Kolekcie…"),
   T("Coluna", "Stĺpec"),
   T("Colômbia", "Kolumbia"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Pri %s k poskytovateľovi je %s rozlíšenie, ktoré hrá bez zasekávania."),

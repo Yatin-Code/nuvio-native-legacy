@@ -1122,6 +1122,7 @@
   T("Coleção", "Samling"),
   T("Coleções", "Samlingar"),
   T("Coleções e sagas", "Samlingar och serier"),
+  T("Coleções…", "Samlingar…"),
   T("Coluna", "Kolumn"),
   T("Colômbia", "Colombia"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Med %s till leverantören är %s upplösningen som spelas utan att hacka."),

@@ -1122,6 +1122,7 @@
   T("Coleção", "コレクション"),
   T("Coleções", "コレクション"),
   T("Coleções e sagas", "コレクションとシリーズ"),
+  T("Coleções…", "コレクション…"),
   T("Coluna", "列"),
   T("Colômbia", "コロンビア"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "プロバイダーまで %s なら、止まらずに再生できる解像度は %s です。"),

@@ -1122,6 +1122,7 @@
   T("Coleção", "Συλλογή"),
   T("Coleções", "Συλλογές"),
   T("Coleções e sagas", "Συλλογές και σάγκες"),
+  T("Coleções…", "Συλλογές…"),
   T("Coluna", "Στήλη"),
   T("Colômbia", "Κολομβία"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Με %s μέχρι τον πάροχο, η %s είναι η ανάλυση που παίζει χωρίς κολλήματα."),

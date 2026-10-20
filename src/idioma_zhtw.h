@@ -1122,6 +1122,7 @@
   T("Coleção", "合集"),
   T("Coleções", "合輯"),
   T("Coleções e sagas", "合集與系列"),
+  T("Coleções…", "合輯…"),
   T("Coluna", "欄"),
   T("Colômbia", "哥倫比亞"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "到供應商的速度為 %s 時，%s 是能流暢播放的解析度。"),

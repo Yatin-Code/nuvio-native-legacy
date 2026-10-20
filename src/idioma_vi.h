@@ -1122,6 +1122,7 @@
   T("Coleção", "Bộ sưu tập"),
   T("Coleções", "Bộ sưu tập"),
   T("Coleções e sagas", "Bộ sưu tập và loạt phim"),
+  T("Coleções…", "Bộ sưu tập…"),
   T("Coluna", "Cột"),
   T("Colômbia", "Colombia"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Với %s tới nhà cung cấp, %s là độ phân giải phát mà không bị giật."),

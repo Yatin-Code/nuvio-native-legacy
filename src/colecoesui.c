@@ -46,7 +46,14 @@ static int      pediu = -1;
 // o arquivo de categorias em si.
 static unsigned ultRevSalvos, ultRevCat, ultRevSorg;
 
-static float colX0(void) { return 48.0f + ajustes_rail_largura_fixa(); }
+// MARGEM DA FOLHA (collections-spec §Geometry: 24 da folha ate a borda) na
+// coluna da rail, o mesmo NV_FOLHA_MARGEM da folha de Ajustes. O TOPO nao vem
+// desta margem: COL_Y0 (112) e a faixa de cabecalho, onde o titulo em y=64
+// respira — a margem de 24 vale para os lados, e o teto COL_ALT_MAX deixa 40
+// embaixo (mais que os 24, para a rolagem nunca encostar na borda). A
+// largura continua abracando o conteudo (NV_BIB_PICK_W fixo), entao a borda
+// direita e a do conteudo, nao 24 da tela.
+static float colX0(void) { return NV_FOLHA_MARGEM + ajustes_rail_largura_fixa(); }
 
 // CONTEUDO ABERTO: n fileiras de 110 com 12 de folga; o painel abraca o
 // conteudo, com teto na altura util da tela — acima disso a lista rola.
@@ -186,10 +193,13 @@ void colecoes_atualizar(float dt, Uint32 agora) {
 }
 
 // ESTADO VAZIO: a mesma forma da Biblioteca — icone grande, frase branca e a
-// dica do proximo passo, centrados na largura util.
+// dica do proximo passo, centrados na largura util. As tres frases sao CHAVES
+// de idioma_tab.h (reuso, sem entrada nova): as duas de P7.1 vazavam em
+// portugues na UI em ingles (revisao P7.1).
 static void desenhaVazio(void) {
-  const char *l1 = "Nenhuma coleção ainda";
-  const char *l2 = "No menu de um título (segure OK), escolha Mover para categoria.";
+  const char *l1 = "Nada salvo por enquanto";
+  const char *l2 = "Segure OK num título para mover para uma categoria.";
+  char voltar[48];
   float cx = colX0() + (NV_TELA_W - 40.0f - colX0()) * 0.5f;
   float y = COL_Y0 + 190.0f;
   TxtLinha t1, t2, d;
@@ -199,7 +209,10 @@ static void desenhaVazio(void) {
   t2 = txt_linha_corta(TXT_CALLOUT, i18n(l2), 150, 153, 162, 255, NV_TELA_W - 80.0f);
   txt_desenhar_alpha(t1, cx - t1.w * 0.5f, y, 0.96f);
   txt_desenhar_alpha(t2, cx - t2.w * 0.5f, y + t1.h + 18.0f, 0.85f);
-  d = txt_linha(TXT_CAPTION2, i18n("Voltar: Biblioteca"), 150, 153, 162, 255);
+  // "Voltar: Biblioteca" nao e chave da tabela — compoe duas que sao, ja
+  // traduzidas; o resultado composto nao casa nenhuma chave e sai como esta.
+  snprintf(voltar, sizeof voltar, "%s: %s", i18n("Voltar"), i18n("Biblioteca"));
+  d = txt_linha(TXT_CAPTION2, voltar, 150, 153, 162, 255);
   txt_desenhar(d, cx - d.w * 0.5f, y + t1.h + t2.h + 58.0f);
 }
 
@@ -208,11 +221,18 @@ void colecoes_desenhar(Uint32 agora) {
   int i;
   (void)agora;
   ajustes_ui_fundo();
-  // Titulo ao lado da ilha do relogio, como o diagnostico da Live TV.
-  { float x = ajustes_ilha_x() + 202.0f;
+  // TITULO NA COLUNA DE CONTEUDO do app: ajustes_conteudo_x() (104 com a rail
+  // recolhida, a mesma familia dos 96 da Biblioteca). O formato "ao lado da
+  // ilha do relogio" (livetvdiag) punha o titulo em x=240 — 192 px a direita
+  // da borda do painel, com vazio morto a esquerda; a ilha fica no outro canto
+  // e no preview nem aparece (revisao P7.1).
+  { float x = ajustes_conteudo_x();
     TxtLinha tit = txt_linha(TXT_AJ_TIT28, i18n("Coleções"), 243, 242, 239, 255);
     TxtLinha sub = txt_linha_corta(TXT_AJ_ESTADO,
-                   i18n("Organize seus títulos salvos em pastas."),
+                   // Reuso de chave da tabela (NADA novo fora de idioma_tab.h):
+                   // o texto era uma frase de P7.1 sem entrada e vazava em
+                   // portugues na UI em ingles.
+                   i18n("Organizar Salvos"),
                    243, 242, 239, 255, NV_TELA_W - 60 - x - tit.w - 18);
     txt_desenhar(tit, x, 64 - tit.h * 0.5f);
     txt_desenhar_alpha(sub, x + tit.w + 18, 64 - sub.h * 0.5f, 0.62f); }

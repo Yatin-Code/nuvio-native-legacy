@@ -1122,6 +1122,7 @@
   T("Coleção", "Gyűjtemény"),
   T("Coleções", "Gyűjtemények"),
   T("Coleções e sagas", "Gyűjtemények és sagák"),
+  T("Coleções…", "Gyűjtemények…"),
   T("Coluna", "Oszlop"),
   T("Colômbia", "Kolumbia"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "%s sebességgel a szolgáltatóig %s az a felbontás, amely akadás nélkül megy."),

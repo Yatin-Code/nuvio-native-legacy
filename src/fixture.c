@@ -443,6 +443,26 @@ void fixture_passo(void) {
       if (cat_item(1)) sorg_mover(cat_item(1)->imdb, c2);
       telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
     }
+    else if (!strcmp(telaAlvo, "colecoes-vazio")) {
+      // ESTADO VAZIO da lista de gerenciamento: sem categoria e sem titulo.
+      // ST_TOPO acabou de salvar os seis — aqui eles saem de novo e
+      // aplicar_catalogo acompanha a marca do catalogo (naLista), fechando a
+      // uniao dos contadores em zero. Nenhuma categoria e criada (o arquivo de
+      // categorias desta rodada nem existe: dados frescos por captura).
+      int i;
+      for (i = 0; i < FX_N_SALVOS && i < nSementes; i++) {
+        const CatItem *rc = cat_item(i);
+        if (rc) salvos_definir(rc, 0);
+      }
+      // salvos_aplicar_catalogo SO MARCA (naLista=1) os locais; limpar a lista
+      // local nao DESMARCA o que ja estava marcado no catalogo. E a marca que
+      // salvos_uniao usa para incluir um titulo so-do-catalogo — sem desmarcar,
+      // a tela continuava com contagem e o "vazio" nunca aparecia (captura
+      // identica a tela cheia na revisao P7.1).
+      for (i = 0; i < cat_n(); i++) cat_definir_na_lista(i, 0);
+      salvos_aplicar_catalogo();
+      telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
+    }
     else { falha("tela desconhecida"); }
     break;
   case ST_ESPERA: {
@@ -454,6 +474,7 @@ void fixture_passo(void) {
     else if (!strcmp(telaAlvo, "search")) ok = !strcmp(app_tela_nome(), "busca");
     else if (!strcmp(telaAlvo, "library")) ok = !strcmp(app_tela_nome(), "biblioteca");
     else if (!strcmp(telaAlvo, "colecoes")) ok = !strcmp(app_tela_nome(), "colecoes");
+    else if (!strcmp(telaAlvo, "colecoes-vazio")) ok = !strcmp(app_tela_nome(), "colecoes");
     if (ok) { tProntaEm = SDL_GetTicks() + 2500; qProntaEm = quadro + 20; fase = ST_SETTLE; }
     else if (SDL_GetTicks() - tEstado > 75000) falha("timeout de espera");
     break;

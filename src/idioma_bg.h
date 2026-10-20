@@ -1122,6 +1122,7 @@
   T("Coleção", "Колекция"),
   T("Coleções", "Колекции"),
   T("Coleções e sagas", "Колекции и саги"),
+  T("Coleções…", "Колекции…"),
   T("Coluna", "Колона"),
   T("Colômbia", "Колумбия"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "При %s до доставчика %s е резолюцията, която върви без накъсване."),

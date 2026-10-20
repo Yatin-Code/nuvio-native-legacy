@@ -1122,6 +1122,7 @@
   T("Coleção", "Zbirka"),
   T("Coleções", "Zbirke"),
   T("Coleções e sagas", "Zbirke in sage"),
+  T("Coleções…", "Zbirke…"),
   T("Coluna", "Stolpec"),
   T("Colômbia", "Kolumbija"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Pri %s do ponudnika je %s ločljivost, ki se predvaja brez zatikanja."),

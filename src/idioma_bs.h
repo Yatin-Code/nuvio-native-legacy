@@ -1122,6 +1122,7 @@
   T("Coleção", "Kolekcija"),
   T("Coleções", "Kolekcije"),
   T("Coleções e sagas", "Kolekcije i sage"),
+  T("Coleções…", "Kolekcije…"),
   T("Coluna", "Kolona"),
   T("Colômbia", "Kolumbija"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Sa %s do provajdera, %s je rezolucija koja se reprodukuje bez zastajkivanja."),

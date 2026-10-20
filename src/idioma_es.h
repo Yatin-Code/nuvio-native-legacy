@@ -1121,6 +1121,7 @@
   T("Coleção", "Colección"),
   T("Coleções", "Colecciones"),
   T("Coleções e sagas", "Colecciones y sagas"),
+  T("Coleções…", "Colecciones…"),
   T("Coluna", "Columna"),
   T("Colômbia", "Colombia"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Con %s hasta el proveedor, %s es la resolución que se reproduce sin cortes."),

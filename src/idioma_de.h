@@ -1121,6 +1121,7 @@
   T("Coleção", "Sammlung"),
   T("Coleções", "Sammlungen"),
   T("Coleções e sagas", "Sammlungen und Sagas"),
+  T("Coleções…", "Sammlungen…"),
   T("Coluna", "Spalte"),
   T("Colômbia", "Kolumbien"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Mit %s bis zum Anbieter ist %s die Auflösung, die ohne Hänger läuft."),

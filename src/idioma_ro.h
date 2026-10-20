@@ -1121,6 +1121,7 @@
   T("Coleção", "Colecție"),
   T("Coleções", "Colecții"),
   T("Coleções e sagas", "Colecții și sage"),
+  T("Coleções…", "Colecții…"),
   T("Coluna", "Coloană"),
   T("Colômbia", "Columbia"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Cu %s până la furnizor, %s este rezoluția care rulează fără blocaje."),

@@ -1122,6 +1122,7 @@
   T("Coleção", "Koleksiyon"),
   T("Coleções", "Koleksiyonlar"),
   T("Coleções e sagas", "Koleksiyonlar ve seriler"),
+  T("Coleções…", "Koleksiyonlar…"),
   T("Coluna", "Sütun"),
   T("Colômbia", "Kolombiya"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Sağlayıcıya %s ile %s, takılmadan oynayan çözünürlüktür."),

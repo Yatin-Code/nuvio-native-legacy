@@ -1122,6 +1122,7 @@
   T("Coleção", "Collectie"),
   T("Coleções", "Collecties"),
   T("Coleções e sagas", "Collecties en sagas"),
+  T("Coleções…", "Collecties…"),
   T("Coluna", "Kolom"),
   T("Colômbia", "Colombia"),
   T("Com %s até o provedor, %s é a resolução que toca sem travar.", "Met %s naar de provider is %s de resolutie die zonder haperen speelt."),

@@ -1121,6 +1121,7 @@
   { "Coleção", "Collection" },
   { "Coleções", "Collections" },
   { "Coleções e sagas", "Collections and sagas" },
+  { "Coleções…", "Collections…" },
   { "Coluna", "Column" },
   { "Colômbia", "Colombia" },
   { "Com %s até o provedor, %s é a resolução que toca sem travar.", "With %s to the provider, %s is the resolution that plays without stalling." },
