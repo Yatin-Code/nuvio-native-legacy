@@ -864,6 +864,15 @@ extern float nv_cor_fundo_viva[3];   // corviva.c
 //                          data 20/400 rgb(179) (margin-top 4)
 //                          passo horizontal 280 (248 + 32)
 //   passo entre fileiras 562.4
+//
+// P6a (parity-spec §5): o cabecalho sem teclado acima pressupoe o IME do
+// sistema — sem ele (webOS/Tizen/Linux, st_ime_disponivel()==0 em
+// sistexto.h) nao ha como digitar, e o fork mantem o campo-ilha 520x76 com
+// o teclado on-screen na coluna da esquerda (a divergencia assumida desta
+// tela, ver o topo de busca.c). Os resultados, por isso, correm numa coluna
+// de ~1008 px (5 colunas de 180, BU_* em busca.c) e nao na largura cheia:
+// campo 1396, cards 248 / passo 280 e fileira 562.4 nao cabem nela. O estado
+// vazio USA as cotas desta secao (NV_BUSCA_VAZIO_* em desenhaVazio).
 #define NV_BUSCA_HEAD_Y     22.0f
 #define NV_BUSCA_HEAD_H    110.0f
 #define NV_BUSCA_BTN       110.0f
@@ -883,6 +892,13 @@ extern float nv_cor_fundo_viva[3];   // corviva.c
 #define NV_BUSCA_POSTER_H  372.0f
 #define NV_BUSCA_NOME_GAP    8.0f
 #define NV_BUSCA_DATA_GAP    4.0f
+//
+// Discover (TELA_EXPLORAR, parity-spec §5 "mesmas fileiras + chips H56 de
+// tipo/ano"): o fork implementa a Explorar 2.0 (climas + toca por titulo em
+// explorar.c sobre mapa.c), sem contraparte no oficial — fileiras de
+// descoberta e chips exigiriam tela nova (decisao de produto/designer, fora
+// do P6a). Mantido: a trilha restaura o indice de foco ao subir (subir()) e
+// ao voltar do clima aberto (clFoco = clAberto em explorar_evento).
 
 // ---------------------------------------------------------------------------
 // Tela de BIBLIOTECA — MEDIDA no app web rodando.

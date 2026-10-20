@@ -21,6 +21,13 @@
 // fileiras de resultado correm a direita dele. E a unica divergencia deliberada
 // desta tela, e esta anotada aqui para nao ser confundida com descuido.
 //
+// P6a (parity-spec §5): das medidas NV_BUSCA_* (layout.h), o estado vazio usa
+// as cotas Y do web (icone 136, titulo 56/600, apoio 24); cabecalho, fileiras
+// e cards seguem BU_* (coluna de ~1008 px ao lado do teclado) — as cotas de
+// largura cheia (campo 1396, cards 248, fileira 562.4) pressupoem a tela sem
+// teclado e nao cabem aqui. Nenhuma logica de busca muda (debounce 300 ms,
+// fileiras do termo anterior ate a 1a resposta, NV_HOLD_MS 700).
+//
 // DECISAO DE PROJETO — o teclado e em GRADE, nao a linha unica do tvOS.
 // A faixa horizontal do tvOS e bonita e cabe em pouca altura, mas custa caro no
 // D-pad: sao 38 teclas em UMA dimensao, entao a distancia media entre duas
@@ -1370,20 +1377,30 @@ static void desenhaTeclado(void) {
 }
 
 static void desenhaVazio(void) {
+  // Estado vazio MEDIDO no web (.search-empty-state, NV_BUSCA_VAZIO_* em
+  // layout.h): bloco y148 h400 com icone 136 em y220.5, titulo 56/600 em
+  // y378.5 e apoio 24/400 em y446.7. As cotas Y sao as do web; a
+  // centralizacao e na coluna da direita (e nao na tela cheia) porque a
+  // esquerda mora o teclado on-screen, que o web nao tem — ver o topo.
   const char *t1 = nConsulta >= 2 ? "Nenhum título recebido" : "O que vamos assistir?";
   const char *t2 = nConsulta >= 2 ? "Os resultados dos addons aparecem aqui."
                              : "Digite ao menos 2 letras de um filme ou série.";
-  TxtLinha l1 = txt_linha(TXT_ILHA_TITULO, t1, BU_TX);
-  TxtLinha l2 = txt_linha(TXT_ILHA_CORPO, t2, BU_TX);
   float cx = BU_RES_X + (BU_DIR - BU_RES_X) * 0.5f;
-  float y = BU_RES_Y + 220.0f;
-  txt_desenhar(l1, cx - l1.w * 0.5f, y);
-  txt_desenhar_alpha(l2, cx - l2.w * 0.5f, y + l1.h + 14.0f, 0.55f);
-  if (nConsulta >= 2) {
-    TxtLinha ajuda = txt_linha(TXT_ILHA_GENERO,
-        "Se não aparecerem, confira a conexão ou tente outro nome.", BU_TX);
-    txt_desenhar_alpha(ajuda, cx - ajuda.w * 0.5f, y + l1.h + l2.h + 36.0f, 0.42f);
-  }
+  float maxW = BU_DIR - BU_RES_X;
+  // O icone e o mesmo do campo; sem medida de cor no web, vai no tom do
+  // texto a 0.35 — marca d'agua, como as dicas mudas desta tela.
+  gfx_icone((GfxRect){ cx - NV_BUSCA_VAZIO_ICO * 0.5f, 220.5f,
+                       NV_BUSCA_VAZIO_ICO, NV_BUSCA_VAZIO_ICO },
+            "menu_search", 0.95f, 0.95f, 0.94f, 0.35f);
+  { TxtLinha l1 = txt_linha_corta(TXT_TITULO2, t1, BU_TX, maxW);   // 56/600
+    TxtLinha l2 = txt_linha_corta(TXT_ILHA_CORPO, t2, BU_TX, maxW);   // 24/400
+    txt_desenhar(l1, cx - l1.w * 0.5f, NV_BUSCA_VAZIO_TIT);
+    txt_desenhar_alpha(l2, cx - l2.w * 0.5f, NV_BUSCA_VAZIO_SUB, 0.55f);
+    if (nConsulta >= 2) {
+      TxtLinha ajuda = txt_linha_corta(TXT_ILHA_GENERO,
+          "Se não aparecerem, confira a conexão ou tente outro nome.", BU_TX, maxW);
+      txt_desenhar_alpha(ajuda, cx - ajuda.w * 0.5f, NV_BUSCA_VAZIO_SUB + l2.h + 36.0f, 0.42f);
+    } }
 }
 
 // Buscas recentes: chips de 56 (o .chip do mockup), em linhas que quebram na
