@@ -1389,7 +1389,7 @@ static void desenhaVazio(void) {
   float maxW = BU_DIR - BU_RES_X;
   // O icone e o mesmo do campo; sem medida de cor no web, vai no tom do
   // texto a 0.35 — marca d'agua, como as dicas mudas desta tela.
-  gfx_icone((GfxRect){ cx - NV_BUSCA_VAZIO_ICO * 0.5f, 220.5f,
+  gfx_icone((GfxRect){ cx - NV_BUSCA_VAZIO_ICO * 0.5f, NV_BUSCA_VAZIO_ICO_Y,
                        NV_BUSCA_VAZIO_ICO, NV_BUSCA_VAZIO_ICO },
             "menu_search", 0.95f, 0.95f, 0.94f, 0.35f);
   { TxtLinha l1 = txt_linha_corta(TXT_TITULO2, t1, BU_TX, maxW);   // 56/600
