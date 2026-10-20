@@ -136,6 +136,9 @@
 #include "addons.h"
 #include "idioma.h"
 #include "descoberta.h"
+#ifdef NV_FIXTURE
+#include "fixture.h"   /* FIXTURE-Goal-C (invoke 1/2): unico include novo; some sem NV_FIXTURE */
+#endif
 #include "ilha_voo.h"
 #include "colecoes.h"
 #include "posterprov.h"
@@ -2776,6 +2779,12 @@ static const char *homeTrailerBloqueio(void) {
 }
 
 void app_atualizar(float dt, Uint32 agora) {
+#ifdef NV_FIXTURE
+  /* FIXTURE-Goal-C (invoke 2/2): UNICO ponto de chamada. Dados + sequencia
+     moram em src/fixture.c; sem NV_FIXTURE este bloco some no preprocessador. */
+  fixture_passo();
+  { int ft = fixture_tela_pedida(); if (ft >= 0) trocarTela((Tela)ft); }
+#endif
   if (player_aberto() || player_mini_ativo()) diagnostico_cancelar_vazao();
   // Login e escolha de perfil retornam cedo; a atividade da conta anterior
   // precisa sair antes deles, junto de qualquer modal/pedido ja enfileirado.
