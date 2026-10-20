@@ -164,8 +164,7 @@ for tela in $SCREENS; do
       injeta_tecla "up"   # D-pad sobe o OSD, igual ao usuario
       sleep 2             # OSD esconde em 5 s: captura com o fade (250 ms) assentado
       captura_quadro "$tela-1-osd"
-      injeta_tecla "up"   # reabre o OSD: a 2a captura nao depende do auto-hide
-      sleep 1.5
+      sleep 0.5           # 2a captura ~2,7 s apos o up, longe dos 5 s do auto-hide
       captura_quadro "$tela-2-osd"
       ;;
     search)
