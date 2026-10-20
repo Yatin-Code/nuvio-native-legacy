@@ -23,6 +23,7 @@
 #include "registro.h"
 #include "addonsui.h"
 #include "pluginsui.h"
+#include "colecoesui.h"
 #include "login.h"
 #include "sessao.h"
 #include "perfis.h"
@@ -515,7 +516,8 @@ static int sair = 0;
 const char *app_tela_nome(void) {
   static const char *const NOMES[] = {
     "login", "escolha-perfil", "home", "explorar", "guia", "busca", "biblioteca", "perfil",
-    "ajustes", "diagnostico", "player", "social", "addons", "agenda", "livetv-diag", "plugins"
+    "ajustes", "diagnostico", "player", "social", "addons", "agenda", "livetv-diag", "plugins",
+    "colecoes"
   };
   if (stream_folha_aberta()) return "fontes";
   if (episodios_aberto()) return "episodios";
@@ -623,10 +625,15 @@ static int ltdDoGuia;
 // O perfil do amigo aberto pelo DUELO do Perfil e Stats: Voltar nele volta ao
 // Perfil, nao a home. Qualquer outra troca de tela esquece.
 static int socialDoPerfil;
+// As Colecoes (P7.1) nasceram da 4a aba da Biblioteca ("Colecoes…"): Voltar
+// devolve para la, com o destino da barra certo. Abertas por outro caminho,
+// caem na home como qualquer tela sem origem.
+static int colecoesDaBiblioteca;
 
 static void trocarTela(Tela nova) {
   if (nova == tela) return;
   if (nova != TELA_SOCIAL) socialDoPerfil = 0;
+  if (nova != TELA_COLECOES) colecoesDaBiblioteca = 0;
   if (tela == TELA_AJUSTES) ajustes_encerrar();
   if (tela == TELA_LIVETV_DIAG) livetvdiag_encerrar();
   // ESQUERDA na borda do Perfil so pede a barra e deixa a pagina aberta (#371).
@@ -655,6 +662,7 @@ static void trocarTela(Tela nova) {
     case TELA_AJUSTES:    ajustes_iniciar();    break;
     case TELA_DIAGNOSTICO: diagnostico_iniciar(); break;
     case TELA_LIVETV_DIAG: livetvdiag_iniciar(); break;
+    case TELA_COLECOES:  colecoes_iniciar();   break;
     default: break;
   }
 }
@@ -2228,7 +2236,7 @@ static int azulPodeAbrirSalvos(const SDL_Event *e) {
   switch (tela) {
     case TELA_HOME: case TELA_EXPLORAR: case TELA_BUSCA: case TELA_BIBLIOTECA:
     case TELA_PERFIL: case TELA_SOCIAL: case TELA_ADDONS: case TELA_PLUGINS:
-    case TELA_AGENDA: return 1;
+    case TELA_COLECOES: case TELA_AGENDA: return 1;
     default: return 0;
   }
 }
@@ -2627,6 +2635,7 @@ void app_evento(const SDL_Event *e) {
     case TELA_SOCIAL:     amigoperfil_evento(e); break;
     case TELA_ADDONS:     addonsui_evento(e);   break;
     case TELA_PLUGINS:    pluginsui_evento(e);  break;
+    case TELA_COLECOES:   colecoes_evento(e);   break;
     case TELA_AJUSTES:    ajustes_evento(e);    break;
     case TELA_DIAGNOSTICO: diagnostico_evento(e); break;
     case TELA_LIVETV_DIAG: livetvdiag_evento(e); break;
@@ -3487,6 +3496,13 @@ void app_atualizar(float dt, Uint32 agora) {
     pluginsui_abrir();
     trocarTela(TELA_PLUGINS);
   }
+  // Colecoes (P7.1): a 4a aba da Biblioteca ("Colecoes…") pede a rota, no
+  // mesmo caminho dos pedidos de Ajustes. O modo da grade NUNCA vira
+  // MODO_COLECOES — quem abre e a tela propria, e Voltar devolve para la.
+  if (tela == TELA_BIBLIOTECA && biblioteca_pediu_colecoes()) {
+    colecoesDaBiblioteca = 1;
+    trocarTela(TELA_COLECOES);
+  }
   if (tela == TELA_AJUSTES && ajustes_pediu_diagnostico()) {
     diagDaHome = 0;
     trocarTela(TELA_DIAGNOSTICO);
@@ -3539,7 +3555,8 @@ void app_atualizar(float dt, Uint32 agora) {
               || (tela == TELA_PERFIL      && perfil_quer_sair())
               || (tela == TELA_SOCIAL      && amigoperfil_quer_sair())
               || (tela == TELA_AJUSTES    && ajustes_quer_sair())
-              || (tela == TELA_DIAGNOSTICO && diagnostico_quer_sair());
+              || (tela == TELA_DIAGNOSTICO && diagnostico_quer_sair())
+              || (tela == TELA_COLECOES   && colecoes_quer_sair());
     if (fechar) {
       // ESQUERDA na borda abre a barra SOBRE a tela atual. Voltar continua
       // sendo a saída normal para a Home; assim o foco da tela não é perdido
@@ -3550,6 +3567,11 @@ void app_atualizar(float dt, Uint32 agora) {
         trocarTela(TELA_PERFIL);
         menu_definir_destino(MENU_PERFIL);
         perfil_voltar_ao_duelo();
+      } else if (tela == TELA_COLECOES && colecoesDaBiblioteca) {
+        // Aberta da 4a aba da Biblioteca: Voltar devolve para la, com o
+        // destino da barra certo (o mesmo caminho do duelo do Perfil).
+        trocarTela(TELA_BIBLIOTECA);
+        menu_definir_destino(MENU_BIBLIOTECA);
       } else {
         trocarTela(TELA_HOME);
         menu_definir_destino(MENU_INICIO);
@@ -3668,6 +3690,9 @@ void app_atualizar(float dt, Uint32 agora) {
       abrirPessoa(&pedPessoa);
     } else if (tela == TELA_BUSCA && busca_pediu_abrir(&idx)) {
       if (busca_item_focado(&it)) abrirTitulo(&it, 1, 1); else abrirPorIndice(idx);
+    } else if (tela == TELA_COLECOES && colecoes_pediu_abrir(&idx)) {
+      // P7.2: FolderDetail da fileira. Em P7.1 o pedido nunca arma.
+      abrirPorIndice(idx);
     } else if (tela == TELA_BIBLIOTECA && biblioteca_pediu_abrir(&idx)) {
       abrirPorIndice(idx);
     } else if (tela == TELA_PERFIL) {
@@ -4689,6 +4714,7 @@ void app_atualizar(float dt, Uint32 agora) {
   if(tela==TELA_SOCIAL) amigoperfil_atualizar(dt, agora);
   if(tela==TELA_ADDONS) addonsui_atualizar(dt, agora);
   if(tela==TELA_PLUGINS) pluginsui_atualizar(dt, agora);
+  if(tela==TELA_COLECOES) colecoes_atualizar(dt, agora);
 }
 
 // O corpo do desenho de TELA. Saiu de app_desenhar para uma funcao propria por
@@ -4720,6 +4746,7 @@ static void desenharAtrasDoPainel(void *ctx) {
       case TELA_SOCIAL:     amigoperfil_desenhar(agora);     break;
       case TELA_ADDONS:     addonsui_desenhar(agora);   break;
       case TELA_PLUGINS:    pluginsui_desenhar(agora);  break;
+      case TELA_COLECOES:   colecoes_desenhar(agora);   break;
       case TELA_AJUSTES:    ajustes_desenhar(agora);    break;
       case TELA_DIAGNOSTICO: diagnostico_desenhar(agora); break;
       case TELA_LIVETV_DIAG: livetvdiag_desenhar(agora); break;
@@ -4773,7 +4800,8 @@ static void desenharAtrasDoPainel(void *ctx) {
                         : tela == TELA_HOME ? home_topo_fracao()
                         : (tela == TELA_EXPLORAR || tela == TELA_BUSCA ||
                            tela == TELA_BIBLIOTECA || tela == TELA_AGENDA ||
-                           tela == TELA_PERFIL || tela == TELA_AJUSTES) ? 1.0f : -1.0f);
+                           tela == TELA_PERFIL || tela == TELA_AJUSTES ||
+                           tela == TELA_COLECOES) ? 1.0f : -1.0f);
     CAMADA_SE(menu_aberto());
     menu_desenhar(agora);
   }
@@ -4893,7 +4921,8 @@ static int relogioCabe(void) {
   if (tela == TELA_HOME) { if (!homePronta) return 0; }
   else if (tela != TELA_EXPLORAR && tela != TELA_BUSCA &&
            tela != TELA_BIBLIOTECA && tela != TELA_PERFIL && tela != TELA_SOCIAL &&
-           tela != TELA_ADDONS && tela != TELA_PLUGINS && tela != TELA_AGENDA) return 0;
+           tela != TELA_ADDONS && tela != TELA_PLUGINS && tela != TELA_AGENDA &&
+           tela != TELA_COLECOES) return 0;
   // O MENU ABERTO NAO ESCONDE MAIS O RELOGIO (Glass UI, mockup "ilha" tela 1):
   // a ilha do menu nasce logo abaixo da do relogio, na mesma margem
   // (ilha_posicionar), e as duas formam a coluna da esquerda.

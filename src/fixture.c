@@ -18,6 +18,7 @@
 #include "player.h"
 #include "video.h"
 #include "salvos.h"
+#include "salvosorg.h"
 #include "posplay.h"
 #include "layout.h"
 #include "esmaecer.h"
@@ -431,6 +432,17 @@ void fixture_passo(void) {
     }
     else if (!strcmp(telaAlvo, "search")) { telaPedida = (int)TELA_BUSCA; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA; }
     else if (!strcmp(telaAlvo, "library")) { telaPedida = (int)TELA_BIBLIOTECA; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA; }
+    else if (!strcmp(telaAlvo, "colecoes")) {
+      // Duas categorias com titulos de verdade (ST_TOPO ja salvou os seis) —
+      // a lista de gerenciamento nasce com contagem, nao vazia.
+      int c1, c2;
+      sorg_carregar();
+      c1 = sorg_criar_categoria("Fim de semana");
+      c2 = sorg_criar_categoria("Kids");
+      if (cat_item(0)) sorg_mover(cat_item(0)->imdb, c1);
+      if (cat_item(1)) sorg_mover(cat_item(1)->imdb, c2);
+      telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
+    }
     else { falha("tela desconhecida"); }
     break;
   case ST_ESPERA: {
@@ -441,6 +453,7 @@ void fixture_passo(void) {
     else if (!strcmp(telaAlvo, "postplay")) ok = posplay_visivel();
     else if (!strcmp(telaAlvo, "search")) ok = !strcmp(app_tela_nome(), "busca");
     else if (!strcmp(telaAlvo, "library")) ok = !strcmp(app_tela_nome(), "biblioteca");
+    else if (!strcmp(telaAlvo, "colecoes")) ok = !strcmp(app_tela_nome(), "colecoes");
     if (ok) { tProntaEm = SDL_GetTicks() + 2500; qProntaEm = quadro + 20; fase = ST_SETTLE; }
     else if (SDL_GetTicks() - tEstado > 75000) falha("timeout de espera");
     break;

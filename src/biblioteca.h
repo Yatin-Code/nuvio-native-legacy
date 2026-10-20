@@ -20,6 +20,11 @@ void biblioteca_encerrar(void);
 // grade e filtrada, e quem abre o detalhe precisa do item real).
 int  biblioteca_pediu_abrir(int *indiceCatalogo);
 
+// OK na 4a aba ("Colecoes…"): consome o pedido e devolve 1. A rota abre
+// TELA_COLECOES (colecoesui.c); o modo da grade NUNCA vira MODO_COLECOES — a
+// pagina de categorias e uma tela propria, nao um recorte desta.
+int  biblioteca_pediu_colecoes(void);
+
 // Estado de conta, em memoria. Exposto porque quem marca um titulo e a tela de
 // detalhe (o botao "+"), nao a biblioteca: sem isto a aba "Minha Lista" so
 // poderia ser alimentada por dentro deste modulo, e o "+" do detalhe nao teria

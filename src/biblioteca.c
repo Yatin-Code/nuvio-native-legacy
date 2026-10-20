@@ -267,8 +267,10 @@ static int bibTinta2(void) { return 205; }
 // (CatItem.naLista): a watchlist do Trakt, posta ali pela descoberta, e a
 // biblioteca da CONTA (sync_pull_library), posta ali por contalib.c.
 // "Coleção" = TENHO, e so o Trakt tem. "Listas" = conjuntos, nao titulos.
-enum { MODO_SALVOS, MODO_NUVEM, MODO_LISTAS, BIB_N_MODOS };
-static const char *ROT_MODO[BIB_N_MODOS] = { "Salvos", "Coleção", "Listas" };
+enum { MODO_SALVOS, MODO_NUVEM, MODO_LISTAS, MODO_COLECOES, BIB_N_MODOS };
+// "Colecoes…" e a 4a aba que ABRE A ROTA (TELA_COLECOES), nao um modo da grade:
+// por isso o reticencias no rotulo — a pagina propria e quem responde.
+static const char *ROT_MODO[BIB_N_MODOS] = { "Salvos", "Coleção", "Listas", "Coleções…" };
 
 // Seletor "Tipo": os mesmos valores do web.
 enum { TIPO_TODOS, TIPO_FILME, TIPO_SERIE, BIB_N_TIPOS };
@@ -310,8 +312,9 @@ static int filtro[CAT_MAX + SALVOS_MAX];
 static int nFiltro = 0;
 static int totalModo = 0;
 // Quantos titulos cada modo de titulos tem (Salvos, Colecao), para a contagem
-// do seletor segmentado. Refeito em reconstruir(), nunca por quadro.
-static int contaModo[2];
+// do seletor segmentado. Refeito em reconstruir(), nunca por quadro. O indice
+// MODO_COLECOES fica zerado: a aba nao tem contagem propria (textoModo).
+static int contaModo[BIB_N_MODOS];
 static Foco foco;
 static float animModo[BIB_N_MODOS];
 static float animPick[3];
@@ -330,6 +333,9 @@ static float scrollY = 0.0f;
 // aqui partia na velocidade maxima e o primeiro quadro ja saltava 12%.
 static float velY = 0.0f;
 static int sair = 0, pedido = -1;
+// OK na aba "Colecoes…": um-passe para o app abrir TELA_COLECOES. O modo da
+// grade nunca vira MODO_COLECOES (ver ROT_MODO).
+static int pediuColecoes = 0;
 static int nCelulas = 0;         // celulas da grade do estado atual
 static unsigned buscaAberta;     // 1 enquanto o teclado de busca esta na tela
 
@@ -723,7 +729,7 @@ int biblioteca_iniciar(void) {
   buscaAberta = 0;
   memset(animModo, 0, sizeof animModo);
   memset(animPick, 0, sizeof animPick);
-  sair = 0; pedido = -1;
+  sair = 0; pedido = -1; pediuColecoes = 0;
   reconstruir();
   // O foco nasce na barra de modos: quem entra ainda esta escolhendo o recorte.
   foco.fileira = BIB_FIL_MODO;
@@ -756,6 +762,12 @@ int biblioteca_pediu_abrir(int *indiceCatalogo) {
   if (indiceCatalogo) *indiceCatalogo = pedido;
   pedido = -1;
   return 1;
+}
+
+int biblioteca_pediu_colecoes(void) {
+  int v = pediuColecoes;
+  pediuColecoes = 0;
+  return v;
 }
 
 // ---------------------------------------------------------------- acoes
@@ -1020,6 +1032,9 @@ void biblioteca_evento(const SDL_Event *e) {
     if (k == SDLK_DOWN) { descerDaFaixa(); return; }
     if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) {
       int novo = foco.coluna;
+      // "Colecoes…" pede a ROTA (TELA_COLECOES); o modo da grade fica como
+      // estava, e o foco tambem — quem sai da pagina volta para esta aba.
+      if (novo == MODO_COLECOES) { pediuColecoes = 1; return; }
       if (novo != modo) {
         modo = novo;
         recado[0] = 0;
@@ -1339,8 +1354,12 @@ static void txtEsc(TxtLinha l, float x, float y, float esc, float a) {
 // saem do texto. A contagem de Listas so aparece quando o modulo ja tem as
 // listas da fonte; antes disso um "0" seria mentira.
 static void textoModo(int a, char *num, size_t n) {
-  int v = a == MODO_LISTAS ? lst_n() : contaModo[a];
+  int v;
   num[0] = 0;
+  // A aba "Colecoes…" nao tem contagem propria: a pagina da rota e quem sabe
+  // as pastas, e um "0" ao lado do rotulo seria mentira.
+  if (a == MODO_COLECOES) return;
+  v = a == MODO_LISTAS ? lst_n() : contaModo[a];
   if (a != MODO_LISTAS || v > 0) snprintf(num, n, "%d", v);
 }
 static float larguraModo(int a) {
