@@ -3300,6 +3300,7 @@
   T("Organizar", "Atur"),
   T("Organizar Salvos", "Atur Tersimpan"),
   T("Organizar recomendações", "Atur rekomendasi"),
+  T("Organize seus títulos salvos em pastas.", "Atur judul tersimpan ke dalam folder."),
   T("Original", "Asli"),
   T("Original do título", "Judul asli"),
   T("Orçamento", "Anggaran"),

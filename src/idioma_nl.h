@@ -3300,6 +3300,7 @@
   T("Organizar", "Ordenen"),
   T("Organizar Salvos", "Bewaard ordenen"),
   T("Organizar recomendações", "Aanbevelingen ordenen"),
+  T("Organize seus títulos salvos em pastas.", "Sorteer je opgeslagen titels in mappen."),
   T("Original", "Origineel"),
   T("Original do título", "Originele titel"),
   T("Orçamento", "Budget"),

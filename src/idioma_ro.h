@@ -3299,6 +3299,7 @@
   T("Organizar", "Organizează"),
   T("Organizar Salvos", "Organizează Salvate"),
   T("Organizar recomendações", "Organizează recomandările"),
+  T("Organize seus títulos salvos em pastas.", "Organizează titlurile salvate în foldere."),
   T("Original", "Original"),
   T("Original do título", "Titlul original"),
   T("Orçamento", "Buget"),

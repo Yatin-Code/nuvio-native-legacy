@@ -3300,6 +3300,7 @@
   T("Organizar", "整理"),
   T("Organizar Salvos", "保存済みを整理"),
   T("Organizar recomendações", "おすすめを整理"),
+  T("Organize seus títulos salvos em pastas.", "保存したタイトルをフォルダーに整理します。"),
   T("Original", "オリジナル"),
   T("Original do título", "原題"),
   T("Orçamento", "予算"),

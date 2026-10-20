@@ -3300,6 +3300,7 @@
   T("Organizar", "Rendezés"),
   T("Organizar Salvos", "Mentettek rendezése"),
   T("Organizar recomendações", "Ajánlások rendezése"),
+  T("Organize seus títulos salvos em pastas.", "Rendezze a mentett címeket mappákba."),
   T("Original", "Eredeti"),
   T("Original do título", "Eredeti cím"),
   T("Orçamento", "Költségvetés"),

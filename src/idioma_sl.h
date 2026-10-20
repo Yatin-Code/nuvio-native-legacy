@@ -3300,6 +3300,7 @@
   T("Organizar", "Uredi"),
   T("Organizar Salvos", "Uredi Shranjeno"),
   T("Organizar recomendações", "Uredi priporočila"),
+  T("Organize seus títulos salvos em pastas.", "Uredite shranjene naslove v mape."),
   T("Original", "Izvirno"),
   T("Original do título", "Izvirni naslov"),
   T("Orçamento", "Proračun"),

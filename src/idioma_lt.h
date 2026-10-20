@@ -3300,6 +3300,7 @@
   T("Organizar", "Tvarkyti"),
   T("Organizar Salvos", "Tvarkyti Išsaugota"),
   T("Organizar recomendações", "Tvarkyti rekomendacijas"),
+  T("Organize seus títulos salvos em pastas.", "Sutvarkykite išsaugotus pavadinimus į aplankus."),
   T("Original", "Originalas"),
   T("Original do título", "Originalus pavadinimas"),
   T("Orçamento", "Biudžetas"),

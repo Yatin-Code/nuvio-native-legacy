@@ -3300,6 +3300,7 @@
   T("Organizar", "Usporiadať"),
   T("Organizar Salvos", "Usporiadať Uložené"),
   T("Organizar recomendações", "Usporiadať odporúčania"),
+  T("Organize seus títulos salvos em pastas.", "Usporiadajte uložené tituly do priečinkov."),
   T("Original", "Pôvodné"),
   T("Original do título", "Pôvodný názov"),
   T("Orçamento", "Rozpočet"),

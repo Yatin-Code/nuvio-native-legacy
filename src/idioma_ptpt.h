@@ -3300,6 +3300,7 @@
   T("Organizar", "Organizar"),
   T("Organizar Salvos", "Organizar Guardados"),
   T("Organizar recomendações", "Organizar recomendações"),
+  T("Organize seus títulos salvos em pastas.", "Organize os títulos guardados em pastas."),
   T("Original", "Original"),
   T("Original do título", "Título original"),
   T("Orçamento", "Orçamento"),

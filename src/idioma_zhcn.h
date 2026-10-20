@@ -3300,6 +3300,7 @@
   T("Organizar", "整理"),
   T("Organizar Salvos", "整理已保存"),
   T("Organizar recomendações", "整理推荐"),
+  T("Organize seus títulos salvos em pastas.", "将保存的影片整理到文件夹中。"),
   T("Original", "原始"),
   T("Original do título", "原名"),
   T("Orçamento", "预算"),

@@ -229,10 +229,12 @@ void colecoes_desenhar(Uint32 agora) {
   { float x = ajustes_conteudo_x();
     TxtLinha tit = txt_linha(TXT_AJ_TIT28, i18n("Coleções"), 243, 242, 239, 255);
     TxtLinha sub = txt_linha_corta(TXT_AJ_ESTADO,
-                   // Reuso de chave da tabela (NADA novo fora de idioma_tab.h):
-                   // o texto era uma frase de P7.1 sem entrada e vazava em
-                   // portugues na UI em ingles.
-                   i18n("Organizar Salvos"),
+                   // Chave PROPRIA do subtitulo de Colecoes (idioma_tab.h):
+                   // antes era a frase de P7.1 sem entrada (vazava em
+                   // portugues); o reuso de "Organizar Salvos" rendia
+                   // "Organize Saved", etiqueta de acao dos Ajustes, e nao o
+                   // subtitulo da tela (revisao P7.1, 2a passada).
+                   i18n("Organize seus títulos salvos em pastas."),
                    243, 242, 239, 255, NV_TELA_W - 60 - x - tit.w - 18);
     txt_desenhar(tit, x, 64 - tit.h * 0.5f);
     txt_desenhar_alpha(sub, x + tit.w + 18, 64 - sub.h * 0.5f, 0.62f); }

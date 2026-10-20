@@ -3300,6 +3300,7 @@
   T("Organizar", "Organizuj"),
   T("Organizar Salvos", "Organizuj Sačuvano"),
   T("Organizar recomendações", "Organizuj preporuke"),
+  T("Organize seus títulos salvos em pastas.", "Organizujte sačuvane naslove u foldere."),
   T("Original", "Original"),
   T("Original do título", "Originalni naslov"),
   T("Orçamento", "Budžet"),

@@ -3299,6 +3299,7 @@
   T("Organizar", "Упорядкувати"),
   T("Organizar Salvos", "Упорядкувати Збережене"),
   T("Organizar recomendações", "Упорядкувати рекомендації"),
+  T("Organize seus títulos salvos em pastas.", "Упорядкуйте збережені назви у папки."),
   T("Original", "Оригінал"),
   T("Original do título", "Оригінальна назва"),
   T("Orçamento", "Бюджет"),

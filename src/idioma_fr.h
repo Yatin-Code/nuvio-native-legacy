@@ -3299,6 +3299,7 @@
   T("Organizar", "Organiser"),
   T("Organizar Salvos", "Organiser les Enregistrés"),
   T("Organizar recomendações", "Organiser les recommandations"),
+  T("Organize seus títulos salvos em pastas.", "Classez vos titres enregistrés dans des dossiers."),
   T("Original", "Original"),
   T("Original do título", "Titre original"),
   T("Orçamento", "Budget"),

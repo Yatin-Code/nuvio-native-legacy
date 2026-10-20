@@ -3299,6 +3299,7 @@
   { "Organizar", "Organize" },
   { "Organizar Salvos", "Organize Saved" },
   { "Organizar recomendações", "Organize recommendations" },
+  { "Organize seus títulos salvos em pastas.", "Organize your saved titles into folders." },
   { "Original", "Original" },
   { "Original do título", "Original title" },
   { "Orçamento", "Budget" },

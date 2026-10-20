@@ -3300,6 +3300,7 @@
   T("Organizar", "Uporządkuj"),
   T("Organizar Salvos", "Uporządkuj Zapisane"),
   T("Organizar recomendações", "Uporządkuj rekomendacje"),
+  T("Organize seus títulos salvos em pastas.", "Uporządkuj zapisane tytuły w folderach."),
   T("Original", "Oryginał"),
   T("Original do título", "Tytuł oryginalny"),
   T("Orçamento", "Budżet"),

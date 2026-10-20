@@ -3300,6 +3300,7 @@
   T("Organizar", "Organisera"),
   T("Organizar Salvos", "Ordna Sparat"),
   T("Organizar recomendações", "Organisera rekommendationer"),
+  T("Organize seus títulos salvos em pastas.", "Ordna dina sparade titlar i mappar."),
   T("Original", "Original"),
   T("Original do título", "Originaltitel"),
   T("Orçamento", "Budget"),

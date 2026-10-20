@@ -3300,6 +3300,7 @@
   T("Organizar", "Düzenle"),
   T("Organizar Salvos", "Kaydedilenleri düzenle"),
   T("Organizar recomendações", "Önerileri düzenle"),
+  T("Organize seus títulos salvos em pastas.", "Kaydedilen başlıkları klasörlere düzenleyin."),
   T("Original", "Orijinal"),
   T("Original do título", "Orijinal başlık"),
   T("Orçamento", "Bütçe"),

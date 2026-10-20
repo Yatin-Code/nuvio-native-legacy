@@ -3300,6 +3300,7 @@
   T("Organizar", "Οργάνωση"),
   T("Organizar Salvos", "Οργάνωση Αποθηκευμένων"),
   T("Organizar recomendações", "Οργάνωση προτάσεων"),
+  T("Organize seus títulos salvos em pastas.", "Οργανώστε τους αποθηκευμένους τίτλους σε φακέλους."),
   T("Original", "Αρχικό"),
   T("Original do título", "Πρωτότυπος τίτλος"),
   T("Orçamento", "Προϋπολογισμός"),
