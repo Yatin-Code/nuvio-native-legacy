@@ -7,9 +7,11 @@
 // SUPERFICIE um degrau mais clara (o mesmo do menu do cartaz, linhaCtxTinta),
 // sem aro nem escala — a lista e de gerenciamento, nao de escolha de destino.
 //
-// P7.1 e SO a lista: OK numa fileira nao abre nada (FolderDetail e P7.2), e o
-// contrato colecoes_pediu_abrir existe desde ja para o app.c nao precisar ser
-// reescrito quando a pagina chegar.
+// P7.1 e SO a lista: OK numa fileira nao abre nada (FolderDetail e P7.2). O
+// contrato colecoes_pediu_abrir existe SO NA FORMA: o roteador do app.c (ramo
+// abrirPorIndice em TELA_COLECOES) ja esta pronto e nao muda, mas P7.2 ainda
+// tem de (1) guardar um indice de catalogo por fileira em ColLinha, (2) armar
+// `pediu` de verdade no OK e (3) fazer colecoes_pediu_abrir devolver 1 com ele.
 #include "colecoesui.h"
 #include "salvos.h"
 #include "salvosorg.h"
@@ -39,8 +41,9 @@ static ColLinha linhas[SORG_CAT_MAX + 1];   // "Sem categoria" + uma por categor
 static int      nLinhas, foco, sair;
 static float    animFoco[SORG_CAT_MAX + 1];
 static float    scroll, velScroll;
-// Um-passe do FolderDetail (P7.2): o OK da fileira armara isto. Em P7.1 ele
-// nunca arma, e colecoes_pediu_abrir devolve 0 — o roteador do app ja consome.
+// Um-passe do FolderDetail (P7.2): o OK da fileira armara isto com o indice de
+// catalogo da fileira. Em P7.1 ele nunca arma, e colecoes_pediu_abrir devolve 0
+// — o roteador do app ja consome o contrato na forma.
 static int      pediu = -1;
 // As revisoes que mudam a lista: salvo local, catalogo (a uniao le os dois) e
 // o arquivo de categorias em si.
@@ -132,8 +135,9 @@ void colecoes_encerrar(void) { sair = 0; }
 int colecoes_quer_sair(void) { int v = sair; sair = 0; return v; }
 
 int colecoes_pediu_abrir(int *indiceCatalogo) {
-  // P7.2: o OK da fileira armara `pediu` com o indice do catalogo. Em P7.1 a
-  // acao e inerte — nenhuma UX inventada para a pagina que ainda nao existe.
+  // FORMA apenas. P7.2: o OK da fileira armara `pediu` com o indice de catalogo
+  // da fileira (via ColLinha); enquanto isso a acao e inerte — nenhuma UX
+  // inventada para a pagina que ainda nao existe.
   int v = pediu;
   pediu = -1;
   (void)v;

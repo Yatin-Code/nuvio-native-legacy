@@ -3,9 +3,11 @@
 // com a contagem de titulos de cada uma. Aberta pela 4a aba da Biblioteca
 // ("Colecoes…") e roteada como TELA_COLECOES, sem sobrecarregar TELA_BIBLIOTECA.
 //
-// P7.1 entrega SO a lista: OK numa fileira ainda nao abre nada (o FolderDetail
-// e P7.2); colecoes_pediu_abrir existe com o contrato desde ja, mas so passa a
-// devolver indice quando a pagina existir.
+// P7.1 entrega SO a lista: OK numa fileira nao abre nada (o FolderDetail e
+// P7.2). O contrato existe APENAS NA FORMA: P7.2 ainda tem de acrescentar um
+// indice de catalogo por fileira (ColLinha), armar `pediu` de verdade e so
+// entao colecoes_pediu_abrir devolve 1 com esse indice. O roteador do app.c
+// (o ramo de abrirPorIndice em TELA_COLECOES) ja esta pronto e NAO muda.
 #ifndef NV_COLECOESUI_H
 #define NV_COLECOESUI_H
 #include <SDL2/SDL.h>
@@ -18,7 +20,8 @@ int  colecoes_quer_sair(void);   // 1 quando o Back deve fechar a tela (limpa ao
 void colecoes_encerrar(void);
 
 // OK numa fileira: consome o pedido e devolve 1, escrevendo em
-// *indiceCatalogo o indice NO CATALOGO. Inerte em P7.1 (sem FolderDetail).
+// *indiceCatalogo o indice NO CATALOGO. Forma so: em P7.1 `pediu` nunca arma e
+// devolve 0; P7.2 preenche `pediu` com o indice de catalogo por fileira.
 int  colecoes_pediu_abrir(int *indiceCatalogo);
 
 // Ponteiro (#99): foca a fileira i (PonteiroFn). colecoes_foco para os testes.
