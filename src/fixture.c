@@ -19,6 +19,8 @@
 #include "video.h"
 #include "salvos.h"
 #include "salvosorg.h"
+#include "colecoesui.h"
+#include "teclado.h"
 #include "posplay.h"
 #include "layout.h"
 #include "esmaecer.h"
@@ -105,6 +107,53 @@ static void tecla(SDL_Keycode k) {
   e.type = SDL_KEYDOWN; e.key.keysym.sym = k; app_evento(&e);
   e.type = SDL_KEYUP; app_evento(&e);
 }
+
+// P7.2a: os estados do editor podem rodar DEPOIS de um estado que deixou o
+// teclado, a ilha, o detalhe ou o PROPRIO FolderDetail abertos (as capturas
+// rodam em sequencia no mesmo app). Voltar fecha a camada de cima conforme ela
+// aparece — cancelar teclado e fechar confirmar nao escrevem nada, e Voltar de
+// uma pasta volta ao gerenciamento — e devolve 1 quando a tela esta limpa: no
+// gerenciamento, sem nada por cima.
+static int fecharSobra(void) {
+  if (detail_aberto() || colecoes_pop_aberto() || colecoes_vista() == 1) {
+    tecla(SDLK_AC_BACK);
+    return 0;
+  }
+  return 1;
+}
+
+// P7.2a: CAMINHADA DE TECLAS do teclado da TV (a modal do nome so aceita
+// D-pad: cada caractere e uma caminhada ate a celula e um OK). Para o
+// alfabeto de nome do editor (COL_ALFA_NOME, 38 celulas, 6 colunas por
+// fileira) a grade fica:
+//   f0 a-f | f1 g-l | f2 m-r | f3 s-x | f4 y-3 | f5 4-9 | f6 ' ' '-' |
+//   f7 apagar(0) / limpar(1) / Concluir(2)
+// A caminhada digita "kids" a partir do foco (0,0) — a primeira maiuscula
+// ("Kids") vem da normalizacao do sorg. O teclado e deterministico: o OK numa
+// tecla de caractere TYPE e o foco fica na celula.
+static const SDL_Keycode COL_TECLAS_KIDS[] = {
+  // k = f1c4
+  SDLK_DOWN, SDLK_RIGHT, SDLK_RIGHT, SDLK_RIGHT, SDLK_RIGHT, SDLK_RETURN,
+  // i = f1c2
+  SDLK_LEFT, SDLK_LEFT, SDLK_RETURN,
+  // d = f0c3
+  SDLK_UP, SDLK_RIGHT, SDLK_RETURN,
+  // s = f3c0
+  SDLK_DOWN, SDLK_DOWN, SDLK_DOWN, SDLK_LEFT, SDLK_LEFT, SDLK_LEFT, SDLK_RETURN,
+  // Concluir = f7c2 (o OK com o campo vazio nao confirma; "kids" esta no campo)
+  SDLK_DOWN, SDLK_DOWN, SDLK_DOWN, SDLK_DOWN, SDLK_RIGHT, SDLK_RIGHT, SDLK_RETURN,
+};
+#define COL_TECLAS_KIDS_N (int)(sizeof COL_TECLAS_KIDS / sizeof COL_TECLAS_KIDS[0])
+
+// O PREFACIO do renomear: desce ate a fileira de acoes (f7), limpar (coluna 1)
+// esvazia o campo que nasceu com o nome atual, e sobe de volta a (0,0) — de
+// onde COL_TECLAS_KIDS segue igual.
+static const SDL_Keycode COL_TECLAS_LIMPA[] = {
+  SDLK_DOWN, SDLK_DOWN, SDLK_DOWN, SDLK_DOWN, SDLK_DOWN, SDLK_DOWN, SDLK_DOWN,
+  SDLK_RIGHT, SDLK_RETURN,
+  SDLK_UP, SDLK_UP, SDLK_UP, SDLK_UP, SDLK_UP, SDLK_UP, SDLK_UP,
+};
+#define COL_TECLAS_LIMPA_N (int)(sizeof COL_TECLAS_LIMPA / sizeof COL_TECLAS_LIMPA[0])
 
 static int qualquer_cartao(void) {
   return novidades_aberto() || novidades11_aberto() || novidades12_aberto()
@@ -463,6 +512,87 @@ void fixture_passo(void) {
       salvos_aplicar_catalogo();
       telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
     }
+    // P7.2a: ESTADOS do FolderDetail e das camadas por cima. A tela e a MESMA
+    // TELA_COLECOES (o FolderDetail e estado, nao Tela): o ST_ESPERA abaixo sabe
+    // esperar por colecoes_vista()/colecoes_pop_aberto() antes de capturar.
+    // Cada estado RECOMECA o arquivo de categorias (sorg_esquecer): as capturas
+    // rodam em sequencia num mesmo app, e um estado nao pode herdar pastas do
+    // anterior — a contagem e a navegacao contam com a lista exata do setup.
+    else if (!strcmp(telaAlvo, "colecoes-pasta")) {
+      // FolderDetail POPULADO com as DUAS secoes do agrupamento padrao: o
+      // titulo 0 ganha progresso (cai em "Continuar") e o 1 fica sem (cai em
+      // "Não começados"); os dois entram na pasta "Fim de semana".
+      int c1;
+      sorg_carregar();
+      sorg_esquecer();
+      c1 = sorg_criar_categoria("Fim de semana");
+      cat_salvar_progresso(0, 900.0, 1800.0);
+      if (cat_item(0)) sorg_mover(cat_item(0)->imdb, c1);
+      if (cat_item(1)) sorg_mover(cat_item(1)->imdb, c1);
+      telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
+    }
+    else if (!strcmp(telaAlvo, "colecoes-pasta-vazia")) {
+      // FolderDetail de uma pasta VAZIA (a leitura do corpo vazio, sem crash).
+      sorg_carregar();
+      sorg_esquecer();
+      sorg_criar_categoria("Depois");
+      telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
+    }
+    else if (!strcmp(telaAlvo, "colecoes-criar")) {
+      // Teclado de "Nova coleção": foco na acao do pe (DOWN ate o fim) e OK.
+      sorg_carregar();
+      sorg_esquecer();
+      sorg_criar_categoria("Fim de semana");
+      telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
+    }
+    else if (!strcmp(telaAlvo, "colecoes-criada")) {
+      // RESULTADO de criar DE VERDADE: o teclado da TV abre pela acao do pe e a
+      // caminhada de teclas digita "kids" e conclui — a lista volta com a pasta
+      // nova (Kids, primeira maiuscula vem do sorg) e o recado "Coleção criada".
+      sorg_carregar();
+      sorg_esquecer();
+      telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
+    }
+    else if (!strcmp(telaAlvo, "colecoes-renomear")) {
+      // FolderDetail com o teclado de RENOMEAR aberto (OK em Renomear).
+      int c1;
+      sorg_carregar();
+      sorg_esquecer();
+      c1 = sorg_criar_categoria("Fim de semana");
+      if (cat_item(0)) sorg_mover(cat_item(0)->imdb, c1);
+      telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
+    }
+    else if (!strcmp(telaAlvo, "colecoes-renomeada")) {
+      // RESULTADO de renomear DE VERDADE: limpa o campo (que nasce com o nome
+      // atual), digita "kids" e conclui — cabecalho mostra Kids, id intacto e
+      // o recado "Coleção renomeada".
+      int c1;
+      sorg_carregar();
+      sorg_esquecer();
+      c1 = sorg_criar_categoria("Fim de semana");
+      if (cat_item(0)) sorg_mover(cat_item(0)->imdb, c1);
+      telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
+    }
+    else if (!strcmp(telaAlvo, "colecoes-excluir")) {
+      // FolderDetail com a confirmacao de EXCLUIR (RIGHT em Renomear, OK),
+      // nascendo com o foco em Cancelar.
+      int c1;
+      sorg_carregar();
+      sorg_esquecer();
+      c1 = sorg_criar_categoria("Fim de semana");
+      if (cat_item(0)) sorg_mover(cat_item(0)->imdb, c1);
+      telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
+    }
+    else if (!strcmp(telaAlvo, "colecoes-abrir-titulo")) {
+      // OK numa FILEIRA DE TITULO do FolderDetail abre o titulo pela rota de
+      // sempre (abrirPorIndice, o detalhe por cima desta tela) — e NUNCA toca.
+      int c1;
+      sorg_carregar();
+      sorg_esquecer();
+      c1 = sorg_criar_categoria("Fim de semana");
+      if (cat_item(0)) sorg_mover(cat_item(0)->imdb, c1);
+      telaPedida = (int)TELA_COLECOES; espera = 0; tEstado = SDL_GetTicks(); fase = ST_ESPERA;
+    }
     else { falha("tela desconhecida"); }
     break;
   case ST_ESPERA: {
@@ -475,6 +605,114 @@ void fixture_passo(void) {
     else if (!strcmp(telaAlvo, "library")) ok = !strcmp(app_tela_nome(), "biblioteca");
     else if (!strcmp(telaAlvo, "colecoes")) ok = !strcmp(app_tela_nome(), "colecoes");
     else if (!strcmp(telaAlvo, "colecoes-vazio")) ok = !strcmp(app_tela_nome(), "colecoes");
+    // P7.2a: passos de teclado ate o ESTADO pedido (o FolderDetail e um estado
+    // de TELA_COLECOES). passo segue a sequencia abaixo; cada passo so avanca
+    // quando o quadro anterior assentou (nunca injeta duas teclas no mesmo GAP).
+    // O passo 0 FECHA SOBRAS: um estado rodado depois de outro pode herdar o
+    // teclado ou o detalhe abertos (as capturas rodam em sequencia) — Voltar
+    // cancela os dois sem escrever nada.
+    else if (!strcmp(telaAlvo, "colecoes-pasta")) {
+      if (!strcmp(app_tela_nome(), "colecoes")) {
+        if (passo == 0) { if (fecharSobra()) { espera = 0; passo = 1; } else espera = 0; }
+        else if (passo == 1) { tecla(SDLK_DOWN); espera = 0; passo = 2; }
+        else if (passo == 2) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 3; } }
+        else if (passo == 3) { if (++espera > 4) { if (colecoes_vista() == 1) ok = 1; else passo = 2; } }
+      }
+    }
+    else if (!strcmp(telaAlvo, "colecoes-pasta-vazia")) {
+      if (!strcmp(app_tela_nome(), "colecoes")) {
+        if (passo == 0) { if (fecharSobra()) { espera = 0; passo = 1; } else espera = 0; }
+        else if (passo == 1) { tecla(SDLK_DOWN); espera = 0; passo = 2; }
+        else if (passo == 2) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 3; } }
+        else if (passo == 3) { if (++espera > 4) { if (colecoes_vista() == 1) ok = 1; else passo = 2; } }
+      }
+    }
+    else if (!strcmp(telaAlvo, "colecoes-criar")) {
+      if (!strcmp(app_tela_nome(), "colecoes")) {
+        // DOWN ate a acao do pe (foco 0 = "Sem categoria"; 1 = "Fim de semana"
+        // criada; 2 = a acao), depois OK abre o teclado.
+        if (passo == 0) { if (fecharSobra()) { espera = 0; passo = 1; } else espera = 0; }
+        else if (passo == 1) { tecla(SDLK_DOWN); espera = 0; passo = 2; }
+        else if (passo == 2) { tecla(SDLK_DOWN); espera = 0; passo = 3; }
+        else if (passo == 3) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 4; } }
+        else if (passo == 4) { if (++espera > 4) { if (colecoes_pop_aberto()) ok = 1; else passo = 3; } }
+      }
+    }
+    else if (!strcmp(telaAlvo, "colecoes-criada")) {
+      if (!strcmp(app_tela_nome(), "colecoes")) {
+        // Acao do pe -> teclado -> a caminhada de teclas digita "kids" ->
+        // Concluir -> a lista volta com a pasta Kids e o recado.
+        if (passo == 0) { if (fecharSobra()) { espera = 0; passo = 1; } else espera = 0; }
+        else if (passo == 1) { tecla(SDLK_DOWN); espera = 0; passo = 2; }   // foco 1 = a acao
+        else if (passo == 2) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 3; } }
+        else if (passo == 3) { if (++espera > 4) { if (colecoes_pop_aberto()) { passo = 4; } else passo = 2; } }
+        else if (passo < 4 + COL_TECLAS_KIDS_N) {
+          if (++espera > 4) { tecla(COL_TECLAS_KIDS[passo - 4]); espera = 0; passo++; }
+        }
+        else if (passo == 4 + COL_TECLAS_KIDS_N) {
+          if (++espera > 4) { if (!colecoes_pop_aberto() && colecoes_n_categorias() >= 1) ok = 1; }
+        }
+      }
+    }
+    else if (!strcmp(telaAlvo, "colecoes-renomear")) {
+      if (!strcmp(app_tela_nome(), "colecoes")) {
+        if (passo == 0) { if (fecharSobra()) { espera = 0; passo = 1; } else espera = 0; }
+        else if (passo == 1) { tecla(SDLK_DOWN); espera = 0; passo = 2; }   // abre a pasta
+        else if (passo == 2) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 3; } }
+        else if (passo == 3) { if (++espera > 4) { if (colecoes_vista() == 1) passo = 4; else passo = 2; } }
+        // Corpo -> acoes do cabecalho (UP), depois OK em Renomear (detAcao 0).
+        else if (passo == 4) { if (++espera > 4) { tecla(SDLK_UP); espera = 0; passo = 5; } }
+        else if (passo == 5) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 6; } }
+        else if (passo == 6) { if (++espera > 4) { if (colecoes_pop_aberto()) ok = 1; else passo = 5; } }
+      }
+    }
+    else if (!strcmp(telaAlvo, "colecoes-renomeada")) {
+      if (!strcmp(app_tela_nome(), "colecoes")) {
+        // Teclado de renomear (o campo NASCE com o nome atual): limpar (f7,
+        // coluna 1), voltar a grade, digitar "kids" e Concluir.
+        if (passo == 0) { if (fecharSobra()) { espera = 0; passo = 1; } else espera = 0; }
+        else if (passo == 1) { tecla(SDLK_DOWN); espera = 0; passo = 2; }
+        else if (passo == 2) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 3; } }
+        else if (passo == 3) { if (++espera > 4) { if (colecoes_vista() == 1) passo = 4; else passo = 2; } }
+        else if (passo == 4) { if (++espera > 4) { tecla(SDLK_UP); espera = 0; passo = 5; } }
+        else if (passo == 5) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 6; } }
+        else if (passo == 6) { if (++espera > 4) { if (colecoes_pop_aberto()) { passo = 7; } else passo = 5; } }
+        else if (passo < 7 + COL_TECLAS_LIMPA_N) {
+          if (++espera > 4) { tecla(COL_TECLAS_LIMPA[passo - 7]); espera = 0; passo++; }
+        }
+        else if (passo < 7 + COL_TECLAS_LIMPA_N + COL_TECLAS_KIDS_N) {
+          if (++espera > 4) { tecla(COL_TECLAS_KIDS[passo - 7 - COL_TECLAS_LIMPA_N]); espera = 0; passo++; }
+        }
+        else if (passo == 7 + COL_TECLAS_LIMPA_N + COL_TECLAS_KIDS_N) {
+          if (++espera > 4) { if (!colecoes_pop_aberto() && colecoes_vista() == 1) ok = 1; }
+        }
+      }
+    }
+    else if (!strcmp(telaAlvo, "colecoes-excluir")) {
+      if (!strcmp(app_tela_nome(), "colecoes")) {
+        if (passo == 0) { if (fecharSobra()) { espera = 0; passo = 1; } else espera = 0; }
+        else if (passo == 1) { tecla(SDLK_DOWN); espera = 0; passo = 2; }
+        else if (passo == 2) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 3; } }
+        else if (passo == 3) { if (++espera > 4) { if (colecoes_vista() == 1) passo = 4; else passo = 2; } }
+        // Corpo -> acoes (UP), RIGHT ate Excluir (detAcao 1), OK -> confirmacao.
+        else if (passo == 4) { if (++espera > 4) { tecla(SDLK_UP); espera = 0; passo = 5; } }
+        else if (passo == 5) { if (++espera > 4) { tecla(SDLK_RIGHT); espera = 0; passo = 6; } }
+        else if (passo == 6) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 7; } }
+        else if (passo == 7) { if (++espera > 4) { if (colecoes_pop_aberto()) ok = 1; else passo = 6; } }
+      }
+    }
+    else if (!strcmp(telaAlvo, "colecoes-abrir-titulo")) {
+      if (!strcmp(app_tela_nome(), "colecoes")) {
+        if (passo == 0) { if (fecharSobra()) { espera = 0; passo = 1; } else espera = 0; }
+        else if (passo == 1) { tecla(SDLK_DOWN); espera = 0; passo = 2; }
+        else if (passo == 2) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 3; } }
+        else if (passo == 3) { if (++espera > 4) { if (colecoes_vista() == 1) passo = 4; else passo = 2; } }
+        // A 1a fileira do corpo ja nasce focada (detSel=1): OK arma o pedido e
+        // o app.c abre o detalhe POR CIMA desta tela — sem play nenhum.
+        else if (passo == 4) { if (++espera > 4) { tecla(SDLK_RETURN); espera = 0; passo = 5; } }
+        else if (passo == 5) { if (++espera > 4) { if (detail_aberto() && !player_aberto()) ok = 1; else passo = 4; } }
+      }
+    }
     if (ok) { tProntaEm = SDL_GetTicks() + 2500; qProntaEm = quadro + 20; fase = ST_SETTLE; }
     else if (SDL_GetTicks() - tEstado > 75000) falha("timeout de espera");
     break;
