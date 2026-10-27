@@ -1,13 +1,22 @@
-// Captura a tela Explorar (o ceu das historias) SEM janela visivel: a janela
-// GL nasce escondida, o desenho vai para um FBO e o quadro sai por
-// glReadPixels. Dois momentos:
-//   1. "local": so o catalogo sintetico, como abre sem TMDB;
-//   2. "cruzado": um cruzamento pronto publicado por mapa_publicar_teste, com
-//      titulos e cartazes do pacote (deploy/app/art) — os ELOS sao dados de
-//      exemplo escritos aqui, nao resposta do TMDB.
-// Tambem imprime o custo de cada quadro capturado (desenhos, trocas de
-// programa, area preenchida em telas cheias, ms de CPU no desenho).
+// Captura a tela Explorar 2.0 SEM janela visivel: a janela GL nasce escondida,
+// o desenho vai para um FBO e o quadro sai por glReadPixels, em PNG.
+//
+// So o caminho LOCAL (sem chave do TMDB, sem rede): e o que a tela tem de
+// mostrar sozinha. Catalogo sintetico com cartazes do pacote
+// (deploy/app/art/poster); nomes de pessoas sao de exemplo.
+//
+// Quadros:
+//   1-climas     a grade de climas (portal)
+//   2-clima      o primeiro clima aberto
+//   3-vizinhanca a toca no primeiro titulo do clima
+//   4-trilha     depois de descer dois degraus (trilha com tres passos)
+//   5-subiu      Voltar uma vez: um degrau acima
+//   6-detalhe    entrada pelo Detalhe (explorar_abrir_titulo)
+// Alem das capturas, confere pelo retrato publicado (mapa_vizinhos_copiar)
+// que cada OK desceu de fato, que Voltar subiu e que Voltar no primeiro degrau
+// da entrada pelo Detalhe pede a pagina do titulo de volta.
 #include "explorar.h"
+#include "nvtmp.h"
 #include "mapa.h"
 #include "catalogo.h"
 #include "gfx.h"
@@ -16,6 +25,7 @@
 #include "ajustes.h"
 #include "rail_shot.h"
 #include "dados.h"
+#include "vidro_telas.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <assert.h>
@@ -24,7 +34,7 @@
 #include <string.h>
 
 static GLuint fbo, fboTex;
-static const char *saida = "/tmp/nuvio-explorar";
+static const char *saida;
 
 static void tecla(SDL_Keycode k) {
   SDL_Event e;
@@ -38,23 +48,22 @@ static void quadros(int n, const char *nome) {
   int i;
   rail_shot_aplicar();
   for (i = 0; i < n; i++) {
-    Uint64 t0;
-    double ms;
     SDL_PumpEvents();
     txt_novo_quadro();
     tex_novo_quadro();
     tex_bombear(10);
     gfx_novo_quadro();
+    vt_antes();
     explorar_atualizar(1.0f / 60.0f, SDL_GetTicks());
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glViewport(0, 0, 1920, 1080);
     glClearColor(0.051f, 0.051f, 0.051f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
-    t0 = SDL_GetPerformanceCounter();
     explorar_desenhar(SDL_GetTicks());
     rail_shot_desenhar(MENU_EXPLORAR);
+    vt_depois();
+    if (vt_ligado()) continue;
     glFinish();
-    ms = (double)(SDL_GetPerformanceCounter() - t0) * 1000.0 / (double)SDL_GetPerformanceFrequency();
     if (nome && i == n - 1) {
       unsigned char *pix = malloc(1920 * 1080 * 4);
       SDL_Surface *s;
@@ -66,74 +75,46 @@ static void quadros(int n, const char *nome) {
       assert(s);
       for (y = 0; y < 1080; y++)
         memcpy((char *)s->pixels + y * s->pitch, pix + (1079 - y) * 1920 * 4, 1920 * 4);
-      snprintf(cam, sizeof cam, "%s-%s.bmp", saida, nome);
-      assert(SDL_SaveBMP(s, cam) == 0);
+      snprintf(cam, sizeof cam, "%s-%s.png", saida, nome);
+      assert(IMG_SavePNG(s, cam) == 0);
       SDL_FreeSurface(s);
       free(pix);
-      printf("%-14s desenhos=%3d programas=%2d preenchido=%.2f telas cheias=%d cpu=%.2f ms\n",
-             nome, gfx_n_rect, gfx_n_prog, gfx_fill, gfx_n_cheio, ms);
+      printf("%s  desenhos=%d\n", cam, gfx_n_rect);
     }
     SDL_Delay(2);
   }
 }
 
-// --- catalogo sintetico: titulos e cartazes do pacote ---------------------------
+// --- catalogo sintetico ---------------------------------------------------------
 
-typedef struct { const char *titulo, *genero, *meta, *poster, *tipo; int nota; } Linha;
+typedef struct {
+  const char *titulo, *genero, *meta, *poster, *tipo, *direcao, *ator;
+  int nota, progresso;
+} Linha;
 static const Linha CAT[] = {
-  { "The Prestige", "Filme  ·  Drama  ·  Mistério", "2006  ·  130 min", "02", "movie", 85 },
-  { "Frequency", "Filme  ·  Crime  ·  Drama", "2000  ·  118 min", "05", "movie", 72 },
-  { "Prisoners", "Filme  ·  Crime  ·  Drama", "2013  ·  153 min", "09", "movie", 81 },
-  { "The Martian", "Filme  ·  Aventura  ·  Drama", "2015  ·  141 min", "12", "movie", 80 },
-  { "3 Body Problem", "Série  ·  Ficção científica  ·  Mistério", "2024", "15", "series", 76 },
-  { "Lost", "Série  ·  Mistério  ·  Aventura", "2004", "21", "series", 83 },
-  { "The Mist", "Série  ·  Ficção científica  ·  Mistério", "2017", "19", "series", 64 },
-  { "Maniac", "Série  ·  Comédia  ·  Drama", "2018", "39", "series", 77 },
-  { "Project Hail Mary", "Filme  ·  Aventura  ·  Comédia", "2026  ·  157 min", "13", "movie", 84 },
-  { "From", "Série  ·  Drama  ·  Terror", "2022", "04", "series", 77 },
-  { "Space/Time", "Filme  ·  Ficção científica  ·  Ação", "2025  ·  90 min", "14", "movie", 61 },
-  { "Mr. K", "Filme  ·  Drama  ·  Mistério", "2025  ·  96 min", "38", "movie", 66 },
-  { "Locke & Key", "Série  ·  Ficção científica  ·  Drama", "2020", "27", "series", 73 },
-  { "WandaVision", "Série  ·  Ficção científica  ·  Mistério", "2021", "31", "series", 79 },
-  { "Fallout", "Série  ·  Ação  ·  Aventura", "2024", "00", "series", 82 },
-  { "Extrapolations", "Série  ·  Drama  ·  Ficção científica", "2023", "17", "series", 60 },
-  { "The Umbrella Academy", "Série  ·  Ação  ·  Ficção científica", "2019", "35", "series", 76 },
-  { "IT: Welcome to Derry", "Série  ·  Drama  ·  Mistério", "2025", "29", "series", 78 },
+  { "The Prestige", "Filme  ·  Drama  ·  Mistério", "2006  ·  130 min", "02", "movie", "Lena Hart", "Tomás Weber", 85, 96 },
+  { "Frequency", "Filme  ·  Crime  ·  Drama", "2000  ·  118 min", "05", "movie", "Iris Moon", "Paulo Vidal", 72, 96 },
+  { "Prisoners", "Filme  ·  Crime  ·  Drama", "2013  ·  153 min", "09", "movie", "Iris Moon", "Tomás Weber", 81, 45 },
+  { "The Martian", "Filme  ·  Aventura  ·  Drama", "2015  ·  141 min", "12", "movie", "Rui Sato", "Ana Kowalski", 80, 96 },
+  { "3 Body Problem", "Série  ·  Ficção científica  ·  Mistério", "2024", "15", "series", "", "Ana Kowalski", 76, 45 },
+  { "Lost", "Série  ·  Mistério  ·  Aventura", "2004", "21", "series", "", "Paulo Vidal", 83, 0 },
+  { "The Mist", "Série  ·  Ficção científica  ·  Mistério", "2017", "19", "series", "", "Tomás Weber", 64, 0 },
+  { "Maniac", "Série  ·  Comédia  ·  Drama", "2018", "39", "series", "", "Ana Kowalski", 77, 0 },
+  { "Project Hail Mary", "Filme  ·  Aventura  ·  Ficção científica", "2026  ·  157 min", "13", "movie", "Rui Sato", "Paulo Vidal", 84, 0 },
+  { "From", "Série  ·  Drama  ·  Terror", "2022", "04", "series", "", "Paulo Vidal", 77, 0 },
+  { "Space/Time", "Filme  ·  Ficção científica  ·  Mistério", "2025  ·  90 min", "14", "movie", "Lena Hart", "Ana Kowalski", 61, 0 },
+  { "Mr. K", "Filme  ·  Drama  ·  Mistério", "2025  ·  96 min", "38", "movie", "Lena Hart", "Tomás Weber", 66, 0 },
+  { "Locke & Key", "Série  ·  Fantasia  ·  Drama", "2020", "27", "series", "", "Tomás Weber", 73, 0 },
+  { "WandaVision", "Série  ·  Ficção científica  ·  Mistério", "2021", "31", "series", "", "Ana Kowalski", 79, 0 },
+  { "Fallout", "Série  ·  Ação  ·  Aventura", "2024", "00", "series", "", "Paulo Vidal", 82, 0 },
+  { "Extrapolations", "Série  ·  Drama  ·  Ficção científica", "2023", "17", "series", "", "Ana Kowalski", 60, 0 },
+  { "The Umbrella Academy", "Série  ·  Ação  ·  Ficção científica", "2019", "35", "series", "", "Paulo Vidal", 76, 0 },
+  { "IT: Welcome to Derry", "Série  ·  Drama  ·  Mistério", "2025", "29", "series", "", "Tomás Weber", 78, 0 },
+  { "Zodiac", "Filme  ·  Crime  ·  Mistério", "2007  ·  157 min", "07", "movie", "Iris Moon", "Paulo Vidal", 77, 0 },
+  { "Severance", "Série  ·  Drama  ·  Mistério", "2022", "23", "series", "", "Ana Kowalski", 87, 0 },
+  { "Dark Comedy Night", "Filme  ·  Comédia  ·  Crime", "2019  ·  101 min", "33", "movie", "Rui Sato", "Paulo Vidal", 70, 0 },
 };
 #define NCAT (int)(sizeof CAT / sizeof CAT[0])
-
-static void poster(char *dst, size_t n, const char *id) {
-  snprintf(dst, n, "deploy/app/art/poster/%s.jpg", id);
-}
-
-// Com NUVIO_SHOT_EN=1 a captura vai para as notas da release em ingles: uma
-// frase curta por titulo (texto nosso, nao do TMDB) no lugar do texto de
-// medida em portugues. Sem a variavel, o texto de medida continua.
-static const char *SINOPSE_EN[] = {
-  "Two rival stage magicians push their obsession to a dangerous limit.",
-  "A son talks to his late father through an old radio across thirty years.",
-  "A father takes the law into his own hands after two girls go missing.",
-  "Stranded on Mars, an astronaut has to science his way back home.",
-  "A choice made decades ago reaches across space and time to the present.",
-  "Survivors of a plane crash find the island is far from deserted.",
-  "A strange fog rolls into a small town, and something moves inside it.",
-  "Two strangers join a drug trial that promises to fix the mind.",
-  "A lone astronaut wakes up far from Earth with no memory of why.",
-  "A town no one can leave, and whatever comes out after dark.",
-  "A physicist bends time and has to live with the loops he creates.",
-  "A photographer checks into a hotel that refuses to let him go.",
-  "Three siblings find keys in their family home that unlock magic.",
-  "A perfect sitcom suburb starts to crack at the edges.",
-  "Two centuries after the bombs, a vault dweller steps outside.",
-  "Linked stories of families living through a warming world.",
-  "Estranged adopted siblings reunite to stop the end of the world.",
-  "A small town in Maine learns what lives beneath its streets.",
-};
-static const char *sinopseEn(int i) {
-  const char *en = getenv("NUVIO_SHOT_EN");
-  if (!en || *en != '1') return NULL;
-  return i >= 0 && i < (int)(sizeof SINOPSE_EN / sizeof SINOPSE_EN[0]) ? SINOPSE_EN[i] : NULL;
-}
 
 static void semearCatalogo(void) {
   static CatItem itens[NCAT];
@@ -146,109 +127,35 @@ static void semearCatalogo(void) {
     snprintf(c->titulo, sizeof c->titulo, "%s", CAT[i].titulo);
     snprintf(c->genero, sizeof c->genero, "%s", CAT[i].genero);
     snprintf(c->meta, sizeof c->meta, "%s", CAT[i].meta);
-    poster(c->poster, sizeof c->poster, CAT[i].poster);
-    snprintf(c->sinopse, sizeof c->sinopse, "%s",
-             "Uma historia de exemplo para medir o corte da sinopse no painel lateral, "
-             "com o comprimento de uma sinopse real do TMDB.");
-    if (sinopseEn(i)) snprintf(c->sinopse, sizeof c->sinopse, "%s", sinopseEn(i));
+    snprintf(c->poster, sizeof c->poster, "deploy/app/art/poster/%s.jpg", CAT[i].poster);
+    snprintf(c->direcao, sizeof c->direcao, "%s", CAT[i].direcao);
+    snprintf(c->elenco[0].nome, sizeof c->elenco[0].nome, "%s", CAT[i].ator);
+    c->nElenco = 1;
     c->nota = CAT[i].nota;
-    // As oito primeiras sao o "historico": progresso visto ou em andamento.
-    if (i < 8) c->progresso = (i % 3 == 0) ? 45 : 96;
+    c->progresso = CAT[i].progresso;
   }
   cat_definir_tudo(itens, NCAT, NULL, 0);
 }
 
-// --- cruzamento de exemplo ------------------------------------------------------
-
-static MapaObra obra(int i, long tmdb) {
-  MapaObra o;
-  memset(&o, 0, sizeof o);
-  o.tmdb = tmdb;
-  o.catIndice = i;
-  snprintf(o.imdb, sizeof o.imdb, "tt-exp-%02d", i);
-  snprintf(o.tipo, sizeof o.tipo, "%s", CAT[i].tipo);
-  snprintf(o.titulo, sizeof o.titulo, "%s", CAT[i].titulo);
-  poster(o.poster, sizeof o.poster, CAT[i].poster);
-  snprintf(o.sinopse, sizeof o.sinopse, "%s",
-           "Sinopse de exemplo com o tamanho de uma real, para conferir quantas linhas "
-           "cabem no painel e onde o texto corta sem invadir a acao.");
-  if (sinopseEn(i)) snprintf(o.sinopse, sizeof o.sinopse, "%s", sinopseEn(i));
-  o.ano = atoi(CAT[i].meta);
-  o.nota = CAT[i].nota;
-  o.votos = 5000 + i * 700;
-  return o;
-}
-
-static void kw(MapaSemente *s, long id, const char *nome) {
-  s->kw[s->nKw].id = id;
-  snprintf(s->kw[s->nKw].nome, sizeof s->kw[0].nome, "%s", nome);
-  s->nKw++;
-}
-static void gen(MapaSemente *s, long id, const char *nome) {
-  s->gen[s->nGen].id = id;
-  snprintf(s->gen[s->nGen].nome, sizeof s->gen[0].nome, "%s", nome);
-  s->nGen++;
-}
-static void gente(MapaSemente *s, long id, const char *nome, int dir) {
-  s->gente[s->nGente].id = id;
-  snprintf(s->gente[s->nGente].nome, sizeof s->gente[0].nome, "%s", nome);
-  s->gente[s->nGente].direcao = dir;
-  s->nGente++;
-}
-static void rec(MapaSemente *s, int i) {
-  s->rec[s->nRec].o = obra(i, 9000 + i);
-  s->rec[s->nRec].generos[0] = 18;
-  s->rec[s->nRec].generos[1] = 9648;
-  s->rec[s->nRec].nGen = 2;
-  s->nRec++;
-}
-
-static void publicarCruzado(void) {
-  static MapaSemente s[8];
-  static MapaCreditos c[1];
-  int i;
-  memset(s, 0, sizeof s);
-  for (i = 0; i < 8; i++) {
-    s[i].obra = obra(i, 100 + i);
-    s[i].quando = 1;
-    s[i].origem = (i % 3 == 0) ? MAPA_ORIGEM_ANDAMENTO : MAPA_ORIGEM_VISTO;
-    gen(&s[i], 18, "Drama");
-  }
-  gen(&s[0], 9648, "Mistério"); kw(&s[0], 11800, "twist ending"); kw(&s[0], 1, "memory");
-  gente(&s[0], 6968, "Hugh Jackman", 0); gente(&s[0], 525, "Christopher Nolan", 1);
-  kw(&s[1], 4379, "time travel"); gen(&s[1], 80, "Crime");
-  gen(&s[2], 80, "Crime"); kw(&s[2], 11800, "twist ending"); kw(&s[2], 6149, "small town");
-  gente(&s[2], 6968, "Hugh Jackman", 0); gente(&s[2], 137427, "Denis Villeneuve", 1);
-  kw(&s[3], 9882, "space"); gen(&s[3], 12, "Aventura");
-  kw(&s[4], 9882, "space"); kw(&s[4], 4379, "time travel"); gen(&s[4], 878, "Ficção científica");
-  kw(&s[5], 4379, "time travel"); gen(&s[5], 9648, "Mistério");
-  kw(&s[6], 6149, "small town"); gen(&s[6], 878, "Ficção científica");
-  kw(&s[7], 1, "memory");
-  rec(&s[3], 8); rec(&s[4], 8);            // Project Hail Mary: das duas do espaco
-  rec(&s[6], 9); rec(&s[2], 9);            // From: cidade pequena
-  rec(&s[1], 10); rec(&s[5], 10);          // Space/Time: viagem no tempo
-  rec(&s[0], 11); rec(&s[2], 11);          // Mr. K
-  rec(&s[7], 12); rec(&s[0], 12);          // Locke & Key: memoria
-  rec(&s[4], 13); rec(&s[6], 14); rec(&s[5], 15); rec(&s[1], 16); rec(&s[3], 17);
-  memset(c, 0, sizeof c);
-  c[0].pessoa = 6968;
-  c[0].n = 1;
-  c[0].obras[0] = obra(17, 263115);
-  snprintf(c[0].obras[0].titulo, sizeof c[0].obras[0].titulo, "%s", "Logan");
-  c[0].obras[0].poster[0] = 0;            // sem cartaz no pacote: o painel mostra o vazio
-  c[0].obras[0].ano = 2017;
-  c[0].obras[0].nota = 78;
-  mapa_publicar_teste(s, 8, c, 1);
+static void focoPublicado(char *dst, size_t n, int *grupos) {
+  static MapaVizinhos v;
+  unsigned rev = 0;
+  int g;
+  assert(mapa_vizinhos_copiar(&v, &rev));
+  snprintf(dst, n, "%s", v.foco.titulo);
+  *grupos = 0;
+  for (g = 0; g < MAPA_VIZ_GRUPOS; g++) if (v.g[g].n > 0) (*grupos)++;
 }
 
 int main(int argc, char **argv) {
   SDL_Window *win;
   SDL_GLContext gl;
-  if (argc > 1) saida = argv[1];
+  char raiz[128], passo1[128], passo2[128], volta[128];
+  int grupos;
+  saida = argc > 1 ? argv[1] : nvt("/nuvio-explorar");
   // Idioma, acento e animacoes pelo caminho de verdade (ajustes.txt na pasta
-  // de dados temporaria), como em social_shot: NUVIO_SHOT_EN=1 para ingles,
-  // NUVIO_SHOT_THEME=<n> para o acento, NUVIO_SHOT_REDUZ=1 para animacoes
-  // reduzidas.
+  // de dados temporaria): NUVIO_SHOT_EN=1 para ingles, NUVIO_SHOT_THEME=<n>
+  // para o acento, NUVIO_SHOT_REDUZ=1 para animacoes reduzidas.
   ajustes_iniciar();
   dados_iniciar("deploy/app/art");
   { char caminho[700]; FILE *f;
@@ -261,7 +168,6 @@ int main(int argc, char **argv) {
             en && *en == '1', tema && *tema ? atoi(tema) : 2, reduz && *reduz == '1');
     fclose(f);
     ajustes_dir(dados_dir()); }
-  // Nada na tela do Mac: sem icone no Dock e janela escondida.
   SDL_SetHint("SDL_MAC_BACKGROUND_APP", "1");
   assert(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) == 0);
   IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
@@ -286,25 +192,64 @@ int main(int argc, char **argv) {
   gfx_tex_esquecer(0);
   semearCatalogo();
 
+  // Os climas saem do catalogo, sem rede: o primeiro (maior afinidade) tem de
+  // ter titulos.
+  { static MapaClimas cl;
+    unsigned rev = 0;
+    mapa_climas_pedir();
+    assert(mapa_climas_copiar(&cl, &rev));
+    assert(cl.n == MAPA_CLIMA_N && cl.c[0].n > 0 && cl.c[0].afinidade >= cl.c[1].afinidade); }
+
   explorar_iniciar();
-  quadros(40, "entrada");
-  quadros(140, "local");
+  // NUVIO_VIDRO_TELAS=<dir> (tests/vidro_telas.sh): glass budget, climates.
+  if (vt_ligado()) {
+    int i;
+    vt_vidro();
+    for (i = 0; i < 150; i++) { quadros(1, NULL); SDL_Delay(2); }
+    vt_zerar(); quadros(30, NULL); vt_png("explorar"); vt_relatar("explore", 2);
+    for (i = 0; i < 6; i++) { tecla(i & 1 ? SDLK_LEFT : SDLK_RIGHT); quadros(4, NULL); }
+    vt_relatar("explore", 0);
+    return vtFalhas ? 1 : 0;
+  }
+  quadros(90, "1-climas");
+  tecla(SDLK_RETURN);
+  quadros(70, "2-clima");
 
-  publicarCruzado();
-  quadros(150, "cruzado");
-  tecla(SDLK_LEFT);  quadros(50, "foco-esq");
-  tecla(SDLK_UP);    quadros(50, "foco-cima");
-  tecla(SDLK_UP);    quadros(50, "foco-cima2");
-  tecla(SDLK_RIGHT); quadros(50, "foco-dir");
-  tecla(SDLK_RIGHT); quadros(50, "foco-dir2");
-  tecla(SDLK_DOWN);  quadros(50, "foco-baixo");
-  // O dado mora no canto de baixo a direita: direita ate o fim, depois desce.
-  { int i; for (i = 0; i < 6; i++) tecla(SDLK_RIGHT); tecla(SDLK_DOWN); tecla(SDLK_DOWN); }
-  quadros(50, "dado");
-  tecla(SDLK_RETURN); quadros(40, "giro");
-  quadros(120, "sorteado");
+  tecla(SDLK_RETURN);
+  quadros(70, "3-vizinhanca");
+  focoPublicado(raiz, sizeof raiz, &grupos);
+  assert(raiz[0] && grupos >= 2);
 
-  puts("explorar_shot: capturas gravadas");
+  // Dois degraus: o primeiro cartaz do primeiro grupo, depois o segundo cartaz.
+  tecla(SDLK_RETURN);
+  quadros(10, NULL);
+  focoPublicado(passo1, sizeof passo1, &grupos);
+  assert(strcmp(passo1, raiz) && grupos >= 1);
+  tecla(SDLK_RIGHT);
+  tecla(SDLK_RETURN);
+  quadros(70, "4-trilha");
+  focoPublicado(passo2, sizeof passo2, &grupos);
+  assert(strcmp(passo2, passo1) && strcmp(passo2, raiz));
+
+  tecla(SDLK_ESCAPE);
+  quadros(50, "5-subiu");
+  focoPublicado(volta, sizeof volta, &grupos);
+  assert(!strcmp(volta, passo1));
+
+  // Entrada pelo Detalhe: a toca comeca no titulo da pagina.
+  explorar_iniciar();
+  { MapaObra o;
+    assert(mapa_obra_do_catalogo(2, &o));
+    explorar_abrir_titulo(&o); }
+  quadros(70, "6-detalhe");
+  focoPublicado(volta, sizeof volta, &grupos);
+  assert(!strcmp(volta, "Prisoners"));
+  // Voltar no primeiro degrau devolve a pagina do titulo.
+  tecla(SDLK_ESCAPE);
+  { int idx = -1;
+    assert(explorar_pediu_abrir(&idx) && idx == 2); }
+
+  printf("explorar_shot: raiz=%s -> %s -> %s; capturas gravadas\n", raiz, passo1, passo2);
   explorar_encerrar();
   tex_encerrar();
   txt_encerrar();

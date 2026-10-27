@@ -1,3 +1,4 @@
+#include "arteurl.h"
 // SALVOS: a lista de "quero ver" que sobrevive ao proximo arranque.
 //
 // O DEFEITO QUE ISTO CONSERTA, e ele e grande. O "+" do detalhe (app.c,
@@ -48,13 +49,27 @@ typedef struct {
   char id[24];        // IMDb ("tt0111161"). Vazio nunca entra na lista.
   char tipo[8];       // "movie" | "series"
   char titulo[160];
-  char poster[512];
+  // Mesmo teto de CatItem.poster (#433): o cartaz de provedor com nota passa
+  // de 500 caracteres e o corte calado era um 404. O arquivo e texto com TAB,
+  // entao lista gravada antes le igual; so a memoria cresce, e so por item.
+  char poster[NV_ARTE_URL_MAX];
   char meta[96];      // "2002" ou "2022 · 3 temporadas", como vem do catalogo
   int  nota;          // imdb_rating em porcentagem; 0 = desconhecida
   long long quandoS;  // time(NULL) do salvamento, para "Salvo há 2 horas"
 } SalvoItem;
 
-// Le salvos.txt. Chamar UMA vez no arranque, depois de dados_iniciar — sem
+// Qual perfil a lista em memoria representa (padrao 1). Trocar de perfil
+// larga a lista e le salvos-p<N>.txt do novo. Chamar com perfis_ativo() antes
+// de salvos_iniciar e a cada troca de perfil.
+void salvos_perfil(int perfil);
+int  salvos_perfil_atual(void);
+// A lista antiga (salvos.txt) foi adotada por um perfil nesta TV e AINDA NAO
+// subiu para a conta: 1 e o perfil em *perfil. Depois de entregar ao jornal da
+// conta, salvos_migracao_conta_feita() — e nunca mais se repete.
+int  salvos_migracao_conta(int *perfil);
+void salvos_migracao_conta_feita(void);
+
+// Le a lista do perfil. Chamar UMA vez no arranque, depois de dados_iniciar — sem
 // pasta de dados isto e no-op silencioso e a lista comeca vazia (o log de
 // dados.c ja explicou por que nao ha pasta).
 void salvos_iniciar(void);
@@ -77,6 +92,10 @@ int  salvos_tem(const char *imdb);
 // no arranque seguinte o painel abre antes de existir catalogo nenhum, e uma
 // lista de ids nus desenharia oito retangulos cinza sem nome.
 int  salvos_definir(const CatItem *ci, int salvo);
+void salvos_remover_remoto(const char *id); // No outbound gesture.
+// Quem quer saber de CADA gesto de salvar/tirar (app.c liga o jornal da conta,
+// contapend.h). Chamado antes da lista local mudar, mesmo quando ela nao muda.
+void salvos_ao_definir(void (*f)(const CatItem *ci, int salvo));
 
 // Marca no catalogo (naLista) tudo que esta na lista local. Devolve quantos
 // ficaram marcados. FIO PRINCIPAL apenas.
@@ -104,10 +123,9 @@ int  salvos_mesmo_titulo(const char *a, const char *b);
 // `id` sem o sufixo ":<t>:<e>" em `out`. Id sem esse sufixo sai igual.
 void salvos_id_titulo(const char *id, char *out, size_t tam);
 
-// A UNIAO QUE A INTERFACE MOSTRA COMO "SALVOS": a lista local, na ordem de
-// insercao, e depois cada TITULO do catalogo com naLista — uma vez so, por
-// mais copias que o catalogo tenha dele (o mesmo titulo vive em varias
-// fileiras, cada uma com a sua copia) e por mais ids que ele use.
+// Saved rows follow the effective Library source: local insertion order for
+// Nuvio, then catalog titles marked for that source, once per title.
+// Catalog duplicates and episode IDs collapse into the same title.
 //   local >= 0: indice em salvos_item(); `cat` e a copia do catalogo que tem o
 //               progresso dele (-1 sem nenhuma).
 //   local <  0: so o catalogo tem; `cat` e o indice.

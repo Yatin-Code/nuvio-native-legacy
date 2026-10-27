@@ -8,6 +8,7 @@
 #                             que a auto-atualizacao procura em releases/latest
 #                             (atualizacao.c: sufixo "-android.apk"; debug e
 #                             preview nao casam).
+#   Nuvio-<v>-android-lite-armv7.apk / -arm64.apk (one ABI, no P2P motor)
 #   SHA256SUMS-android        juntar ao SHA256SUMS da LG/Samsung
 #
 # O que ele RECUSA (sai com erro):
@@ -18,7 +19,9 @@
 #   - APK assinado com OUTRA chave que a fixada abaixo (CERT_SHA256);
 #   - versionName diferente da release;
 #   - arquivo de pessoa dentro do APK;
-#   - faltando libmain/libSDL2/libcurl em alguma das duas ABIs.
+#   - faltando libmain/libSDL2/libcurl em alguma das duas ABIs;
+#   - motor P2P configurado (NUVIO_P2P_MOTOR ou a pasta padrao, ver
+#     tools/p2p-motor/pasta.sh) e ausente das libmain.so, ou sem os avisos de licenca.
 set -eo pipefail
 cd "$(dirname "$0")/.."
 
@@ -27,11 +30,9 @@ cd "$(dirname "$0")/.."
 # cima; so mude isto junto de um aviso para desinstalar e reinstalar.
 CERT_SHA256=c3c967d4fac138de15126da01ea3ae43b52e6aa23106e336c2acc607ae0f2add
 
-if [ -n "$(git status --porcelain)" ]; then
-  echo "release-android: arvore suja. Compile de uma worktree limpa no commit da release:" >&2
-  echo "  git worktree add --detach ../nuvio-build-X <commit>" >&2
-  git status --short >&2; exit 1
-fi
+python3 tools/release.py --check-tree
+tools/env.sh --require-core >/dev/null
+
 VER=$(sed -n 's/.*"version": *"\([0-9.]*\)".*/\1/p' deploy/app/appinfo.json)
 VT=$(grep -v '<?xml' tools/tizen-config.xml | sed -n 's/.*[[:space:]]version="\([0-9.]*\)".*/\1/p' | head -1)
 [ -n "$VER" ] && [ "$VER" = "$VT" ] || { echo "release-android: appinfo.json ($VER) != tizen-config.xml ($VT)" >&2; exit 1; }
@@ -42,13 +43,13 @@ fi
 [ -n "${NUVIO_KEYSTORE:-}" ] && [ -f "$NUVIO_KEYSTORE" ] || {
   echo "release-android: sem a chave de release. Restaure ~/.nuvio-android/release.jks e release.env do Vaultwarden." >&2; exit 1; }
 
-OUT="build/release-$VER"; mkdir -p "$OUT"
+OUT="${NUVIO_RELEASE_OUT:-build/release-$VER}"; mkdir -p "$OUT"
 rm -f "$OUT"/Nuvio-*-android*.apk "$OUT/SHA256SUMS-android"
 echo "== release-android $VER (commit $(git rev-parse --short HEAD)) -> $OUT"
 
 # Release sem conta/sync instala e so mostra "0 addons" na TV (01/10/2026,
 # worktree em /private/tmp sem o local.properties do caminho padrao).
-NUVIO_REQUIRE_CORE=1 bash tools/android.sh
+NUVIO_APK_LITE=0 NUVIO_REQUIRE_CORE=1 bash tools/android.sh --release-only
 A="build/android/Nuvio-$VER-android.apk"
 [ -f "$A" ] || { echo "release-android: faltou $A (o android.sh nao gerou o release)" >&2; exit 1; }
 
@@ -59,7 +60,7 @@ CERT=$("$BT/apksigner" verify --print-certs "$A" 2>/dev/null | sed -n 's/^Signer
 VN=$("$BT/aapt2" dump badging "$A" 2>/dev/null | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1)
 [ "$VN" = "$VER" ] || { echo "release-android: versionName $VN != $VER" >&2; exit 1; }
 
-SEGREDO='(^|/)(trakt|addons|tmdb|mdblist|sessao|simkl[^/]*|fanart|diag-token)\.txt$|collections\.json$|catalogo-rede\.bin|local\.properties|\.env$|(^|/)(trakt|stalker|xtream|listas)-p[0-9]|\.jks$|\.keystore$'
+SEGREDO='(^|/)(trakt|addons|tmdb|mdblist|sessao|simkl[^/]*|fanart|diag-token)\.txt$|collections\.json$|catalogo-rede\.bin|local\.properties|\.env$|(^|/)(trakt|stalker|xtream|listas|discord)-p[0-9]|\.jks$|\.keystore$'
 # A lista uma vez so: `unzip | grep -q` com pipefail falha quando o grep fecha
 # o pipe antes de o unzip terminar.
 LISTA=$(unzip -Z1 "$A")
@@ -71,16 +72,37 @@ for abi in arm64-v8a armeabi-v7a; do
   done
 done
 
+# Motor P2P (dono, 1.8): com a pasta do motor achada, o APK TEM de levar o motor
+# nas duas ABIs e os avisos de licenca; o android.sh ja recusou o contrario, isto
+# e a segunda conferencia sobre o arquivo que vai para a release.
+. tools/p2p-motor/pasta.sh
+nv_p2p_resolver android
+case $'\n'"$LISTA"$'\n' in *$'\n'"assets/licencas/p2p-avisos.txt"$'\n'*) ;; *) echo "release-android: faltou assets/licencas/p2p-avisos.txt" >&2; exit 1;; esac
+if [ -n "$NV_P2P_DIR" ]; then
+  for abi in arm64-v8a armeabi-v7a; do
+    m=$(unzip -p "$A" "lib/$abi/libmain.so" | strings | grep -c 'Nuvio Engine/' || true)
+    [ "$m" -ge 1 ] || { echo "release-android: $A lib/$abi/libmain.so sem o motor P2P" >&2; exit 1; }
+  done
+  echo "release-android: motor P2P (nuvio-engine) nas duas ABIs"
+else
+  echo "release-android: ATENCAO, APK SEM motor P2P (NUVIO_P2P_MOTOR=none ou sem pasta)" >&2
+fi
+
 cp "$A" "$OUT/"
-( cd "$OUT" && shasum -a 256 Nuvio-*-android.apk > SHA256SUMS-android )
-git status --porcelain | grep -q . && { echo "release-android: o build sujou a arvore:" >&2; git status --short >&2; }
+for arch in armv7 arm64; do
+LITE="build/android/Nuvio-$VER-android-lite-$arch.apk"
+[ -f "$LITE" ] || { echo "release-android: missing $LITE" >&2; exit 1; }
+CERT=$("$BT/apksigner" verify --print-certs "$LITE" 2>/dev/null | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')
+[ "$CERT" = "$CERT_SHA256" ] || { echo "release-android: lite signing certificate mismatch" >&2; exit 1; }
+VN=$("$BT/aapt2" dump badging "$LITE" 2>/dev/null | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1)
+[ "$VN" = "$VER" ] || { echo "release-android: lite version mismatch" >&2; exit 1; }
+cp "$LITE" "$OUT/"
+done
+( cd "$OUT" &&
+  if command -v shasum >/dev/null 2>&1; then shasum -a 256 Nuvio-*-android*.apk
+  else sha256sum Nuvio-*-android*.apk; fi > SHA256SUMS-android )
+python3 tools/release.py --check-tree
 echo
 echo "== pronto, sem publicar:"
-ls -la "$OUT"/Nuvio-*-android.apk "$OUT/SHA256SUMS-android"
-cat <<EOF
-
-Proximo passo (skill android-release):
-  - SHA256SUMS = LG + SHA256SUMS-samsung + SHA256SUMS-android
-  - anexar $OUT/Nuvio-$VER-android.apk no MESMO gh release create v$VER
-    (sem ele no latest, nenhum Android se atualiza sozinho)
-EOF
+ls -la "$OUT"/Nuvio-*-android*.apk "$OUT/SHA256SUMS-android"
+echo "Release completa (LG + Android + Samsung + SHA256SUMS + Homebrew): bash tools/release.sh $VER"

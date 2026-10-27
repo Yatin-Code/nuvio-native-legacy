@@ -9,10 +9,10 @@ cd "$(dirname "$0")/.."
 flags=(-O1 -g -Isrc -pthread -I/opt/homebrew/include -I/opt/homebrew/include/SDL2 \
        -Wall -Wno-deprecated-declarations -Wno-macro-redefined)
 if [ "${SANITIZE:-0}" = 1 ]; then flags+=(-fsanitize=address,undefined -fno-omit-frame-pointer); fi
-bin=/tmp/nuvio-syncordem-tests
-cc "${flags[@]}" src/sync.c src/catordem.c src/catordemcache.c src/js.c src/jsw.c \
+bin="${TMPDIR:-/tmp}/nuvio-syncordem-tests"
+cc "${flags[@]}" src/sync.c tests/stub_contapend.c src/catordem.c src/catordemcache.c src/contacache.c src/js.c src/jsw.c \
   tests/syncordem.c -o "$bin"
-dir="$(mktemp -d)"
+dir="$(mktemp -d "${TMPDIR:-/tmp}/nuvio-syncordem.XXXXXXXX")"
 trap 'rm -rf "$dir"' EXIT
 export NV_T_DIR="$dir"
 
@@ -50,6 +50,19 @@ echo "$SAIDA" | grep -qF '[sync] ciclo do perfil 1 descartado' \
 # 8. Servidor que nao aceita credencial trakt/simkl (400 "Unsupported provider
 #    credential"): uma pergunta por provedor na sessao, nao uma por ciclo.
 sessao credencial
-echo "$SAIDA" | grep -qF 'nao tento de novo nesta sessao' \
+echo "$SAIDA" | grep -qF 'nao tento de novo por 7 dias' \
   || { echo "FALHOU: sessao 8 nao anotou a recusa"; exit 1; }
+sessao credencial-reabrir
+echo "$SAIDA" | grep -qF 'recusa lembrada do disco' \
+  || { echo "FALHOU: recusa nao sobreviveu ao arranque"; exit 1; }
+# #378: com os ajustes locais protegidos, os idiomas da conta chegam assim mesmo.
+export NV_T_DIR="$dir/legconta"; mkdir "$NV_T_DIR"
+sessao legconta
+echo "$SAIDA" | grep -qF 'idiomas da conta entregues mesmo protegido' \
+  || { echo "FALHOU: sessao legconta"; exit 1; }
+export NV_T_DIR="$dir/legconta-troca"; mkdir "$NV_T_DIR"
+sessao legconta-troca
+echo "$SAIDA" | grep -qF 'idiomas do perfil 1 nao vazam para o 2' \
+  || { echo "FALHOU: sessao legconta-troca"; exit 1; }
+echo "$SAIDA" | grep -q 'FALHOU' && exit 1
 echo "syncordem.sh: ok"

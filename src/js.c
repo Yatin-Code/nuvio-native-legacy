@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <math.h>
 
 static const char *pula(const char *p) {
   while (*p && (unsigned char)*p <= ' ') p++;
@@ -11,10 +12,12 @@ static const char *pula(const char *p) {
 
 const char *js_fim(const char *p) {
   int prof = 0, texto = 0;
-  char abre = *p, fecha = (abre == '[') ? ']' : '}';
+  char abre, fecha;
+  if (!p) return NULL;
+  abre = *p; fecha = (abre == '[') ? ']' : '}';
   if (abre != '[' && abre != '{') return p;
   for (; *p; p++) {
-    if (texto) { if (*p == '\\') p++; else if (*p == '"') texto = 0; continue; }
+    if (texto) { if (*p == '\\' && p[1]) p++; else if (*p == '"') texto = 0; continue; }
     if (*p == '"') texto = 1;
     else if (*p == abre) prof++;
     else if (*p == fecha && --prof == 0) return p + 1;
@@ -32,29 +35,42 @@ const char *js_fim(const char *p) {
 // (heroBackdropUrl, focusGifUrl, genre...) era uma varredura do blob inteiro,
 // e sao oito chaves assim por pasta. Quadratico no numero de pastas, e a
 // escolha de perfil e o sync pagavam por ele. Agora a varredura para em `fim`.
-static const char *achaChaveEm(const char *ini, const char *fim, const char *busca, size_t n) {
-  const char *p = ini;
-  if (!fim) fim = ini + strlen(ini);
-  while (p + n <= fim && (p = memchr(p, '"', (size_t)(fim - p))) != NULL) {
-    if (p + n > fim) return NULL;
-    if (!memcmp(p, busca, n)) return p;
-    p++;
+static const char *pulaEm(const char *p, const char *fim) {
+  while (p < fim && *p && (unsigned char)*p <= ' ') p++;
+  return p;
+}
+
+/* `p` e a aspa inicial. O limite tambem vale para strings e seus escapes,
+ * inclusive quando a faixa nao tem NUL (objeto dentro de uma resposta). */
+static const char *fimTextoEm(const char *p, const char *fim) {
+  for (p++; p < fim && *p; p++) {
+    if (*p == '"') return p;
+    if (*p == '\\') {
+      if (fim - p < 2 || !p[1]) return NULL;
+      p++;
+    }
   }
   return NULL;
 }
 static const char *achaChave(const char *ini, const char *fim, const char *chave) {
-  char busca[64];
   const char *p = ini;
   size_t n;
-  snprintf(busca, sizeof busca, "\"%s\"", chave);
-  n = strlen(busca);
+  if (!ini || !chave) return NULL;
+  n = strlen(chave);
   if (!fim) fim = ini + strlen(ini);
-  while ((p = achaChaveEm(p, fim, busca, n)) != NULL) {
-    { const char *q = pula(p + n);
-      if (*q == ':') return q + 1; }
-    p += n;
+  while (p < fim && (p = memchr(p, '"', (size_t)(fim - p))) != NULL) {
+    const char *q = fimTextoEm(p, fim), *v;
+    if (!q) return NULL;
+    v = pulaEm(q + 1, fim);
+    if ((size_t)(q - p - 1) == n && !memcmp(p + 1, chave, n) &&
+        v < fim && *v == ':') return v + 1;
+    p = q + 1;
   }
   return NULL;
+}
+
+int js_tem(const char *ini, const char *fim, const char *chave) {
+  return achaChave(ini, fim, chave) != NULL;
 }
 
 // \uXXXX VIRA UTF-8, e nao espaco. PHP json_encode — o que todo painel Xtream
@@ -69,20 +85,22 @@ static int hexVal(char c) {
   if (c >= 'A' && c <= 'F') return c - 'A' + 10;
   return -1;
 }
-static int hex4(const char *p, unsigned *v) {
+static int hex4(const char *p, const char *fim, unsigned *v) {
   int i, h; *v = 0;
+  if (fim - p < 4) return 0;
   for (i = 0; i < 4; i++) { h = hexVal(p[i]); if (h < 0) return 0; *v = (*v << 4) | (unsigned)h; }
   return 1;
 }
-static int escapeU(const char *p, char *dst, size_t *k, size_t tam) {
+static int escapeU(const char *p, const char *fim, char *dst, size_t *k, size_t tam) {
   unsigned cp, lo;
   int usados = 4;
-  if (!hex4(p, &cp)) { if (*k + 1 < tam) dst[(*k)++] = ' '; return 0; }
-  if (cp >= 0xD800 && cp <= 0xDBFF && p[4] == '\\' && p[5] == 'u' && hex4(p + 6, &lo) &&
+  if (!hex4(p, fim, &cp)) { if (*k + 1 < tam) dst[(*k)++] = ' '; return 0; }
+  if (cp >= 0xD800 && cp <= 0xDBFF && fim - p >= 10 && p[4] == '\\' && p[5] == 'u' && hex4(p + 6, fim, &lo) &&
       lo >= 0xDC00 && lo <= 0xDFFF) {
     cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
     usados = 10;
   }
+  if (cp >= 0xD800 && cp <= 0xDFFF) cp = ' ';
   if (cp < 0x80) { if (*k + 1 < tam) dst[(*k)++] = (char)cp; }
   else if (cp < 0x800) { if (*k + 2 < tam) { dst[(*k)++] = (char)(0xC0 | (cp >> 6)); dst[(*k)++] = (char)(0x80 | (cp & 0x3F)); } }
   else if (cp < 0x10000) { if (*k + 3 < tam) { dst[(*k)++] = (char)(0xE0 | (cp >> 12)); dst[(*k)++] = (char)(0x80 | ((cp >> 6) & 0x3F)); dst[(*k)++] = (char)(0x80 | (cp & 0x3F)); } }
@@ -90,18 +108,19 @@ static int escapeU(const char *p, char *dst, size_t *k, size_t tam) {
   return usados;
 }
 
-int js_texto(const char *ini, const char *fim, const char *chave,
-             char *dst, size_t tam) {
-  const char *p = achaChave(ini, fim, chave);
+static int lerTextoEm2(const char *p, const char *fim, char *dst, size_t tam, int linhas) {
+  const char *fecha;
   size_t k = 0;
-  if (!p) return 0;
-  p = pula(p);
-  if (*p != '"') return 0;
+  if (p >= fim || *p != '"' || !(fecha = fimTextoEm(p, fim))) return 0;
   p++;
-  while (*p && *p != '"' && k + 1 < tam) {
-    if (*p == '\\' && p[1]) {
+  while (p < fecha && k + 1 < tam) {
+    if (*p == '\\' && fecha - p >= 2) {
       p++;
-      if (*p == 'u') { int u = escapeU(p + 1, dst, &k, tam); p += 1 + u; continue; }   /* invalido: so o "u" sai, o resto e texto */
+      if (*p == 'u') { int u = escapeU(p + 1, fecha, dst, &k, tam); p += 1 + u; continue; }   /* invalido: so o "u" sai, o resto e texto */
+      // linhas: o \n do JSON fica como quebra de linha (o texto de fonte do
+      // addon, que a folha desenha linha a linha); \r some, \t vira espaco.
+      if (linhas && *p == 'n') { p++; dst[k++] = '\n'; continue; }
+      if (linhas && *p == 'r') { p++; continue; }
       if (*p == 'n' || *p == 't' || *p == 'r') { p++; dst[k++] = ' '; continue; }
       if (*p == '/' ) { p++; dst[k++] = '/'; continue; }
     }
@@ -124,46 +143,111 @@ int js_texto(const char *ini, const char *fim, const char *chave,
   return k > 0;
 }
 
-double js_num(const char *ini, const char *fim, const char *chave, double padrao) {
-  char busca[64];
-  const char *p = ini;
-  size_t n;
-  snprintf(busca, sizeof busca, "\"%s\"", chave);
-  n = strlen(busca);
+static int lerTextoEm(const char *p, const char *fim, char *dst, size_t tam) {
+  return lerTextoEm2(p, fim, dst, tam, 0);
+}
+
+// Elemento de texto que ja se tem na mao (p na aspa de abertura), sem chave
+// para procurar: "genre":["Not\u00edcias"]. Mesmo decodificador do js_texto.
+int js_cadeia(const char *p, char *dst, size_t tam) {
+  if (!p || tam == 0) return 0;
+  return lerTextoEm(p, p + strlen(p), dst, tam);
+}
+
+int js_texto(const char *ini, const char *fim, const char *chave,
+             char *dst, size_t tam) {
+  const char *p;
+  if (!dst || !tam) return 0;
+  if (!ini || !chave) return 0;
   if (!fim) fim = ini + strlen(ini);
-  while ((p = achaChaveEm(p, fim, busca, n)) != NULL) {
-    const char *q;
-    q = pula(p + n);
-    if (*q == ':') {
-      q = pula(q + 1);
+  p = achaChave(ini, fim, chave);
+  return p ? lerTextoEm(pulaEm(p, fim), fim, dst, tam) : 0;
+}
+
+// Como js_texto, mas o \n do JSON vira '\n' (nao espaco).
+int js_texto_linhas(const char *ini, const char *fim, const char *chave,
+                    char *dst, size_t tam) {
+  const char *p;
+  if (!dst || !tam) return 0;
+  if (!ini || !chave) return 0;
+  if (!fim) fim = ini + strlen(ini);
+  p = achaChave(ini, fim, chave);
+  return p ? lerTextoEm2(pulaEm(p, fim), fim, dst, tam, 1) : 0;
+}
+
+double js_num(const char *ini, const char *fim, const char *chave, double padrao) {
+  const char *p = ini;
+  if (!ini || !chave) return padrao;
+  if (!fim) fim = ini + strlen(ini);
+  while ((p = achaChave(p, fim, chave)) != NULL) {
+    const char *q = pulaEm(p, fim);
+    if (q < fim) {
       // O valor pode vir ENTRE ASPAS. O Cinemeta manda `"imdbRating": "8.1"`
       // como string, e recusar a aspa aqui fazia js_num devolver o padrao —
       // por isso a nota era sempre 0: nem o selo do IMDb no hero nem a aba de
       // avaliacoes chegavam a aparecer, sem erro nenhum no caminho.
       if (*q == '"') q++;
-      if ((*q >= '0' && *q <= '9') || *q == '-' || *q == '.') return atof(q);
+      if (q < fim && ((*q >= '0' && *q <= '9') || *q == '-' || *q == '.')) {
+        char numero[128], *fimNumero;
+        const char *e = q;
+        size_t n;
+        double v;
+        while (e < fim && ((*e >= '0' && *e <= '9') || *e == '-' || *e == '+' ||
+                           *e == '.' || *e == 'e' || *e == 'E')) e++;
+        n = (size_t)(e - q);
+        if (n >= sizeof numero) return padrao;
+        memcpy(numero, q, n); numero[n] = 0;
+        v = strtod(numero, &fimNumero);
+        return fimNumero != numero && isfinite(v) ? v : padrao;
+      }
     }
-    p += n;
   }
   return padrao;
 }
 
 const char *js_array(const char *ini, const char *fim, const char *chave) {
-  const char *p = achaChave(ini, fim, chave);
+  const char *p;
+  if (!ini) return NULL;
+  if (!fim) fim = ini + strlen(ini);
+  p = achaChave(ini, fim, chave);
   if (!p) return NULL;
-  p = pula(p);
-  if (*p != '[') return NULL;
-  p = pula(p + 1);
-  return (*p == '{' || *p == '"') ? p : NULL;
+  p = pulaEm(p, fim);
+  if (p >= fim || *p != '[') return NULL;
+  p = pulaEm(p + 1, fim);
+  return p < fim && (*p == '{' || *p == '"') ? p : NULL;
 }
 
 const char *js_prox(const char *fimAnterior) {
+  if (!fimAnterior) return NULL;
   const char *p = pula(fimAnterior);
   if (*p == ',') {
     p = pula(p + 1);
     return (*p == '{' || *p == '"') ? p : NULL;
   }
   return NULL;
+}
+
+// Density alone cannot distinguish a sparse catalog from broken numbering.
+int js_videos_temporadas_falsas(const char *corpo) {
+  const char *v = js_array(corpo, NULL, "videos");
+  int temporadas[5], n = 0;
+  while (v) {
+    const char *f = js_fim(v);
+    int t = (int)js_num(v, f, "season", 0);
+    if (t > 0) {
+      char d[40] = "";
+      int i;
+      if (js_num(v, f, "episode", 0) != 1) return 0;
+      js_texto(v, f, "released", d, sizeof d);
+      // Missing dates are unknown, not evidence of a fabricated season.
+      if (strspn(d, "0123456789") != 4 ||
+          (d[4] && strncmp(d + 4, "-01-01", 6))) return 0;
+      for (i = 0; i < n && temporadas[i] != t; i++) {}
+      if (i == n && n < 5) temporadas[n++] = t;
+    }
+    v = js_prox(f);
+  }
+  return n == 5;
 }
 
 const char *js_raiz_array(const char *corpo) {
@@ -177,22 +261,37 @@ const char *js_raiz_array(const char *corpo) {
 
 int js_bruto(const char *ini, const char *fim, const char *chave,
              char *dst, size_t tam) {
-  const char *p = achaChave(ini, fim, chave);
+  const char *p;
   const char *f;
   size_t n;
+  if (!dst || !tam) return 0;
+  if (!ini || !chave) return 0;
+  if (!fim) fim = ini + strlen(ini);
+  p = achaChave(ini, fim, chave);
   if (!p) return 0;
-  p = pula(p);
+  p = pulaEm(p, fim);
+  if (p >= fim) return 0;
   if (*p == '{' || *p == '[') {
-    f = js_fim(p);
+    int prof = 0;
+    char abre = *p, fecha = abre == '[' ? ']' : '}';
+    for (f = p; f < fim && *f; f++) {
+      if (*f == '"') {
+        f = fimTextoEm(f, fim);
+        if (!f) return 0;
+      } else if (*f == abre) prof++;
+      else if (*f == fecha && --prof == 0) { f++; break; }
+    }
+    if (prof) return 0;
   } else if (*p == '"') {
     // String: o valor pode ser o proprio JSON serializado (o app web aceita as
     // duas formas). Devolve com as aspas; quem consome decide.
-    const char *q = p + 1;
-    while (*q && *q != '"') { if (*q == '\\' && q[1]) q++; q++; }
-    f = *q ? q + 1 : q;
+    const char *q = fimTextoEm(p, fim);
+    if (!q) return 0;
+    f = q + 1;
   } else {
     const char *q = p;
-    while (*q && *q != ',' && *q != '}' && *q != ']') q++;
+    while (q < fim && *q && *q != ',' && *q != '}' && *q != ']') q++;
+    while (q > p && (unsigned char)q[-1] <= ' ') q--;
     f = q;
   }
   n = (size_t)(f - p);
@@ -242,41 +341,26 @@ int js_texto_raiz_em(const char *ini, const char *fim, const char *chave,
   int prof = 0;
   if (!ini || !chave || !dst || tam == 0) return 0;
   dst[0] = 0;
+  if (!fim) fim = ini + strlen(ini);
   nChave = strlen(chave);
-  p = strchr(ini, '{');
-  if (!p || (fim && p >= fim)) return 0;
-  for (; *p && (!fim || p < fim); p++) {
+  if (fim <= ini) return 0;
+  p = memchr(ini, '{', (size_t)(fim - ini));
+  if (!p) return 0;
+  for (; p < fim && *p; p++) {
     if (*p == '"') {
       const char *ini2 = p + 1;
-      const char *q = ini2;
-      while (*q && *q != '"') q += (*q == '\\' && q[1]) ? 2 : 1;
-      // So CHAVE casa: um VALOR com o mesmo texto ("posterShape":"poster",
-      // no AIOMetadata, #200) nao e seguido de ':' e devolvia 0 antes de a
-      // chave de verdade aparecer.
-      const char *dp = *q ? q + 1 : q;
-      while (*dp == ' ' || *dp == '\n' || *dp == '\t' || *dp == '\r') dp++;
-      if (prof == 1 && *dp == ':' && (size_t)(q - ini2) == nChave &&
+      const char *q = fimTextoEm(p, fim);
+      if (!q) return 0;
+      if (prof == 1 && (size_t)(q - ini2) == nChave &&
           !strncmp(ini2, chave, nChave)) {
-        const char *v = q + 1;
-        while (*v == ' ' || *v == ':' || *v == '\n' || *v == '\t' || *v == '\r') v++;
+        const char *v = pulaEm(q + 1, fim);
+        if (v >= fim || *v != ':') { p = q; continue; }
+        v = pulaEm(v + 1, fim);
         // Valor nao-string (numero, null, objeto) devolve 0 em vez de meia
         // leitura: quem chama decide o que fazer com a ausencia.
-        if (*v != '"') return 0;
-        { size_t k = 0;
-          for (v++; *v && *v != '"' && k + 1 < tam; v++) {
-            if (*v == '\\' && v[1]) {
-              v++;
-              // Mesma politica de js_texto: \uXXXX vira UTF-8 (escapeU).
-              if (*v == 'u') { int u = escapeU(v + 1, dst, &k, tam); v += u; continue; }
-              if (*v == 'n' || *v == 't' || *v == 'r') { dst[k++] = ' '; continue; }
-              if (*v == '/') { dst[k++] = '/'; continue; }
-            }
-            dst[k++] = *v;
-          }
-          dst[k] = 0;
-          return k > 0; }
+        return lerTextoEm(v, fim, dst, tam);
       }
-      p = *q ? q : q - 1;
+      p = q;
       continue;
     }
     if (*p == '{' || *p == '[') prof++;

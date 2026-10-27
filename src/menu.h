@@ -44,6 +44,17 @@ int  menu_iniciar(void);
 void menu_abrir(void);
 // Fecha sem escolher: o destaque volta para o destino atual.
 void menu_fechar(void);
+// ABRE POR CIMA DE UMA CAMADA que continua viva embaixo (a pagina do titulo):
+// DIREITA/Voltar so devolvem o foco a ela; OK num destino (mesmo o atual) fica
+// em menu_escolheu para o app fechar a camada e navegar. `semRailFixa` 1 quando
+// a camada nao mostra a rail (a pagina do titulo): o painel nasce sem ela.
+void menu_abrir_sobre(int semRailFixa);
+// 1 desde menu_abrir_sobre ate a saida da barra assentar: e o que o app usa
+// para desenhar a barra por cima da camada (inclusive recolhendo).
+int  menu_sobre(void);
+// 1 uma vez quando a pessoa ESCOLHEU algo na barra (destino, rodape, pasta;
+// o Spotlight nao, ele abre por cima) — ao contrario de Voltar/DIREITA por cima. Consome a flag.
+int  menu_escolheu(void);
 
 // 1 enquanto a barra e dona do D-pad. Vira 0 no instante da escolha, ainda com
 // a animacao de saida rodando — e esse o sinal que o conteudo deve usar para
@@ -76,6 +87,32 @@ int  menu_pediu_colecao(void);
 // OK SEGURADO em "Buscar": abrir o Spotlight. Consome a flag.
 int  menu_pediu_spotlight(void);
 
+// --- O MENU DOS LAYOUTS CLASSICOS -------------------------------------------
+// MODERNA: uma ilha flutuante na margem da ilha do relogio (x NV_MENU_MODERNA_X,
+// centrada na altura e ampliada em20%): fechada a pilula vertical de icones, aberta o painel com
+// rotulos. PADRAO: o mesmo painel colado na borda esquerda e centrado na
+// altura (fechado, a mesma pilula estreita na borda). Na Moderna a ilha do
+// relogio se posiciona na margem do menu (ilha_posicionar). Devolve a borda
+// direita do menu em px da tela REAL (0 sem menu na tela, ou no layout
+// Dinamica, que tem a pilula abaixo). Abrindo ja devolve a largura aberta;
+// fechando, a que ainda esta na tela. A largura que o CONTEUDO reserva para a
+// rail fixa e ajustes_rail_largura_fixa (NV_MENU_RAIL_BORDA_* em layout.h).
+// O menu usa escala propria (90%, ampliada20% na Moderna), nao o Tamanho da
+// interface; tudo o que esta API devolve ja vem em px da tela REAL.
+#define NV_MENU_MODERNA_X 48.0f   // px da tela REAL
+float menu_barra_borda(void);
+// Barra no topo: a geometria da tira como desenhada agora, em px da tela REAL
+// (retangulos x, y, w, h). `sel`/`foc` sao as capsulas de selecao e de foco
+// (x, w, alfa); `foco[k]` e quanto a de foco cobre a pilula k (a tinta do
+// rotulo); `cortado` 1 se algum rotulo nao coube inteiro. So os testes leem.
+#define MENU_TOPO_MAX 16
+typedef struct {
+  int n, cortado, busca[MENU_TOPO_MAX];
+  float y, h, x[MENU_TOPO_MAX], w[MENU_TOPO_MAX], foco[MENU_TOPO_MAX];
+  float trilha[4], avatar[4], sel[3], foc[3];
+} MenuTopoGeo;
+void menu_topo_geo(MenuTopoGeo *g);
+
 // --- PILULA DO LAYOUT DINAMICA (barra estilo Apple TV) ----------------------
 // No layout Dinamica da home nao ha rail: fechada, a barra e uma pilula
 // "‹ (icone) Secao" no topo esquerdo, por cima do conteudo. Este canto e DELA.
@@ -102,6 +139,11 @@ int   menu_pilula_rect(float *x, float *y, float *w, float *h);
 int   menu_pilula_titulo(void);
 float menu_pilula_alfa(void);
 void  menu_pilula_mostrar(float alvo);
+// 0 enquanto a BARRA DA APPLE TV esta aberta: o cabecalho do painel ja mostra
+// o relogio e a ilha do canto desenharia a mesma hora duas vezes (captura da
+// TCL: 11:29 sobre 11:29). So o layout Dinamica; na rail classica a ilha
+// continua ao lado (menu_aberto nao a esconde la).
+int   menu_relogio_cabe(void);
 
 void menu_evento(const SDL_Event *e);
 void menu_atualizar(float dt, Uint32 agora);

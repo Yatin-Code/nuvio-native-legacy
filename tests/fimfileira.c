@@ -17,7 +17,21 @@
 // Sem janela, rede ou TV, como tests/homepos.c: inclui src/home.c direto.
 #include <assert.h>
 #include <pthread.h>
+#include <stdatomic.h>
+int ctx_aberto(void) { return 0; }   // home.c asks whether the context menu is open
 #include "../src/home.c"
+// #204: o "Ocultar filmes assistidos" e o cartao do QR da home sem add-ons,
+// parados neste teste (descoberta.c e homevazio.c ficam fora do link).
+void desc_ocultar_vistos_atualizar(void) {}
+int  homevazio_ativo(int fileiras) { (void)fileiras; return 0; }
+int  homevazio_evento(const SDL_Event *e) { (void)e; return 0; }
+// heroAquecerVizinhos (home_atualizar) pede a arte dos vizinhos: sem textura aqui.
+unsigned long tex_hash_public(const char *c) { (void)c; return 0; }
+GLuint tex_obter_hero_quente(const char *c) { (void)c; return 0; }
+GLuint tex_obter_larg(const char *c, float w) { (void)c; (void)w; return 0; }
+GLuint tex_obter_logo_larg_qualquer(const char *c, float w) { (void)c; (void)w; return 0; }
+void marco(const char *m) { (void)m; }
+void desc_sinopse_hero(const int *idx, int n) { (void)idx; (void)n; }
 
 void cachearte_marcar_grupo(int grupo, const char *url, int variante, int essencial, int emUso) {
   (void)grupo; (void)url; (void)variante; (void)essencial; (void)emUso;
@@ -53,6 +67,7 @@ int  trailer_aberto(void) { return 0; }
 int  trailer_tocando(void) { return 0; }
 void ctx_abrir(int indice) { (void)indice; nCtx++; }
 void ctx_fileira(const char *c, const char *t) { (void)c; (void)t; }
+void ctx_dispensar_retomar(int on) { (void)on; }
 void ctx_abrir_fileira(const char *c, const char *t) { (void)c; (void)t; nCtx++; }
 void vertudo_abrir(const char *b, const char *t, const char *c, const char *ti) {
   (void)b; (void)t; (void)c; (void)ti; nVerTudo++;
@@ -62,8 +77,12 @@ const char *i18n(const char *s) { return s; }
 const char *idioma_mes_data(int mes, const char *nomePt) { (void)mes; return nomePt; }
 
 static Uint32 relogio = 1000;
+Uint32 SDL_GetTicks(void) { return relogio; }
 static void quadro(int quantos) {
-  for (int i = 0; i < quantos; i++) { relogio += 16; home_atualizar(0.016f, relogio); }
+  for (int i = 0; i < quantos; i++) {
+    cat_quadro();
+    relogio += 16; home_atualizar(0.016f, relogio);
+  }
 }
 static void tecla(SDL_Keycode k) {
   SDL_Event e; memset(&e, 0, sizeof e);
@@ -157,14 +176,14 @@ static void montarFils(CatFileira *f, int nf, int base, int variacao) {
 }
 
 // Cenario (d): a descoberta republica enquanto o fio de desenho navega.
-static volatile int republicando = 1;
+static atomic_int republicando = 1;
 static void *fioRepublicar(void *u) {
   static CatItem itensB[N_ITENS];
   static CatFileira filsB[16];
   int v = 0;
   (void)u;
   for (int i = 0; i < N_ITENS; i++) snprintf(itensB[i].imdb, sizeof itensB[i].imdb, "tt%05d", 5000 + i);
-  while (republicando) {
+  while (atomic_load_explicit(&republicando, memory_order_acquire)) {
     int nf = 3 + (v % 14);
     int qtd = 20 + (v * 37) % (N_ITENS - 20);
     montarFils(filsB, nf, 1 + (v % 3), v);
@@ -218,14 +237,62 @@ int main(void) {
     printf("fim de fileira: encolher com o foco no fim OK\n");
   }
 
+  // Uma janela que termina exatamente no novo cat_n() fica sem cards. A
+  // chave continua publicada, mas restaurar a coluna 0 nela seria foco vazio.
+  {
+    CatFileira vazias[2] = {0};
+    int alvo = -1;
+    cat_definir_tudo(itensA, N_ITENS, filsA, 16); quadro(1);
+    for (int r = 0; r < nFileiras; r++)
+      if (!strcmp(fileiras[r].chave, "catalogo_5")) alvo = r;
+    assert(alvo >= 0 && fileiras[alvo].n > 0);
+    focoHero = 0; foco.fileira = alvo; foco.coluna = 0;
+    cat_definir_tudo(itensA, filsA[5].ini, filsA, 16); quadro(1);
+    assert(nFileiras == alvo + 1);
+    assert(!strcmp(fileiras[alvo].chave, "catalogo_5"));
+    assert(fileiras[alvo].n == 0 && !fileiras[alvo].verTudo);
+    invariantes("chave restaurada vazia");
+    assert(strcmp(fileiras[foco.fileira].chave, "catalogo_5"));
+    assert(foco.fileira == 0); // primeira fileira navegavel
+
+    // A primeira fileira também pode nascer vazia. Descer do destaque tem
+    // de pousar na próxima com cards; subir dela deve voltar ao destaque.
+    vazias[0] = filsA[0]; vazias[0].ini = 0; vazias[0].n = 0; vazias[0].estado = 1;
+    vazias[1] = filsA[5]; vazias[1].ini = 0; vazias[1].n = 1;
+    cat_definir_tudo(itensA, 1, vazias, 2); quadro(1);
+    assert(nFileiras == 3);
+    assert(fileiras[0].n == 0 && !fileiras[0].verTudo);
+    assert(foco.fileira == 1 && !focoHero);
+    invariantes("primeira fileira vazia");
+    focoHero = 1; tecla(SDLK_DOWN);
+    assert(!focoHero); invariantes("descer do destaque com primeira vazia");
+    tecla(SDLK_UP); assert(focoHero);
+
+    // Sem nenhum card (inclusive social), a home preserva o destaque e um
+    // índice interno não negativo, sem tentar focar o cabeçalho vazio.
+    snprintf(vazias[1].chave, sizeof vazias[1].chave, "social_activity");
+    vazias[1].base[0] = vazias[1].catId[0] = 0;
+    vazias[1].n = 0; vazias[1].estado = 1;
+    focoHero = 0;
+    cat_definir_tudo(NULL, 0, vazias, 2); quadro(1);
+    assert(nFileiras == 2 && foco.nColunas[0] == 0 && foco.nColunas[1] == 0);
+    assert(focoHero && foco.fileira >= 0 && foco.coluna == 0);
+    tecla(SDLK_DOWN); assert(focoHero);
+    cat_definir_tudo(itensA, N_ITENS, filsA, 16); quadro(1);
+    printf("fim de fileira: foco com janelas vazias OK\n");
+  }
+
   // (d): republicacao concorrente.
   pthread_t t;
   assert(pthread_create(&t, NULL, fioRepublicar, NULL) == 0);
   for (int volta = 0; volta < 6; volta++) percorrer("concorrente");
-  republicando = 0;
+  atomic_store_explicit(&republicando, 0, memory_order_release);
   pthread_join(t, NULL);
   percorrer("depois do concorrente");
   printf("fim de fileira: percurso com republicacao concorrente OK\n");
   printf("fim de fileira: PASS (ctx=%d vertudo=%d colecao=%d)\n", nCtx, nVerTudo, nVerTudoCol);
   return 0;
 }
+
+// Sem textura carregada nesta fixture de navegacao: usa proporcao padrao.
+float tex_aspecto(const char *caminho) { (void)caminho; return 0.0f; }

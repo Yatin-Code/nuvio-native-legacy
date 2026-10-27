@@ -3,7 +3,36 @@
 #include "../src/webp.h"
 #include <assert.h>
 #include <stdio.h>
+#include <pthread.h>
+static pthread_mutex_t inicioMu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t inicioCond = PTHREAD_COND_INITIALIZER;
+static int prontos, iniciar;
+static void *primeiroDecode(void *arg) {
+  int i;
+  (void)arg;
+  pthread_mutex_lock(&inicioMu);
+  prontos++;
+  pthread_cond_broadcast(&inicioCond);
+  while (!iniciar) pthread_cond_wait(&inicioCond, &inicioMu);
+  pthread_mutex_unlock(&inicioMu);
+  for (i = 0; i < 8; i++) {
+    int ow, oh;
+    SDL_Surface *s = webp_carregar_larg("tests/fixtures/webp/alfa.webp", 32, &ow, &oh);
+    assert(s && s->w == 32 && s->h == 32 && ow == 64 && oh == 64);
+    SDL_FreeSurface(s);
+  }
+  return NULL;
+}
 int main(int argc, char **argv) {
+  { pthread_t fios[8]; int i;
+    for (i = 0; i < 8; i++) assert(!pthread_create(&fios[i], NULL, primeiroDecode, NULL));
+    pthread_mutex_lock(&inicioMu);
+    while (prontos != 8) pthread_cond_wait(&inicioCond, &inicioMu);
+    iniciar = 1;
+    pthread_cond_broadcast(&inicioCond);
+    pthread_mutex_unlock(&inicioMu);
+    for (i = 0; i < 8; i++) pthread_join(fios[i], NULL);
+    puts("ok  primeira carga WebP concorrente: 8 fios, 64 decodes"); }
   SDL_Surface *s = webp_carregar(argc > 1 ? argv[1] : "tests/amostra.webp");
   assert(s && s->w > 0 && s->h > 0 && s->format->format == SDL_PIXELFORMAT_ABGR8888);
   printf("ok  webp %dx%d\n", s->w, s->h);

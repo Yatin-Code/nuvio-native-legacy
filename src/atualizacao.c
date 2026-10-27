@@ -16,17 +16,23 @@
 // nova tag, novo cartao; a mesma nao volta.
 //
 // O irmao e novidades.c: mesmo cartao central, mesma regra de fechamento.
+#include "horafmt.h"
+#include "app_id.h"
 #include "atualizacao.h"
 #include "ilha.h"
 #include "dados.h"
 #include "rede.h"
 #include "gfx.h"
-#include "botoes.h"
 #include "text.h"
 #include "anim.h"
 #include "layout.h"
 #include "idioma.h"
 #include "ajustes.h"
+#include "ponteiro.h"
+#include "rolagemtoque.h"
+#include "idiomacod.h"
+#include "plrui.h"
+#include "qr.h"
 #ifdef NV_ANDROID
 #include "android.h"
 #include <sys/stat.h>
@@ -126,7 +132,7 @@ static void at_sha256_hex(const unsigned char *buf, size_t n, char *hex65) {
 #define AT_URL   "https://api.github.com/repos/iqui27/nuvio-native-legacy/releases/latest"
 #define AT_ARQ   "atualizacao-vista.txt"
 #define AT_PAGINA "https://github.com/iqui27/nuvio-native-legacy/releases"
-#define AT_APPID  "space.nuvio.native.legacy"
+#define AT_APPID  NV_APP_ID
 #define AT_LUNA_PUB "/usr/bin/luna-send-pub"
 #define AT_LOG_INST "/tmp/nuvio-instalar.log"
 #define AT_HB_DIR   "/media/developer/apps/usr/palm/applications/org.webosbrew.hbchannel"
@@ -139,21 +145,28 @@ static void at_sha256_hex(const unsigned char *buf, size_t n, char *hex65) {
 #define AT_MIN_ENTRE_MS       (10u * 60u * 1000u)  // nunca duas em menos de 10 min
 #define AT_ESPERA_RETOMAR_MS  (45u * 1000u)  // depois de voltar do segundo plano
 
-#define AT_W        1240.0f
-#define AT_H         760.0f
-#define AT_X        ((NV_TELA_W - AT_W) * 0.5f)
-#define AT_Y        ((NV_TELA_H - AT_H) * 0.5f)
-#define AT_PAD        64.0f
-#define AT_ABRIR_MS   280.0f
-#define AT_FECHAR_MS  160.0f
+// O CARTAO E A ILHA DO RELOGIO CRESCIDA (Glass UI v2, mockup ajustes-v2
+// "v2-upd-*", aprovado em 03/10): 1300 x 1008, ancorado no canto da pilula
+// (cresce para a esquerda com o relogio a direita), raio 40, veu de 45%, miolo
+// a 90% no vidro e #15161A no solido. Medidas do mockup em AT_*.
+#define AT_W        1300.0f
+#define AT_H        1008.0f
+#define AT_RAIO       40.0f
+#define AT_PADX       52.0f
+#define AT_PADY       44.0f
+#define AT_VEU        0.45f
+// A mola da forma e a do modal da ilha (ilha.c, MODAL_MOLA_W/Z): o mesmo
+// "pulo" da pilula crescendo, ~0,7 s ate assentar.
+#define AT_MOLA_W      7.5f
+#define AT_MOLA_Z     0.80f
+// O conteudo entra 80 ms depois de a pilula comecar a crescer.
+#define AT_CONTEUDO_MS 80u
 // Linhas de NOTAS guardadas (secao, paragrafo ou item). Era 14, e com as notas
 // sem rolagem isso nao importava: o cartao ja cortava antes. Agora a area das
 // notas rola, entao o teto so protege o buffer.
 #define AT_LINHAS_MAX  48
-#define AT_LEADING    34.0f
-// RODAPE FIXO: os botoes (ou o endereco da pagina) moram nos ultimos
-// AT_RODAPE_H px do cartao e as notas NUNCA descem ate la. Ver atualizacao_desenhar.
-#define AT_RODAPE_H  132.0f
+// Notas em 24 px com entrelinha de 1,45 (mockup).
+#define AT_LEADING    34.8f
 // Um aperto de cima/baixo rola tres linhas de notas.
 #define AT_PASSO     (AT_LEADING * 3.0f)
 // Linhas por item. Com rolagem nao ha por que cortar um item no meio; o teto
@@ -187,7 +200,15 @@ static int geracao, geracaoVista = -1;
 // O botao dos Ajustes (atualizacao_procurar_agora): o que a ultima consulta
 // respondeu, e se a pessoa pediu para abrir o cartao quando ela chegar.
 static int busca = ATUALIZACAO_BUSCA_NADA, manualPendente, manualAchou;
-static float entrada;
+// A FORMA (atualizacao_atualizar): cartaoT vai de 0 (a pilula da ilha) a 1 (o
+// cartao) na mola subamortecida; `origem` e a pilula de onde ele nasceu e para
+// onde volta (ilha_rect). conteudoA e o texto, que entra AT_CONTEUDO_MS depois.
+static float cartaoT, cartaoV, conteudoA;
+static GfxRect origem;
+static Uint32 abriuEm;
+// "Atualizar o aplicativo" nos Ajustes: a ilha mostra a consulta e a resposta
+// (mockup v2-upd-procurando / v2-upd-em-dia). So a pedida, nunca a da agenda.
+static int manualIlha;
 static char tagNova[32];          // "1.0.54", vazio se nao ha nada mais novo
 static char notas[6144];          // texto ja limpo, linhas separadas por \n
 // URL do .ipk da release. Vazia quando a release nao anexou um (ou quando este
@@ -225,7 +246,7 @@ static int  apkPerm;
 // tools/env.sh e tools/arm.sh), so por tests/atualizacao_shot.sh.
 #if defined(NV_AT_INSTALA)
 #define AT_INSTALA NV_AT_INSTALA
-#elif !defined(__EMSCRIPTEN__) && !defined(__APPLE__) && !defined(NV_TPK) && !defined(NV_ANDROID)
+#elif !defined(__EMSCRIPTEN__) && !defined(__APPLE__) && !defined(NV_LINUX_DESKTOP) && !defined(NV_TPK) && !defined(NV_ANDROID)
 #define AT_INSTALA 1
 #else
 #define AT_INSTALA 0
@@ -257,9 +278,18 @@ static int foco;                  // 0 = "Atualizar agora", 1 = "Depois"
 // `rolar` e onde o desenho esta (anda ate o alvo); `notasH` e a altura do texto
 // inteiro medida no quadro anterior e `vistaH` a da janela visivel.
 static float rolar, rolarAlvo, notasH, vistaH;
+#ifdef NV_TOUCH_UI
+static ToqueRolagem toqueNotas;
+static int toqueNotasRolar(const PonteiroRolagem *e) {
+  int r = toquerol_evento(&toqueNotas, e);
+  if (toquerol_livre(&toqueNotas)) rolarAlvo = rolar;
+  return r;
+}
+#endif
 static SDL_Thread *fioInst;
 
 const char *atualizacao_nova(void) { return tagNova; }
+
 int atualizacao_aberta(void) { return aberto; }
 
 // "1.0.54" > "1.0.53"? Compara numero a numero; o que nao e numero vale 0.
@@ -330,13 +360,14 @@ static int textoJson(const char *corpo, const char *chave, char *dst, size_t tam
 // 1.3.3 volta ao nome de contrato, e este codigo passa a aceitar os dois para
 // o proximo nome bonito nao quebrar de novo. A regra que nao muda: a normal
 // NUNCA casa com um nome que tenha "highcache".
-#ifdef NV_TEX_MB_FIXO
-#  define AT_SUFIXO "-highcache.ipk"
-#  define AT_SUFIXO2 "-highcache.ipk"
-#else
-#  define AT_SUFIXO "_arm.ipk"
-#  define AT_SUFIXO2 "-webos.ipk"
-#endif
+//
+// APOSENTADA NA 2.0.5. A build de cache grande (NV_TEX_MB_FIXO) tambem pega o
+// .ipk NORMAL: a 2.0.5 e a ultima highcache, e quem a instalou sai dela no
+// proximo "Atualizar agora". O teto de 300 MB vem da Ajustes > Memória para
+// imagens (migracao unica em ajustes.c). A highcache continua sendo empacotada
+// na 2.0.5 so para essa migracao chegar a quem a usa.
+#define AT_SUFIXO "_arm.ipk"
+#define AT_SUFIXO2 "-webos.ipk"
 
 static int terminaEm(const char *s, size_t n, const char *sufixo) {
   size_t k = strlen(sufixo);
@@ -434,9 +465,17 @@ static int acharAnexo(const char *corpo, char *dst, size_t tam, char *hash, size
 #endif
 
 #ifdef NV_ANDROID
-// Contrato do anexo: "Nuvio-<versao>-android.apk". "-android-debug.apk" e
-// "-android-preview.N.apk" NAO terminam em "-android.apk", entao nao casam.
+// Match the installed variant exactly. Pointer width follows the running
+// process, including 32-bit Fire OS on 64-bit hardware.
+#ifdef NV_APK_LITE
+#if UINTPTR_MAX == UINT32_MAX
+#define AT_APK_SUFIXO "-android-lite-armv7.apk"
+#else
+#define AT_APK_SUFIXO "-android-lite-arm64.apk"
+#endif
+#else
 #define AT_APK_SUFIXO "-android.apk"
+#endif
 static int acharApk(const char *corpo, char *dst, size_t tam, char *hash, size_t tamHash) {
   return acharAnexo(corpo, dst, tam, hash, tamHash, AT_APK_SUFIXO);
 }
@@ -478,6 +517,8 @@ static void limparNotas(const char *md, char *dst, size_t tam) {
     while (n > 0 && (linha[n - 1] == ' ' || linha[n - 1] == '\r')) linha[--n] = 0;
     if (!n) continue;
     if (!strncmp(linha, "---", 3)) break;
+    // Imagem (banner, captura) nao e texto do cartao: "![x](url)" ou <img/<p>.
+    if (!strncmp(linha, "![", 2) || !strncmp(linha, "<img", 4) || !strncmp(linha, "<p", 2)) continue;
     if (linha[0] == '#') {
       const char *t = linha;
       while (*t == '#') t++;
@@ -521,6 +562,12 @@ static int fioConsulta(void *arg) {
 #endif
   (void)arg;
   body[0] = 0;
+#ifdef NV_VIDAA
+  SDL_LockMutex(mtx);
+  pronto = 1;
+  SDL_UnlockMutex(mtx);
+  return 0;  // hosted app e sempre current
+#endif
   corpo = rede_baixar(AT_URL, 12);
   if (!corpo) { printf("[atualizacao] sem resposta do GitHub\n"); fflush(stdout); }
   else {
@@ -592,8 +639,19 @@ static int fioConsulta(void *arg) {
 // Sem o Homebrew Channel instalado nao ha caminho nenhum, e o cartao volta a
 // ser so aviso (ver podeInstalar).
 static int fioInstalar(void *arg) {
+#ifdef NV_DTS_DEBUG
+  /* Production release IPKs carry the production ID; never install them from
+   * an isolated diagnostic app, including through a stale update card. */
+  (void)arg; return 0;
+#endif
   char cmd[900];
   (void)arg;
+#ifdef NV_VIDAA
+  SDL_LockMutex(mtx);
+  pronto = 1;
+  SDL_UnlockMutex(mtx);
+  return 0;  // hosted app e sempre current
+#endif
   { char extra[110] = "";
     if (ipkHash[0]) snprintf(extra, sizeof extra, ",\"ipkHash\":\"%s\"", ipkHash);
     snprintf(cmd, sizeof cmd,
@@ -677,6 +735,9 @@ static int temInstalador(void) {
 }
 
 static int podeInstalar(void) {
+#ifdef NV_DTS_DEBUG
+  return 0;
+#endif
   return AT_INSTALA && ipkUrl[0] && estado == AT_PARADO && temInstalador();
 }
 
@@ -789,6 +850,7 @@ static int fioInstalarApk(void *arg) {
     apkFalhou(); return 0;
   }
   mkdir(dir, 0755);
+  if (!android_preparar_apk(arq)) { apkFalhou(); return 0; }
   // Ja baixado e conferido numa tentativa anterior?
   f = fopen(arq, "rb");
   if (f) {
@@ -876,6 +938,9 @@ static float rolarMax(void) {
 
 // Cada abertura comeca do topo das notas e com o foco no botao de atualizar.
 static void reiniciarVista(void) {
+#ifdef NV_TOUCH_UI
+  toquerol_limpar(&toqueNotas);
+#endif
   foco = 0;
   rolar = rolarAlvo = 0.0f;
 }
@@ -922,6 +987,9 @@ static int podeReconsultar(void) {
 }
 
 void atualizacao_verificar(void) {
+#ifdef NV_DTS_DEBUG
+  return; /* Debug IPKs are installed explicitly, outside production updates. */
+#endif
   static long ultChamada;
   long rel = (long)time(NULL);
   int vence;
@@ -943,10 +1011,13 @@ void atualizacao_verificar(void) {
 }
 
 void atualizacao_procurar_agora(void) {
+#ifdef NV_DTS_DEBUG
+  return;
+#endif
   if (!mtx) mtx = SDL_CreateMutex();
   if (!mtx || !podeReconsultar()) return;
   SDL_LockMutex(mtx);
-  manualPendente = 1; manualAchou = 0;
+  manualPendente = 1; manualAchou = 0; manualIlha = 1;
   busca = ATUALIZACAO_BUSCA_PROCURANDO;
   SDL_UnlockMutex(mtx);
   disparar();
@@ -985,6 +1056,25 @@ void atualizacao_teste_estado(int b, const char *tag) {
 }
 #endif
 
+// A PILULA DE ONDE O CARTAO NASCE: a ilha do quadro anterior (o aviso em que
+// a pessoa apertou, ou o relogio). Sem ilha na tela (relogio desligado), uma
+// pilula no canto de sempre. Reabrir no meio do recolhimento continua dali.
+static void origemDaIlha(void) {
+  float x, y, w, h;
+  // A pilula vem da ilha, que e camada ampliada (tela virtual, escala.h); o
+  // cartao (1300x1008) nao cabe ampliado e fica em 1080p: a origem vai para a
+  // tela real.
+  if (ilha_rect(&x, &y, &w, &h) && w > 1.0f && h > 1.0f) {
+    float e = gfx_escala_ui();
+    origem = (GfxRect){ x * e, y * e, w * e, h * e };
+  }
+  else if (origem.w <= 0.0f) origem = (GfxRect){ ajustes_conteudo_x(), NV_ILHA_Y, 220.0f, NV_ILHA_H_ABERTA };
+}
+static void nascer(void) {
+  if (cartaoT < 0.02f) { origemDaIlha(); cartaoT = 0.0f; cartaoV = 0.0f; conteudoA = 0.0f; }
+  abriuEm = SDL_GetTicks();
+}
+
 void atualizacao_mostrar_se_houver(void) {
   char *visto;
   int g;
@@ -1002,6 +1092,7 @@ void atualizacao_mostrar_se_houver(void) {
     if (igual) return;
   }
   aberto = 1;
+  nascer();
   reiniciarVista();
 }
 
@@ -1016,11 +1107,17 @@ static void fechar(void) {
 void atualizacao_abrir(void) {
   if (!mtx) return;
   SDL_LockMutex(mtx);
-  if (tagNova[0]) { aberto = 1; geracaoVista = geracao; reiniciarVista(); }
+  if (tagNova[0]) { aberto = 1; geracaoVista = geracao; nascer(); reiniciarVista(); }
   SDL_UnlockMutex(mtx);
 }
 
 void atualizacao_evento(const SDL_Event *e) {
+#ifdef NV_TOUCH_UI
+  if (toquerol_navegacao(e)) {
+    if (toquerol_livre(&toqueNotas)) rolarAlvo = rolar;
+    toquerol_limpar(&toqueNotas);
+  }
+#endif
   SDL_Keycode k;
   if (!aberto || e->type != SDL_KEYDOWN) return;
   k = e->key.keysym.sym;
@@ -1087,59 +1184,418 @@ void atualizacao_evento(const SDL_Event *e) {
   }
 }
 
+
+// O PASSO EM QUE O INSTALADOR ESTA, para as etapas Baixar · Conferir · Instalar:
+// 0 baixando, 1 conferindo (o sha256 do .so/.apk, ou o "Verificando" da LG), 2
+// instalando, 3 tudo feito. O texto vem de quem instala (instPasso).
+static int etapaDe(int est, const char *passo) {
+  if (est == AT_PRONTO) return 3;
+  if (!strncmp(passo, "Install", 7)) return 2;
+  if (!strncmp(passo, "Verif", 5)) return 1;
+  return 0;
+}
+static const char *fraseDaEtapa(int etapa) {
+  return etapa == 1 ? i18n("Conferindo o arquivo...")
+       : etapa == 2 ? i18n("Instalando...")
+       : i18n("Baixando a atualização...");
+}
+// A barra: o numero do instalador. Passado o download, o arquivo inteiro ja
+// chegou: sem numero do instalador (o .tpk e o .apk nao informam), a barra
+// fica cheia em vez de voltar a zero.
+static float pctDaEtapa(int etapa, float pct) {
+  if (etapa >= 1 && pct <= 0.0f) pct = 100.0f;
+  if (pct < 0.0f) pct = 0.0f;
+  if (pct > 100.0f) pct = 100.0f;
+  return pct;
+}
+
+int atualizacao_cobre_ilha(void) { return aberto || cartaoT > 0.02f; }
+
 void atualizacao_atualizar(float dt, Uint32 agora) {
-  (void)agora;
   // VOLTAR FECHA O CARTAO NO MEIO DO DOWNLOAD (ver atualizacao_evento) e o
   // fio segue: sem isto a pessoa ficava sem saber se ainda baixava. A barra
-  // passa para a ilha do relogio enquanto o cartao estiver fechado; pronto,
+  // passa para a ilha do relogio enquanto o cartao estiver fechado (mockup
+  // v2-upd-ilha: icone, a frase da etapa, o trilho e a porcentagem); pronto,
   // vira um aviso curto.
   { static int estAnt;
-    int est; float pct;
-    SDL_LockMutex(mtx); est = estado; pct = instPct; SDL_UnlockMutex(mtx);
-    if (!aberto && est == AT_INSTALANDO)
-      ilha_atividade(i18n("Baixando a atualização..."), pct < 0.0f ? -1.0f : pct / 100.0f);
+    int est; float pct; char passo[48];
+    if (mtx) SDL_LockMutex(mtx);
+    est = estado; pct = instPct; snprintf(passo, sizeof passo, "%s", instPasso);
+    if (mtx) SDL_UnlockMutex(mtx);
+    if (!aberto && est == AT_INSTALANDO) {
+      int etapa = etapaDe(est, passo);
+      ilha_atividade_ex(fraseDaEtapa(etapa),
+                        pct < 0.0f && etapa == 0 ? -1.0f : pctDaEtapa(etapa, pct) / 100.0f, "aj_download");
+    }
     if (!aberto && estAnt == AT_INSTALANDO && est == AT_PRONTO)
       ilha_avisar("atualizacao", ILHA_OK, NULL, i18n("Atualizado. Feche e abra o app para usar."), 7000u, 0);
     estAnt = est; }
-  if (!aberto && entrada < 0.002f) { entrada = 0.0f; return; }
-  entrada = anim_rampa(entrada, aberto ? 1.0f : 0.0f, dt,
-                       aberto ? AT_ABRIR_MS : AT_FECHAR_MS);
+  // A CONSULTA PEDIDA NOS AJUSTES fala pela ilha: a atividade enquanto o
+  // GitHub nao responde e, no fim, "Em dia" (ou o neutro sem resposta). Com
+  // versao nova quem fala e o cartao, que os Ajustes abrem.
+  if (manualIlha) {
+    int b = atualizacao_busca();
+    if (b == ATUALIZACAO_BUSCA_PROCURANDO) ilha_atividade_ex(i18n("Procurando atualização…"), -1.0f, "");
+    else {
+      manualIlha = 0;
+      if (b == ATUALIZACAO_BUSCA_EM_DIA) {
+        char t[160];
+        IlhaAvisoEx e;
+        memset(&e, 0, sizeof e);
+        snprintf(t, sizeof t, i18n("Você está na versão mais recente (%s)"), NV_VERSAO);
+        e.chave = "atualizacao"; e.tipo = ILHA_OK; e.icone = "check"; e.texto = t;
+        e.kicker = i18n("Em dia"); e.ms = 6000u;
+        ilha_avisar_ex(&e);
+      } else if (b == ATUALIZACAO_BUSCA_ERRO)
+        ilha_avisar("atualizacao", ILHA_INFO, NULL, i18n("Não deu para consultar agora"), 6000u, 0);
+    }
+  }
+  // FECHANDO, a forma volta para a pilula ONDE ELA ESTA AGORA (com o download
+  // em curso, ja e a da atividade).
+  if (!aberto) origemDaIlha();
+  if (!aberto && cartaoT < 0.02f && conteudoA < 0.01f) {
+    cartaoT = cartaoV = conteudoA = 0.0f;
+    return;
+  }
+  if (dt > 0.05f) dt = 0.05f;
+  if (anim_politica_reduzida || ajustes_animacoes_reduzidas()) {
+    cartaoT = aberto ? 1.0f : 0.0f; cartaoV = 0.0f; conteudoA = aberto ? 1.0f : 0.0f;
+  } else {
+    int k;
+    float alvo = aberto ? 1.0f : 0.0f;
+    for (k = 0; k < 4; k++) {
+      float h = dt * 0.25f, ac = AT_MOLA_W * AT_MOLA_W * (alvo - cartaoT) - 2.0f * AT_MOLA_Z * AT_MOLA_W * cartaoV;
+      cartaoV += ac * h;
+      cartaoT += cartaoV * h;
+    }
+    // Abrindo, o texto entra 80 ms depois da forma; fechando, ele sai antes
+    // dela (a pilula nunca encolhe com o cartao escrito dentro).
+    conteudoA = anim_mola(conteudoA,
+                          aberto && (Sint32)(agora - abriuEm) >= (Sint32)AT_CONTEUDO_MS ? 1.0f : 0.0f,
+                          dt, aberto ? 12.0f : 30.0f);
+  }
+  if (!aberto && cartaoT < 0.0f) { cartaoT = 0.0f; cartaoV = 0.0f; }
   // Rolagem suave, mas curta (~120 ms para chegar): quem segura a seta quer
   // ver o texto andar, nao esperar.
+#ifdef NV_TOUCH_UI
+  if (!toquerol_livre(&toqueNotas))
+#endif
   { float d = rolarAlvo - rolar, f = dt * 1000.0f / 120.0f;
     if (f > 1.0f) f = 1.0f;
     rolar = (d > -0.5f && d < 0.5f) ? rolarAlvo : rolar + d * f; }
 }
 
+// O retangulo final, no canto da pilula: alinhado pela esquerda dela, ou pela
+// direita quando a ilha mora no lado direito (cresce para a esquerda).
+static GfxRect cartaoAlvo(void) {
+  GfxRect c = { origem.x, origem.y, AT_W, AT_H };
+  if (origem.x + origem.w * 0.5f > NV_TELA_W * 0.5f) c.x = origem.x + origem.w - AT_W;
+  if (c.x + c.w > NV_TELA_W - NV_FOLHA_MARGEM) c.x = NV_TELA_W - NV_FOLHA_MARGEM - c.w;
+  if (c.x < NV_FOLHA_MARGEM) c.x = NV_FOLHA_MARGEM;
+  if (c.y + c.h > NV_TELA_H - NV_FOLHA_MARGEM) c.y = NV_TELA_H - NV_FOLHA_MARGEM - c.h;
+  if (c.y < NV_FOLHA_MARGEM) c.y = NV_FOLHA_MARGEM;
+  return c;
+}
+
+// --- pecas do cartao (medidas do mockup) ----------------------------------------
+// Texto claro do mockup: #F3F2EF, com a opacidade do CSS no alfa.
+#define AT_TX 243, 242, 239
+
+// <kbd> 36 de altura (18/700, minimo 40, recuo 9) + rotulo 20 a 50%, vao 10.
+static float kbd(float x, float yc, const char *tecla, const char *rotulo, float a) {
+  TxtLinha k = txt_linha(TXT_AJ_CHIP, tecla, AT_TX, 255);
+  TxtLinha l = txt_linha(TXT_AJ_TEXTO, rotulo, AT_TX, 255);
+  float kw = (float)k.w + 18.0f;
+  if (kw < 40.0f) kw = 40.0f;
+  if (x > -9000.0f && a > 0.002f) {
+    GfxRect r = { x, yc - 18.0f, kw, 36.0f };
+    if (ajustes_vidro()) gfx_cor(r, 0.5f, 1, 1, 1, 0.09f * a);
+    else gfx_cor(r, 0.5f, 0.141f, 0.149f, 0.173f, a);
+    txt_desenhar_alpha(k, x + (kw - (float)k.w) * 0.5f, yc - (float)k.h * 0.5f, a * 0.82f);
+    txt_desenhar_alpha(l, x + kw + 10.0f, yc - (float)l.h * 0.5f, a * 0.50f);
+  }
+  return kw + 10.0f + (float)l.w;
+}
+// Dicas lado a lado (vao 24), alinhadas pela BORDA DIREITA xDir.
+static void dicas(float xDir, float yc, const char *const *t, const char *const *r, int n, float a) {
+  float tot = 0.0f, x;
+  int i;
+  for (i = 0; i < n; i++) tot += kbd(-10000.0f, yc, t[i], r[i], 0.0f) + (i ? 24.0f : 0.0f);
+  x = xDir - tot;
+  for (i = 0; i < n; i++) x += kbd(x, yc, t[i], r[i], a) + 24.0f;
+}
+
+// PONTEIRO (#99): foco pela mesma variavel das setas (so com os dois botoes
+// na tela, como as setas); o OK do clique segue por atualizacao_evento.
+static void ponteiroBotao(int i, int b) {
+  (void)b;
+  if (!aberto || estado == AT_INSTALANDO || !podeAgir() || (i != 0 && i != 1)) return;
+  foco = i;
+}
+int atualizacao_teste_foco(void) { return foco; }
+
+// Botao do cartao: primario 72 (26/600, recuo 34, icone 26) ou secundario 64
+// (24/600, recuo 28). Focado = pilula cheia no acento; senao branco 8%.
+static float botaoAt(float x, float yc, int primario, const char *rotulo, const char *icone,
+                     float icT, float foco, float a) {
+  TxtEstilo es = primario ? TXT_G28B : TXT_G26B;
+  float h = primario ? 72.0f : 64.0f, pad = primario ? 34.0f : 28.0f;
+  TxtLinha l;
+  float w, tx;
+  int c;
+  c = foco > 0.5f ? plrui_tinta() : 243;
+  l = txt_linha(es, rotulo, c, c, c, 255);
+  w = pad * 2.0f + (float)l.w + (icone ? icT + 10.0f : 0.0f);
+  if (x < -9000.0f) return w;
+  { GfxRect r = { x, yc - h * 0.5f, w, h };
+    if (foco > 0.5f) plrui_pilula_foco(r, a);
+    else plrui_botao_repouso(r, a); }
+  tx = x + pad;
+  if (icone) {
+    float k = (float)c / 255.0f;
+    gfx_icone((GfxRect){ tx, yc - icT * 0.5f, icT, icT }, icone, k, k, k, a);
+    tx += icT + 10.0f;
+  }
+  txt_desenhar_alpha(l, tx, yc - (float)l.h * 0.5f, foco > 0.5f ? a : a * 0.88f);
+  return w;
+}
+
+// AS ETAPAS Baixar · Conferir · Instalar (mockup passosAt): disco de 30 — feito
+// = acento a 22% com o check; a da vez = ponto no acento com halo; a seguir =
+// branco 7% com o numero. `falhou` >= 0 marca aquela em vermelho com o x.
+static void etapas(float x, float yc, int atual, int falhou, float a) {
+  const char *rot[3];
+  float ar, ag, ab;
+  int i;
+  rot[0] = i18n("Baixar"); rot[1] = i18n("Conferir"); rot[2] = i18n("Instalar");
+  ajustes_acento(&ar, &ag, &ab);
+  for (i = 0; i < 3; i++) {
+    GfxRect d = { x, yc - 15.0f, 30.0f, 30.0f };
+    int feito = falhou >= 0 ? i < falhou : i < atual;
+    int vez = falhou < 0 && i == atual, erro = i == falhou;
+    TxtLinha t;
+    float op;
+    if (i) {
+      gfx_cor((GfxRect){ x, yc - 1.0f, 40.0f, 2.0f }, 0.0f, 1, 1, 1, 0.14f * a);
+      x += 40.0f + 14.0f;
+      d.x = x;
+    }
+    if (erro) {
+      gfx_cor(d, 0.5f, 0.898f, 0.325f, 0.294f, 0.20f * a);
+      gfx_icone((GfxRect){ x + 7.0f, yc - 8.0f, 16.0f, 16.0f }, "aj_x", 0.898f, 0.325f, 0.294f, a);
+    } else if (feito) {
+      gfx_cor(d, 0.5f, ar, ag, ab, 0.22f * a);
+      gfx_icone((GfxRect){ x + 7.0f, yc - 8.0f, 16.0f, 16.0f }, "aj_check", ar, ag, ab, a);
+    } else if (vez) {
+      gfx_cor((GfxRect){ x + 3.0f, yc - 12.0f, 24.0f, 24.0f }, 0.5f, ar, ag, ab, 0.22f * a);
+      gfx_cor((GfxRect){ x + 9.0f, yc - 6.0f, 12.0f, 12.0f }, 0.5f, ar, ag, ab, a);
+    } else {
+      char n[4];
+      TxtLinha tn;
+      gfx_cor(d, 0.5f, 1, 1, 1, 0.07f * a);
+      snprintf(n, sizeof n, "%d", i + 1);
+      tn = txt_linha(TXT_ILHA_HORA, n, AT_TX, 255);
+      txt_desenhar_alpha(tn, x + (30.0f - (float)tn.w) * 0.5f, yc - (float)tn.h * 0.5f, a * 0.38f);
+    }
+    x += 30.0f + 10.0f;
+    if (erro) {
+      t = txt_linha(TXT_ILHA_CORPO, rot[i], 229, 83, 75, 255); op = 1.0f;
+    } else if (vez) {
+      t = txt_linha(TXT_ILHA_ITEM, rot[i], 255, 255, 255, 255); op = 1.0f;
+    } else {
+      t = txt_linha(TXT_ILHA_CORPO, rot[i], AT_TX, 255); op = feito ? 0.60f : 0.38f;
+    }
+    txt_desenhar_alpha(t, x, yc - (float)t.h * 0.5f, a * op);
+    x += (float)t.w + 14.0f;
+  }
+}
+
+// O QR da pagina da release (src/qr.c), numa textura com 3 modulos de
+// silencio (o do mockup). Gerado uma vez.
+static GLuint texQr;
+static GLuint qrPagina(void) {
+  Qr q;
+  int lado, xq, yq;
+  unsigned char *px;
+  if (texQr) return texQr;
+  if (!qr_gerar(&q, AT_PAGINA)) return 0;
+  lado = q.lado + 6;
+  px = (unsigned char *)malloc((size_t)lado * lado * 3);
+  if (!px) return 0;
+  memset(px, 255, (size_t)lado * lado * 3);
+  for (yq = 0; yq < q.lado; yq++)
+    for (xq = 0; xq < q.lado; xq++)
+      if (qr_modulo(&q, xq, yq)) {
+        size_t k = ((size_t)(yq + 3) * lado + (xq + 3)) * 3;
+        px[k] = 11; px[k + 1] = 12; px[k + 2] = 14;
+      }
+  glGenTextures(1, &texQr);
+  glBindTexture(GL_TEXTURE_2D, texQr);
+  glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+  glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, lado, lado, 0, GL_RGB, GL_UNSIGNED_BYTE, px);
+  // NEAREST: um modulo borrado com o vizinho e ilegivel para a camera.
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+  gfx_tex_esquecer(0);
+  free(px);
+  return texQr;
+}
+
+// O endereco sem o "https://" (o que cabe na linha e o que se digita).
+static const char *paginaCurta(void) {
+  const char *p = AT_PAGINA;
+  return !strncmp(p, "https://", 8) ? p + 8 : p;
+}
+
+// UMA LINHA DE NOTAS ja quebrada, com o esmaecimento do fim da janela (o mask
+// do mockup: opaco ate 75% da altura, transparente na borda de baixo).
+static float fadeNotas(float yMeio, float topo, float vista) {
+  float ini = topo + vista * 0.75f, f;
+  if (yMeio <= ini) return 1.0f;
+  f = 1.0f - (yMeio - ini) / (vista * 0.25f);
+  return f < 0.0f ? 0.0f : f;
+}
+// Quebra `s` em linhas de ate `larg` e desenha cada uma com o seu esmaecimento.
+// Devolve a altura usada (linhas x AT_LEADING). Mesma quebra de txt_bloco
+// (txt_token_tam: palavra, ou um caractere CJK).
+static float notasBloco(TxtEstilo es, const char *s, float x, float y, float larg,
+                        float topo, float vista, float op, float a) {
+  char linha[512];
+  const char *p = s;
+  float usado = 0.0f;
+  int n = 0, espacoAntes = 0;
+  linha[0] = 0;
+  while (*p && n < AT_ITEM_LINHAS) {
+    const char *ini = p;
+    size_t np, nl;
+    char tent[512];
+    int esp;
+    p += txt_token_tam(p);
+    if (p == ini) p++;
+    np = (size_t)(p - ini);
+    esp = *p == ' ';
+    while (*p == ' ') p++;
+    nl = strlen(linha);
+    if (nl + np + 2 >= sizeof tent) break;
+    memcpy(tent, linha, nl);
+    if (nl && espacoAntes) tent[nl++] = ' ';
+    memcpy(tent + nl, ini, np);
+    tent[nl + np] = 0;
+    if (linha[0] && (float)txt_largura(es, tent) > larg) {
+      float ym = y + usado + AT_LEADING * 0.5f;
+      if (ym > topo - AT_LEADING && ym < topo + vista + AT_LEADING) {
+        TxtLinha l = txt_linha(es, linha, AT_TX, 255);
+        txt_desenhar_alpha(l, x, ym - (float)l.h * 0.5f, a * op * fadeNotas(ym, topo, vista));
+      }
+      usado += AT_LEADING; n++;
+      memcpy(linha, ini, np); linha[np] = 0;
+    } else memcpy(linha, tent, strlen(tent) + 1);
+    espacoAntes = esp;
+  }
+  if (linha[0] && n < AT_ITEM_LINHAS) {
+    float ym = y + usado + AT_LEADING * 0.5f;
+    if (ym > topo - AT_LEADING && ym < topo + vista + AT_LEADING) {
+      TxtLinha l = txt_linha(es, linha, AT_TX, 255);
+      txt_desenhar_alpha(l, x, ym - (float)l.h * 0.5f, a * op * fadeNotas(ym, topo, vista));
+    }
+    usado += AT_LEADING;
+  }
+  return usado;
+}
+
+// O RESUMO: o primeiro paragrafo das notas, quando vem antes de qualquer secao
+// ("Where to watch in the source picker, ..."), mora no cabecalho e nao rola.
+// Devolve o comprimento dele em `notas` (0 = nao ha) e copia em `dst`.
+static size_t resumoDasNotas(char *dst, size_t tam) {
+  const char *fim = strchr(notas, '\n');
+  size_t n = fim ? (size_t)(fim - notas) : strlen(notas);
+  dst[0] = 0;
+  if (!n || notas[0] == '\x01' || !strncmp(notas, "\xe2\x80\xa2 ", 4)) return 0;
+  if (n >= tam) n = tam - 1;
+  memcpy(dst, notas, n); dst[n] = 0;
+  return fim ? (size_t)(fim - notas) + 1 : strlen(notas);
+}
+
 void atualizacao_desenhar(Uint32 agora) {
-  float a = anim_suave(entrada), dy, y, x, w;
-  char buf[160];
-  const char *p;
+  GfxRect C, R;
+  float t, tr, rpx, raio, a, ca, x, y, w, cr, cg, cb;
+  int est, etapa, falhaEm = -1;
+  float pct;
+  char passo[48], buf[200], resumo[512];
+  size_t pulo;
   (void)agora;
-  if (entrada < 0.002f) return;
+  if (cartaoT <= 0.0f && conteudoA < 0.01f && !aberto) return;
+  if (!aberto && cartaoT < 0.02f) return;
 
-  gfx_cor((GfxRect){ 0, 0, NV_TELA_W, NV_TELA_H }, 0.0f, 0, 0, 0, 0.72f * entrada);
-  dy = (1.0f - a) * 36.0f;
-  // CARTAO FLUTUANTE na "cara nova" (menu.c, 21/09/2026): cantos de 28 px
-  // pelo menor lado (a altura), fundo translucido e UMA luz difusa na cor de
-  // realce entrando pelo canto superior esquerdo, presa aos cantos do cartao
-  // (GFX_LUZ). Com o veu de tela cheia ja pago, a luz e a segunda e ultima
-  // camada grande desta tela.
-  { GfxRect c = { AT_X, AT_Y + dy, AT_W, AT_H };
-    float ar, ag, ab; ajustes_acento(&ar, &ag, &ab);
-    gfx_cor(c, 28.0f / AT_H, 0.055f, 0.058f, 0.068f, 0.94f * a);
-    gfx_luz_canto(c, 28.0f / AT_H, AT_H * 0.1f, -AT_H * 0.1f, AT_H * 0.65f, ar, ag, ab, 0.22f * a);
-    gfx_recorte(AT_X, AT_Y + dy, AT_W, AT_H); }
+  // A FORMA: da pilula (origem) ao cartao (C), raio de meia altura a 40 px.
+  C = cartaoAlvo();
+  t = cartaoT > 1.06f ? 1.06f : cartaoT < 0.0f ? 0.0f : cartaoT;
+  tr = t > 1.0f ? 1.0f : t;
+  R.x = origem.x + (C.x - origem.x) * t; R.y = origem.y + (C.y - origem.y) * t;
+  R.w = origem.w + (C.w - origem.w) * t; R.h = origem.h + (C.h - origem.h) * t;
+  rpx = origem.h * 0.5f + (AT_RAIO - origem.h * 0.5f) * tr;
+  raio = rpx / (R.h > 1.0f ? R.h : 1.0f);
+  if (raio > 0.5f) raio = 0.5f;
+  a = 1.0f;
+  ca = conteudoA;
 
-  x = AT_X + AT_PAD; w = AT_W - 2.0f * AT_PAD;
-  y = AT_Y + dy + 56.0f;
-  { TxtLinha t = txt_linha(TXT_CAPTION2, i18n("ATUALIZAÇÃO DISPONÍVEL"),
-                           150, 154, 165, 255);
-    txt_desenhar_alpha(t, x, y, a * 0.92f); }
-  y += 30.0f;
+  gfx_cor((GfxRect){ 0, 0, NV_TELA_W, NV_TELA_H }, 0.0f, 0, 0, 0, AT_VEU * tr);
+  // MATERIAL: o da ilha (miolo a 80%) indo ao do cartao (90%, mockup) no vidro;
+  // no solido, o miolo da ilha indo ao #15161A opaco. Sombra curta, sem aro.
+  if (ajustes_vidro()) {
+    gfx_rect((GfxRect){ R.x - 20.0f, R.y - 6.0f, R.w + 40.0f, R.h + 40.0f }, 0, GFX_SOMBRA,
+             1.0f, 0, 0, 0.5f, 0, 0, 0, 0.36f * a);
+    gfx_vidro_material(R, raio, GFX_VIDRO_DENS + 0.10f * tr, a);   // + gfx_vidro_luz
+  } else {
+    gfx_rect((GfxRect){ R.x - 16.0f, R.y - 4.0f, R.w + 32.0f, R.h + 30.0f }, 0, GFX_SOMBRA,
+             1.0f, 0, 0, 0.5f, 0, 0, 0, 0.45f * a);
+    gfx_cor(R, raio, 0.055f + 0.027f * tr, 0.058f + 0.028f * tr, 0.068f + 0.034f * tr,
+            (0.86f + 0.14f * tr) * a);
+  }
+  if (ca < 0.01f) return;
+
+  // O CONTEUDO mora no retangulo FINAL e e revelado pela forma que cresce.
+  gfx_recorte(R.x, R.y, R.w, R.h);
+  SDL_LockMutex(mtx);
+  est = estado;
+  pct = instPct;
+  snprintf(passo, sizeof passo, "%s", instPasso);
+  SDL_UnlockMutex(mtx);
+  etapa = etapaDe(est, passo);
+  if (est == AT_FALHOU) falhaEm = etapaDe(AT_INSTALANDO, passo);
+
+  x = C.x + AT_PADX; w = C.w - 2.0f * AT_PADX;
+  // KICKER POR ESTADO (aprovado): disco de 44 com o icone + a marca em caixa
+  // alta. Disponivel/Baixando/Instalando no acento, Pronto verde, Falhou vermelho.
+  { const char *kic = "aj_download", *kt = i18n("Atualização disponível");
+    char up[96];
+    float yc = C.y + AT_PADY + 22.0f;
+    ajustes_acento(&cr, &cg, &cb);
+    if (est == AT_INSTALANDO) kt = etapa >= 2 ? i18n("Instalando") : i18n("Baixando");
+    else if (est == AT_PRONTO) { kic = "aj_check"; kt = i18n("Pronto"); cr = 0.298f; cg = 0.765f; cb = 0.541f; }
+    else if (est == AT_FALHOU) { kic = "aj_x"; kt = i18n("Falhou"); cr = 0.898f; cg = 0.325f; cb = 0.294f; }
+    gfx_cor((GfxRect){ x, yc - 22.0f, 44.0f, 44.0f }, 0.5f, cr, cg, cb, 0.22f * ca);
+    gfx_icone((GfxRect){ x + 11.0f, yc - 11.0f, 22.0f, 22.0f }, kic, cr, cg, cb, ca);
+    idioma_maiusc(up, sizeof up, kt);
+    { TxtLinha k = txt_linha(TXT_AJ_CHIP, "M", AT_TX, 255);
+      txt_tracking(TXT_AJ_CHIP, up, AT_TX, x + 44.0f + 14.0f, yc - (float)k.h * 0.5f, ca * 0.45f, 2.5f); }
+    // A HORA no canto: o cartao E a ilha do relogio, e ela continua dizendo.
+    { time_t tt = time(NULL);
+      struct tm lt;
+      char h[12] = "";
+      if (localtime_r(&tt, &lt)) hora_tela(h, sizeof h, &lt);
+      if (h[0]) {
+        TxtLinha l = txt_linha(TXT_ILHA_NOME, h, AT_TX, 255);
+        txt_desenhar_alpha(l, C.x + C.w - AT_PADX - (float)l.w, yc - (float)l.h * 0.5f, ca * 0.60f);
+      } } }
+
+  // TITULO 64/800, "Voce esta na" 26 a 60%, e o resumo 24 a 72%.
+  y = C.y + AT_PADY + 44.0f + 18.0f;
   snprintf(buf, sizeof buf, i18n("Nuvio %s"), tagNova);
-  { TxtLinha t = txt_linha(TXT_TITULO1, buf, 246, 247, 252, 255);
-    txt_desenhar_alpha(t, x, y, a); y += t.h + 6.0f; }
+  { TxtLinha l = txt_linha(TXT_AJ_NUM64, buf, AT_TX, 255);
+    txt_desenhar_alpha(l, x - 1.0f, y + (77.0f - (float)l.h) * 0.5f, ca); y += 77.0f; }
   // A VARIANTE NO CARTAO. Sem isto a pessoa le "Você está na 1.1.2" e vai para
   // uma pagina com dois .ipk sem saber qual e o dela.
 #ifdef NV_TEX_MB_FIXO
@@ -1147,139 +1603,198 @@ void atualizacao_desenhar(Uint32 agora) {
 #else
   snprintf(buf, sizeof buf, i18n("Você está na %s"), NV_VERSAO);
 #endif
-  { TxtLinha t = txt_linha(TXT_CAPTION, buf, 176, 180, 190, 255);
-    txt_desenhar_alpha(t, x, y, a * 0.9f); y += t.h + 28.0f; }
-
-  // NOTAS, linha a linha; \x01 marca secao. Janela fixa entre o cabecalho e o
-  // rodape, recortada: o que nao cabe fica para a rolagem, nunca por cima dos
-  // botoes. A altura total sai do proprio desenho e vale para o quadro
-  // seguinte (o texto nao muda enquanto o cartao esta aberto).
-  { float topo = y, base = AT_Y + dy + AT_H - AT_RODAPE_H, y0;
-  vistaH = base - topo;
-  if (rolarAlvo > rolarMax()) rolarAlvo = rolarMax();
-  if (rolar > rolarMax()) rolar = rolarMax();
-  gfx_recorte(AT_X, topo, AT_W, vistaH);
-  y = y0 = topo - rolar;
-  p = notas;
-  while (*p) {
-    const char *fim = strchr(p, '\n');
-    size_t n = fim ? (size_t)(fim - p) : strlen(p);
-    char linha[512];
-    if (n >= sizeof linha) n = sizeof linha - 1;
-    memcpy(linha, p, n); linha[n] = 0;
-    p = fim ? fim + 1 : p + n;
-    if (linha[0] == '\x01') {
-      y += 10.0f;
-      { TxtLinha t = txt_linha(TXT_CALLOUT, i18n(linha + 1), 246, 247, 252, 255);
-        txt_desenhar_alpha(t, x, y, a); y += t.h + 10.0f; }
-    } else {
-      y += txt_bloco(TXT_BODY, linha, 200, 204, 214, x, y, w, AT_LEADING,
-                     a * 0.95f, AT_ITEM_LINHAS) + 10.0f;
-    }
+  y += 6.0f;
+  { TxtLinha l = txt_linha(TXT_G28R, buf, AT_TX, 255);
+    txt_desenhar_alpha(l, x, y + (31.5f - (float)l.h) * 0.5f, ca * 0.60f); y += 31.5f; }
+  pulo = resumoDasNotas(resumo, sizeof resumo);
+  if (resumo[0]) {
+    y += 20.0f;
+    y += txt_bloco(TXT_DET_SIN, resumo, AT_TX, x, y + (AT_LEADING - 29.0f) * 0.5f, w,
+                   AT_LEADING, ca * 0.72f, 3);
   }
-  notasH = y - y0;
-  // DICA DE QUE HA MAIS: o fim da janela some no fundo do cartao (em vez de
-  // cortar uma linha ao meio) e uma trilha fina a direita diz onde se esta.
-  if (rolarMax() > 0.5f) {
-    float ar, ag, ab, tH = vistaH - 16.0f, pH, pY;
-    if (rolar < rolarMax() - 0.5f) {
-      GfxRect veu = { AT_X, base - 72.0f, AT_W, 72.0f };
-      gfx_rect(veu, 0, GFX_VEU_BAIXO, 0, 0, 0, 0.0f, 0.055f, 0.058f, 0.068f, a);
-    }
-    gfx_recorte(AT_X, AT_Y + dy, AT_W, AT_H);
-    ajustes_acento(&ar, &ag, &ab);
-    pH = tH * vistaH / notasH;
-    if (pH < 40.0f) pH = 40.0f;
-    pY = topo + 8.0f + (tH - pH) * (rolar / rolarMax());
-    // O raio do SDF e relativo a ALTURA: NV_RAIO_PILL numa trilha em pe vira
-    // uma lente. Meia largura sobre a altura e que da a pilula.
-    gfx_cor((GfxRect){ AT_X + AT_W - 30.0f, topo + 8.0f, 6.0f, tH },
-            3.0f / tH, 1.0f, 1.0f, 1.0f, 0.12f * a);
-    gfx_cor((GfxRect){ AT_X + AT_W - 30.0f, pY, 6.0f, pH },
-            3.0f / pH, ar, ag, ab, 0.9f * a);
-  }
-  gfx_recorte(AT_X, AT_Y + dy, AT_W, AT_H); }
 
-  // RODAPE. Onde ha como instalar, ele vira dois botoes; onde nao ha, continua
-  // sendo o endereco da pagina, que e a unica coisa util a dizer. Posicao FIXA,
-  // abaixo da janela das notas: por mais longas que elas sejam, o botao esta
-  // sempre na tela.
-  y = AT_Y + dy + AT_H - 96.0f;
-  if (estado == AT_PRONTO && soEncenada) {
-    const char *rot = i18n("Reiniciar agora");
-    TxtLinha t = txt_linha(TXT_CALLOUT, i18n("Pronto. Reinicie o Nuvio para usar a versão nova."),
-                           232, 236, 246, 255);
-    txt_desenhar_alpha(t, x, y - 58.0f, a);
-    { GfxRect b = { x, y, botao_largura(rot, NULL, 1), BOTAO_H_PRIMARIO };
-      botao_pilula(b, rot, NULL, 1.0f, 1, 0, a); }
-  } else if (estado == AT_INSTALANDO || estado == AT_PRONTO) {
-    // BARRA E PORCENTAGEM, e nao uma frase parada. O numero e o passo vem do
-    // proprio instalador (progress/statusText); enquanto ele nao disse nada a
-    // barra fica vazia em vez de inventar movimento.
-    float pct, larg = w * 0.62f;
-    char passo[48];
-    SDL_LockMutex(mtx);
-    pct = estado == AT_PRONTO ? 100.0f : instPct;
-    snprintf(passo, sizeof passo, "%s", instPasso);
-    SDL_UnlockMutex(mtx);
-    if (pct < 0.0f) pct = 0.0f;
-    if (pct > 100.0f) pct = 100.0f;
-    { const char *msg = estado == AT_PRONTO
-        ? i18n("Atualizado. Feche e abra o app para usar.")
-        : (!strncmp(passo, "Verif", 5) ? i18n("Conferindo o arquivo...")
-        : (!strncmp(passo, "Install", 7) ? i18n("Instalando...")
-        :  i18n("Baixando a atualização...")));
-      TxtLinha t = txt_linha(TXT_CALLOUT, msg, 232, 236, 246, 255);
-      txt_desenhar_alpha(t, x, y, a); }
-    { GfxRect trilho = { x, y + 46.0f, larg, 10.0f };
-      GfxRect cheio  = { x, y + 46.0f, larg * (pct / 100.0f), 10.0f };
+  // RODAPE FIXO, de baixo para cima: a altura sai do estado (mockup).
+  { float rodH, rodY, notTopo = y, vista;
+    int notasOff = est == AT_PRONTO || est == AT_FALHOU;
+    if (est == AT_PRONTO) rodH = 26.0f + 30.0f + 22.0f + 72.0f + 40.0f;
+    else if (est == AT_FALHOU) rodH = 26.0f + 30.0f + 22.0f + 67.0f + 40.0f;
+    else if (est == AT_INSTALANDO) rodH = 26.0f + 30.0f + 22.0f + 36.0f + 14.0f + 36.0f + 40.0f;
+    else if (podeAgir()) rodH = 26.0f + 72.0f + 40.0f;
+    else rodH = 26.0f + 162.0f + 40.0f;
+    rodY = C.y + C.h - rodH;
+    vista = rodY - notTopo;
+    vistaH = vista;
+#ifdef NV_TOUCH_UI
+    toquerol_vincular(&toqueNotas, (GfxRect){R.x, notTopo, R.w, vista}, gfx_escala(),
+                     0.0f, rolarMax(), 1, &rolar);
+    ponteiro_rolagem(toqueNotasRolar);
+#endif
+
+    // NOTAS, recortadas na janela entre o cabecalho e o rodape, roláveis.
+    // \x01 marca secao (28/700); "• " e item (24, entrelinha 1,45, a bolinha a
+    // 40%); o resto e paragrafo. A altura total vale para o quadro seguinte.
+    if (rolarAlvo > rolarMax()) rolarAlvo = rolarMax();
+    if (rolar > rolarMax()) rolar = rolarMax();
+    gfx_recorte(R.x, notTopo > R.y ? notTopo : R.y, R.w,
+                (rodY < R.y + R.h ? rodY : R.y + R.h) - (notTopo > R.y ? notTopo : R.y));
+    { float op = notasOff ? 0.5f : 1.0f, yy = notTopo - rolar, y0 = yy;
+      const char *p = notas + pulo;
+      float mb = 0.0f;   // a margem de baixo do bloco anterior (colapsa com a de cima)
+      while (*p) {
+        const char *fim = strchr(p, '\n');
+        size_t n = fim ? (size_t)(fim - p) : strlen(p);
+        char linha[512];
+        if (n >= sizeof linha) n = sizeof linha - 1;
+        memcpy(linha, p, n); linha[n] = 0;
+        p = fim ? fim + 1 : p + n;
+        if (linha[0] == '\x01') {
+          TxtLinha l = txt_linha(TXT_G30B, i18n(linha + 1), AT_TX, 255);
+          float ym;
+          yy += mb > 22.0f ? mb : 22.0f;
+          ym = yy + 17.0f;
+          if (ym > notTopo - 40.0f && ym < rodY + 40.0f)
+            txt_desenhar_alpha(l, x, ym - (float)l.h * 0.5f, ca * op * fadeNotas(ym, notTopo, vista));
+          yy += 34.0f;
+          mb = 10.0f;
+        } else if (!strncmp(linha, "\xe2\x80\xa2 ", 4)) {
+          float ym;
+          yy += mb > 8.0f ? mb : 8.0f;
+          ym = yy + AT_LEADING * 0.5f;
+          if (ym > notTopo - 40.0f && ym < rodY + 40.0f) {
+            TxtLinha b = txt_linha(TXT_DET_SIN, "\xe2\x80\xa2", AT_TX, 255);
+            txt_desenhar_alpha(b, x, ym - (float)b.h * 0.5f, ca * op * 0.40f * fadeNotas(ym, notTopo, vista));
+          }
+          yy += notasBloco(TXT_DET_SIN, linha + 4, x + 30.0f, yy, w - 30.0f - 24.0f,
+                           notTopo, vista, op * 0.78f, ca);
+          mb = 8.0f;
+        } else {
+          yy += mb > 8.0f ? mb : 8.0f;
+          yy += notasBloco(TXT_DET_SIN, linha, x, yy, w - 24.0f, notTopo, vista, op * 0.72f, ca);
+          mb = 8.0f;
+        }
+      }
+      yy += mb;
+      notasH = yy - y0; }
+    gfx_recorte(R.x, R.y, R.w, R.h);
+    // A TRILHA a direita (6 px, branco 10%, o polegar no acento), 20 px para
+    // dentro do topo e da base da janela, a 22 da borda.
+    if (rolarMax() > 0.5f) {
+      float ar, ag, ab, tY = notTopo + 20.0f, tH = vista - 40.0f, pH, pY;
+      ajustes_acento(&ar, &ag, &ab);
+      pH = tH * vista / notasH;
+      if (pH < 40.0f) pH = 40.0f;
+      pY = tY + (tH - pH) * (rolar / rolarMax());
+      gfx_cor((GfxRect){ C.x + C.w - 28.0f, tY, 6.0f, tH }, 3.0f / tH, 1, 1, 1, 0.10f * ca);
+      gfx_cor((GfxRect){ C.x + C.w - 28.0f, pY, 6.0f, pH }, 3.0f / pH, ar, ag, ab, ca);
+    }
+    // O fio do rodape: 1 px a 7%, de borda a borda.
+    gfx_cor((GfxRect){ C.x, rodY, C.w, 1.0f }, 0.0f, 1, 1, 1, 0.07f * ca);
+
+    y = rodY + 26.0f;
+    { const char *k2[2], *r2[2];
+      int mais = rolarMax() > 0.5f;
+      float xd = C.x + C.w - AT_PADX;
+    if (est == AT_PRONTO) {
+      // PRONTO: as tres etapas feitas, o check verde e a frase; no .tpk/.apk a
+      // lib nova esta encenada e o botao reinicia. Na LG nao ha botao: OK fecha.
+      float yc;
+      etapas(x, y + 15.0f, 3, -1, ca);
+      yc = y + 30.0f + 22.0f + 36.0f;
+      gfx_cor((GfxRect){ x, yc - 26.0f, 52.0f, 52.0f }, 0.5f, 0.298f, 0.765f, 0.541f, 0.18f * ca);
+      gfx_icone((GfxRect){ x + 12.0f, yc - 14.0f, 28.0f, 28.0f }, "aj_check", 0.298f, 0.765f, 0.541f, ca);
+      { TxtLinha l = txt_linha(TXT_G30B, soEncenada ? i18n("Pronto. Reinicie o Nuvio para usar a versão nova.")
+                                                     : i18n("Atualizado. Feche e abra o app para usar."), AT_TX, 255);
+        txt_desenhar_alpha(l, x + 52.0f + 22.0f, yc - (float)l.h * 0.5f, ca); }
+      if (soEncenada) {
+        float bw = botaoAt(-10000.0f, yc, 1, i18n("Reiniciar agora"), "aj_rotate-cw", 24.0f, 1.0f, ca);
+        botaoAt(xd - bw, yc, 1, i18n("Reiniciar agora"), "aj_rotate-cw", 24.0f, 1.0f, ca);
+      } else {
+        k2[0] = "OK"; r2[0] = i18n("Fechar");
+        dicas(xd, yc, k2, r2, 1, ca);
+      }
+    } else if (est == AT_FALHOU) {
+      // FALHOU: a etapa que falhou em vermelho; o caminho que resta e a pagina.
+      float yc;
+      etapas(x, y + 15.0f, 0, falhaEm, ca);
+      yc = y + 30.0f + 22.0f + 33.5f;
+      { TxtLinha l = txt_linha(TXT_G30B, i18n("Não foi possível atualizar por aqui."), AT_TX, 255);
+        TxtLinha u = txt_linha(TXT_ILHA_CORPO, paginaCurta(), AT_TX, 255);
+        txt_desenhar_alpha(l, x, y + 52.0f + (34.0f - (float)l.h) * 0.5f, ca);
+        txt_desenhar_alpha(u, x, y + 52.0f + 40.0f + (27.0f - (float)u.h) * 0.5f, ca * 0.60f); }
+      k2[0] = "\xe2\x86\x91 \xe2\x86\x93"; r2[0] = i18n("Mais notas");
+      k2[1] = "OK"; r2[1] = i18n("Fechar");
+      if (mais) dicas(xd, yc, k2, r2, 2, ca); else dicas(xd, yc, k2 + 1, r2 + 1, 1, ca);
+    } else if (est == AT_INSTALANDO) {
+      // BAIXANDO / CONFERINDO / INSTALANDO: as etapas, a barra com o numero do
+      // proprio instalador (vazia ate ele dizer algo) e a frase do passo.
+      float p = pctDaEtapa(etapa, pct), bx = x, bw = w - 22.0f - 90.0f, yb = y + 30.0f + 22.0f + 18.0f;
       float ar, ag, ab;
       ajustes_acento(&ar, &ag, &ab);
-      gfx_cor(trilho, NV_RAIO_PILL, 1.0f, 1.0f, 1.0f, 0.14f * a);
-      // Menos de meia altura de barra nao desenha: um retangulo de 2 px com
-      // canto arredondado vira um pontinho torto no canto esquerdo.
-      if (cheio.w > 12.0f) gfx_cor(cheio, NV_RAIO_PILL, ar, ag, ab, a);
+      etapas(x, y + 15.0f, etapa, -1, ca);
+      gfx_cor((GfxRect){ bx, yb - 7.0f, bw, 14.0f }, 0.5f, 1, 1, 1, 0.10f * ca);
+      if (bw * p / 100.0f > 0.5f) {
+        float fw = bw * p / 100.0f;
+        gfx_cor((GfxRect){ bx, yb - 7.0f, fw, 14.0f }, fw >= 14.0f ? 0.5f : 0.0f, ar, ag, ab, ca);
+        // O brilho perto da ponta (mockup: 84 px a 22%, comecando 14% antes).
+        if (p < 100.0f) {
+          float gx = bx + bw * (p - 14.0f > 0.0f ? p - 14.0f : 0.0f) / 100.0f, gw = 84.0f;
+          if (gx + gw > bx + bw) gw = bx + bw - gx;
+          if (gw > 1.0f) gfx_cor((GfxRect){ gx, yb - 7.0f, gw, 14.0f }, 0.5f, 1, 1, 1, 0.22f * ca);
+        }
+      }
       { char n[16];
-        TxtLinha t;
-        snprintf(n, sizeof n, "%d%%", (int)(pct + 0.5f));
-        t = txt_linha(TXT_CAPTION, n, 200, 204, 214, 255);
-        txt_desenhar_alpha(t, x + larg + 20.0f, y + 40.0f, a * 0.95f); } }
-  } else if (podeAgir()) {
-    const char *rot[2];
-    float bx = x;
-    int i;
-    rot[0] = i18n("Atualizar agora");
-    rot[1] = i18n("Depois");
+        TxtLinha l;
+        snprintf(n, sizeof n, "%d%%", (int)(p + 0.5f));
+        l = txt_linha(TXT_G30B, n, AT_TX, 255);
+        txt_desenhar_alpha(l, xd - (float)l.w, yb - (float)l.h * 0.5f, ca); }
+      { float yc = yb + 18.0f + 14.0f + 18.0f;
+        TxtLinha l = txt_linha(TXT_DET_SIN, fraseDaEtapa(etapa), AT_TX, 255);
+        txt_desenhar_alpha(l, x, yc - (float)l.h * 0.5f, ca * 0.75f);
+        k2[0] = "\xe2\x86\x91 \xe2\x86\x93"; r2[0] = i18n("Mais notas");
+        k2[1] = i18n("Voltar"); r2[1] = i18n("Continua na ilha");
+        if (mais) dicas(xd, yc, k2, r2, 2, ca); else dicas(xd, yc, k2 + 1, r2 + 1, 1, ca); }
+    } else if (podeAgir()) {
+      // DISPONIVEL: "Atualizar agora" (primario, 72) e "Depois" (64).
+      float yc = y + 36.0f, bx = x;
 #ifdef NV_ANDROID
-    if (apkPerm) {
-      TxtLinha t = txt_linha(TXT_CALLOUT, i18n("Permita instalar apps do Nuvio e tente de novo"),
-                             232, 236, 246, 255);
-      txt_desenhar_alpha(t, x, y - 58.0f, a);
-    }
+      if (apkPerm) {
+        TxtLinha l = txt_linha(TXT_DET_SIN, i18n("Permita instalar apps do Nuvio e tente de novo"), AT_TX, 255);
+        txt_desenhar_alpha(l, x, rodY - 12.0f - (float)l.h, ca * 0.80f);
+      }
 #endif
-    // A PILULA DA TABELA (botoes.h): "Atualizar agora" e o primario (72 px,
-    // cheio), "Depois" o secundario (56 px, contorno), alinhados pela base.
-    for (i = 0; i < 2; i++) {
-      int primario = (i == 0);
-      float h = primario ? BOTAO_H_PRIMARIO : BOTAO_H_SECUNDARIO;
-      GfxRect b = { bx, y + (BOTAO_H_PRIMARIO - h), botao_largura(rot[i], NULL, primario), h };
-      botao_pilula(b, rot[i], NULL, i == foco ? 1.0f : 0.0f, primario, 0, a);
-      bx += b.w + BOTAO_GAP;
-    }
-  } else {
-    TxtLinha t = txt_linha(TXT_CAPTION,
-        estado == AT_FALHOU ? i18n("Não foi possível atualizar por aqui.") : AT_PAGINA,
-        176, 180, 190, 255);
-    txt_desenhar_alpha(t, x, y + 16.0f, a * 0.9f);
-  }
-  if (estado != AT_INSTALANDO && estado != AT_PRONTO) {
-    int mais = rolarMax() > 0.5f;
-    TxtLinha t = txt_linha(TXT_CAPTION2,
-        podeAgir()
-          ? (mais ? i18n("↑ ↓  Mais notas   ·   Voltar para fechar") : i18n("Voltar para fechar"))
-          : (mais ? i18n("↑ ↓  Mais notas   ·   OK para fechar") : i18n("OK para fechar")),
-        150, 154, 165, 255);
-    txt_desenhar_alpha(t, AT_X + AT_W - AT_PAD - t.w, y + 24.0f, a * 0.85f);
+      // So assentado: forma no lugar (a mola passa de 1) e texto inteiro.
+      if (aberto && ca > 0.99f && cartaoT > 0.99f && cartaoT < 1.01f) {
+        float w0 = botaoAt(-10000.0f, yc, 1, i18n("Atualizar agora"), "aj_download", 26.0f, foco == 0 ? 1.0f : 0.0f, ca);
+        float w1 = botaoAt(-10000.0f, yc, 0, i18n("Depois"), NULL, 0.0f, foco == 1 ? 1.0f : 0.0f, ca);
+        ponteiro_alvo(bx, yc - 36.0f, w0, 72.0f, ponteiroBotao, NULL, 0, 0);
+        ponteiro_alvo(bx + w0 + 14.0f, yc - 32.0f, w1, 64.0f, ponteiroBotao, NULL, 1, 0);
+      }
+      bx += botaoAt(bx, yc, 1, i18n("Atualizar agora"), "aj_download", 26.0f, foco == 0 ? 1.0f : 0.0f, ca) + 14.0f;
+      botaoAt(bx, yc, 0, i18n("Depois"), NULL, 0.0f, foco == 1 ? 1.0f : 0.0f, ca);
+      k2[0] = "\xe2\x86\x91 \xe2\x86\x93"; r2[0] = i18n("Mais notas");
+      k2[1] = i18n("Voltar"); r2[1] = i18n("Fechar");
+      if (mais) dicas(xd, yc, k2, r2, 2, ca); else dicas(xd, yc, k2 + 1, r2 + 1, 1, ca);
+    } else {
+      // SEM INSTALADOR NESTA PLATAFORMA: o endereco da pagina e o QR dele.
+      GLuint q = qrPagina();
+      float yc = y + 81.0f, tx = x;
+      if (q) {
+        gfx_cor((GfxRect){ x, y, 162.0f, 162.0f }, 16.0f / 162.0f, 1, 1, 1, ca);
+        gfx_rect((GfxRect){ x + 6.0f, y + 6.0f, 150.0f, 150.0f }, q, GFX_SNAP, 0, 0.0f, 0.0f, 0.0f, 0, 0, 0, ca);
+        tx = x + 162.0f + 26.0f;
+      }
+      { TxtLinha l = txt_linha(TXT_DET_SIN, i18n("Baixe a versão nova no celular ou no computador:"), AT_TX, 255);
+        TxtLinha u = txt_linha(TXT_G30B, paginaCurta(), AT_TX, 255);
+        float hT = 29.0f + 6.0f + 36.0f, y0 = yc - hT * 0.5f;
+        txt_desenhar_alpha(l, tx, y0 + (29.0f - (float)l.h) * 0.5f, ca * 0.60f);
+        txt_desenhar_alpha(u, tx, y0 + 35.0f + (36.0f - (float)u.h) * 0.5f, ca); }
+      { float kx = xd - kbd(-10000.0f, 0, "\xe2\x86\x91 \xe2\x86\x93", i18n("Mais notas"), 0.0f);
+        if (mais) {
+          kbd(kx, yc - 24.0f, "\xe2\x86\x91 \xe2\x86\x93", i18n("Mais notas"), ca);
+          kbd(kx, yc + 24.0f, "OK", i18n("Fechar"), ca);
+        } else kbd(xd - kbd(-10000.0f, 0, "OK", i18n("Fechar"), 0.0f), yc, "OK", i18n("Fechar"), ca); }
+    } }
   }
   gfx_sem_recorte();
 }
+

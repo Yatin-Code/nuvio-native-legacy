@@ -7,7 +7,7 @@
 # o app web ja a publica no bundle. Quem NAO pode entrar no pacote e o que hoje
 # esta em art/trakt.txt e art/addons.txt: aquilo e credencial de PESSOA.
 #
-#   eval "cc src/*.c $(tools/env.sh) ..."
+#   eval "cc src/*.c src/dts/*.c $(tools/env.sh) ..."
 set -e
 
 REQUIRE_CORE=0
@@ -23,7 +23,12 @@ case "${1:-}" in
     ;;
 esac
 
-PROP="${NUVIO_PROPERTIES:-$(cd "$(dirname "$0")/../.." && pwd)/NuvioWeb-0.3.38-beta/local.properties}"
+LOCAL_PROP="$(cd "$(dirname "$0")/.." && pwd)/local.properties"
+if [ -f "$LOCAL_PROP" ]; then
+  PROP="${NUVIO_PROPERTIES:-$LOCAL_PROP}"
+else
+  PROP="${NUVIO_PROPERTIES:-$(cd "$(dirname "$0")/../.." && pwd)/NuvioWeb-0.3.38-beta/local.properties}"
+fi
 
 valor() {
   [ -f "$PROP" ] || return 0
@@ -38,12 +43,18 @@ TRS=$(valor TRAKT_CLIENT_SECRET)
 SMK=$(valor SIMKL_CLIENT_ID)
 SMA=$(valor SIMKL_APP_NAME)
 TMD=$(valor TMDB_API_KEY)
+# Seekr exige a chave de cada pessoa nos Ajustes; nunca embutir a do pacote.
+SKR=""
 # Servico de recomendacoes entre amigos (servidor/recomendacoes). VAZIO E UM
 # ESTADO VALIDO E E O PADRAO: sem ele o app nao mostra a aba Social, nao mostra
 # o item "Recomendar a um amigo" e nao abre conexao nenhuma. O dono publica
 # builds com isto desligado, entao "esqueci de configurar" tem de ser invisivel
 # e nao um botao que da erro.
 REC=$(valor NUVIO_REC_URL)
+# Discord Rich Presence (discord.c, #222). Vazio = a linha nos Ajustes diz
+# "indisponivel" e nada fala com o Discord. E so o client id: o app do Discord
+# e Public Client, sem segredo no binario.
+DSC=$(valor DISCORD_CLIENT_ID)
 # A versao do app sai do appinfo.json — FONTE UNICA. Ela ja vivia em tres
 # lugares (appinfo.json, tizen-config.xml e um #define em ajustes.c) e o
 # terceiro ficou parado em 1.0.44 por nove releases: a tela de Ajustes mentia
@@ -57,6 +68,18 @@ if [ -z "$VER" ]; then
 fi
 if [ "$VER" != "$VERT" ]; then
   echo "env.sh: appinfo.json diz $VER e tizen-config.xml diz $VERT -- alinhe antes de compilar" >&2; exit 2
+fi
+
+# Release unificada: conta, Trakt, Simkl e TMDB obrigatorios; demais opcionais.
+if [ "${NUVIO_REQUIRE_ALL:-0}" = 1 ]; then
+  MISSING_ALL=()
+  for k in URL KEY TVB TRK TRS SMK SMA TMD; do
+    v="${!k}"
+    [ -n "${v//[[:space:]]/}" ] || MISSING_ALL+=("$k")
+  done
+  [ "${#MISSING_ALL[@]}" = 0 ] || {
+    echo "env.sh: configuracao de release vazia: ${MISSING_ALL[*]}" >&2; exit 3;
+  }
 fi
 
 MISSING_CORE=()
@@ -91,12 +114,14 @@ if [ "$1" = "--env-file" ]; then
     printf 'NV_SIMKL_CLIENT_ID=%s\n' "$SMK"
     printf 'NV_SIMKL_APP=%s\n' "$SMA"
     printf 'NV_TMDB_API_KEY=%s\n' "$TMD"
+    printf 'NV_SEEKR_API_KEY=%s\n' "$SKR"
     printf 'NV_REC_URL=%s\n' "$REC"
+    printf 'NV_DISCORD_CLIENT_ID=%s\n' "$DSC"
     printf 'NV_VERSAO=%s\n' "$VER"
   } > "$2"
   chmod 600 "$2"
   exit 0
 fi
 
-printf -- '-DNV_SUPABASE_URL=\\"%s\\" -DNV_SUPABASE_ANON_KEY=\\"%s\\" -DNV_TV_LOGIN_BASE=\\"%s\\" -DNV_TRAKT_CLIENT_ID=\\"%s\\" -DNV_TRAKT_CLIENT_SECRET=\\"%s\\" -DNV_SIMKL_CLIENT_ID=\\"%s\\" -DNV_SIMKL_APP=\\"%s\\" -DNV_TMDB_API_KEY=\\"%s\\" -DNV_REC_URL=\\"%s\\" -DNV_VERSAO=\\"%s\\"' \
-  "$URL" "$KEY" "$TVB" "$TRK" "$TRS" "$SMK" "$SMA" "$TMD" "$REC" "$VER"
+printf -- '-DNV_SUPABASE_URL=\\"%s\\" -DNV_SUPABASE_ANON_KEY=\\"%s\\" -DNV_TV_LOGIN_BASE=\\"%s\\" -DNV_TRAKT_CLIENT_ID=\\"%s\\" -DNV_TRAKT_CLIENT_SECRET=\\"%s\\" -DNV_SIMKL_CLIENT_ID=\\"%s\\" -DNV_SIMKL_APP=\\"%s\\" -DNV_TMDB_API_KEY=\\"%s\\" -DNV_SEEKR_API_KEY=\\"%s\\" -DNV_REC_URL=\\"%s\\" -DNV_DISCORD_CLIENT_ID=\\"%s\\" -DNV_VERSAO=\\"%s\\"' \
+  "$URL" "$KEY" "$TVB" "$TRK" "$TRS" "$SMK" "$SMA" "$TMD" "$SKR" "$REC" "$DSC" "$VER"

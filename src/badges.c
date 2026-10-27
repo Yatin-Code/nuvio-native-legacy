@@ -13,7 +13,20 @@
 static const char *ids[]={"r-4k","r-1080","r-720","r-sd","q-remux","q-bluray","q-webdl","q-webrip","q-seadex","v-dv","v-hdr10plus","v-hdr10","v-hdr","v-hlg","v-imax-enhanced","v-imax","v-sdr","a-atmos-dv","a-atmos","a-truehd-dv","a-truehd","a-dtsx","a-dtshdma","a-dtshd","a-dts","a-dd-dv","a-ddp","a-dd","c-71","c-51","co-x265","co-x264","co-av1","p-netflix","p-prime","p-appletv","p-disney","p-max","p-hulu","p-peacock","p-paramount","p-crave","p-crunchyroll"};
 #define NB (sizeof ids/sizeof ids[0])
 static struct {char image[700],name[64];} art[NB];
-static uint64_t bit(const char *id){for(size_t i=0;i<NB;i++)if(!strcmp(id,ids[i]))return UINT64_C(1)<<i;return 0;}
+// BUSCA DO BIT LEMBRADA PELO ENDERECO DO TEXTO. Quem chama passa literal
+// ("r-4k", "v-dv"...), e a folha de Fontes chama isto milhares de vezes por
+// quadro (grupoRes/ehHdr/nivelHdr por fonte, 2-3 montagens por quadro):
+// MEDIDO no Mac (06/10/2026) com 201 fontes, 37% do fio principal em strcmp
+// aqui dentro. A casa guarda so o INDICE (um byte), e o acerto e conferido
+// pelo conteudo: endereco reaproveitado com outro texto, ou duas threads
+// escrevendo a mesma casa, so caem na varredura de sempre — nunca bit errado.
+#define NB_MEMO 128
+static unsigned char bitMemo[NB_MEMO];
+static uint64_t bit(const char *id){
+  unsigned c=(unsigned)(((uintptr_t)id>>2)%NB_MEMO), k=bitMemo[c];
+  if(k<NB&&!strcmp(id,ids[k]))return UINT64_C(1)<<k;
+  for(size_t i=0;i<NB;i++)if(!strcmp(id,ids[i])){bitMemo[c]=(unsigned char)i;return UINT64_C(1)<<i;}
+  return 0;}
 static int token(const char *s,const char *t){size_t n=strlen(t);for(const char *p=s;(p=strstr(p,t));p++)if((p==s||!isalnum((unsigned char)p[-1]))&&!isalnum((unsigned char)p[n]))return 1;return 0;}
 uint64_t badges_detectar(const char *metadata) {
   char s[4096];size_t n=0;for(;metadata&&metadata[n]&&n<sizeof s-1;n++)s[n]=(char)tolower((unsigned char)metadata[n]);s[n]=0;
@@ -58,6 +71,7 @@ uint64_t badges_detectar(const char *metadata) {
 }
 // Provedores comecam em p-netflix; a conta sai do nome e nao de um 31 cravado,
 // que quebrou em silencio quando entrou o v-hlg no meio da tabela.
+uint64_t badges_bit(const char *id){return bit(id);}
 uint64_t badges_provedor(const char *name){
   static uint64_t dePartida;
   if(!dePartida){uint64_t b=bit("p-netflix");dePartida=~UINT64_C(0)<<__builtin_ctzll(b);}
@@ -199,6 +213,24 @@ float badges_desenhar(uint64_t mask,float x,float y,float maxW,float h,float a) 
 float badges_desenhar_escura(uint64_t mask,float x,float y,float maxW,float h,float a) {
   return fileira(mask,x,y,maxW,h,a,1);
 }
+// A FILEIRA DA FOLHA DE FONTES: os mesmos logos, TINGIDOS por GFX_MARCA (a
+// arte e branca e a forma mora no alfa, ver acima) e com folga menor. A folha
+// os usa como a linha de especificacao, abaixo do titulo, entao eles entram
+// num cinza da hierarquia do texto e nao no branco cheio de selo de cartaz.
+// Selo sem arte cai no nome, na mesma tinta.
+float badges_desenhar_tom(uint64_t mask,float x,float y,float maxW,float h,float r,float g,float b,float a) {
+  float start=x;int c=(int)(r*255.0f+.5f);
+  for(size_t i=0;i<NB;i++)if(mask&(UINT64_C(1)<<i)) {
+    GLuint t=art[i].image[0]?tex_obter_larg(art[i].image,128):0;
+    float aspect=art[i].image[0]?tex_aspecto(art[i].image):0,w;
+    if(t&&aspect>0){w=h*aspect;if(w>160)w=160;if(x+w>start+maxW)break;
+      float height=w/aspect;gfx_rect((GfxRect){x,y+(h-height)*.5f,w,height},t,GFX_MARCA,0,0,0,0,r,g,b,a);}
+    else{TxtLinha l=txt_linha(TXT_PG_FIM,art[i].name[0]?art[i].name:ids[i],c,c,c,255);w=(float)l.w;if(x+w>start+maxW)break;
+      txt_desenhar_alpha(l,x,y+(h-l.h)*.5f,a);}
+    x+=w+18;
+  }
+  return x>start?x-start-18:0;
+}
 
 // --- SELOS COLORIDOS (#198, 01/10/2026) --------------------------------------
 //
@@ -294,7 +326,8 @@ float badges_desenhar_selos(uint64_t mask, float x, float y, float maxW, float h
       }
     }
     p = (GfxRect){ x, y - sobra, w + padX * 2.0f, ch };
-    gfx_cor(p, raio, 0.10f, 0.11f, 0.13f, 0.88f * a);
+    if (ajustes_vidro()) gfx_vidro_chip(p, raio, 0.88f, a);
+    else gfx_cor(p, raio, 0.10f, 0.11f, 0.13f, 0.88f * a);
     gfx_cor(p, raio, r, g, b, 0.16f * a);
     gfx_anel(p, raio, 1.5f, br, bg, bb, 0.60f * a);
     if (temArte) {
@@ -392,12 +425,17 @@ static void notaTexto(char *dst, size_t n, int nota) {
   // ingles a virgula le como milhar interrompido (ver recomenda.c).
   snprintf(dst, n, idioma_ponto_decimal(ajustes_idioma()) ? "%d.%d" : "%d,%d", nota / 10, nota % 10);
 }
+static float imdbMarcaLargura(void) {
+  TxtLinha l = txt_linha(TXT_MINI, "IMDb", 10, 10, 10, 255);
+  float w = (float)l.w + 16.0f;
+  return w > BADGE_IMDB_W ? w : BADGE_IMDB_W;
+}
 float badge_imdb_largura(int nota) {
   char t[8]; TxtLinha l;
   if (nota <= 0) return 0.0f;
   notaTexto(t, sizeof t, nota);
   l = txt_linha(TXT_CAPTION2, t, 0, 0, 0, 255);
-  return BADGE_IMDB_W + BADGE_IMDB_GAP + (float)l.w;
+  return imdbMarcaLargura() + BADGE_IMDB_GAP + (float)l.w;
 }
 float badge_imdb(float x, float y, int nota, int escuro, float a) {
   char t[8]; TxtLinha l, lm; GfxRect m;
@@ -405,12 +443,103 @@ float badge_imdb(float x, float y, int nota, int escuro, float a) {
   if (nota <= 0) return 0.0f;
   notaTexto(t, sizeof t, nota);
   l = txt_linha(TXT_CAPTION2, t, c, c, c, 255);
-  m.x = x; m.y = y; m.w = BADGE_IMDB_W; m.h = BADGE_H;
+  m.x = x; m.y = y; m.w = imdbMarcaLargura(); m.h = BADGE_H;
   // #F5C518 e o amarelo da marca; o texto e preto porque e assim que ela
   // existe — nao segue o realce nem a tinta da linha.
   gfx_cor(m, BADGE_IMDB_R / BADGE_H, 0.961f, 0.773f, 0.094f, a);
   lm = txt_linha(TXT_MINI, "IMDb", 10, 10, 10, 255);
   txt_desenhar_alpha(lm, m.x + (m.w - (float)lm.w) * 0.5f, m.y + (m.h - (float)lm.h) * 0.5f, a);
-  txt_desenhar_alpha(l, x + BADGE_IMDB_W + BADGE_IMDB_GAP, y + (BADGE_H - (float)l.h) * 0.5f, a);
-  return BADGE_IMDB_W + BADGE_IMDB_GAP + (float)l.w;
+  txt_desenhar_alpha(l, x + m.w + BADGE_IMDB_GAP, y + (BADGE_H - (float)l.h) * 0.5f, a);
+  return m.w + BADGE_IMDB_GAP + (float)l.w;
+}
+
+// CHECK DE ASSISTIDO (U4, 205): UM desenhador para todos os estilos de cartao.
+// Disco no acento com o check da tinta de contraste e sombra rasa. `d` e o
+// diametro; (cx,cy) o centro. Os estilos so mudam ONDE ele cai.
+void badges_check_disco(float cx, float cy, float d, float a) {
+  float ar, ag, ab, tinta, ic = d * 0.60f;
+  tinta = ajustes_acento_tinta(&ar, &ag, &ab);
+  gfx_rect((GfxRect){ cx - d * 0.5f - 1, cy - d * 0.5f + 2, d + 2, d + 2 }, 0, GFX_DISCO, 0, 0, 0, 0,
+           0, 0, 0, 0.30f * a);
+  gfx_rect((GfxRect){ cx - d * 0.5f - 2, cy - d * 0.5f - 2, d + 4, d + 4 }, 0, GFX_DISCO, 0, 0, 0, 0,
+           0.05f, 0.055f, 0.067f, 0.85f * a);
+  gfx_rect((GfxRect){ cx - d * 0.5f, cy - d * 0.5f, d, d }, 0, GFX_DISCO, 0, 0, 0, 0, ar, ag, ab, a);
+  gfx_icone((GfxRect){ cx - ic * 0.5f, cy - ic * 0.5f, ic, ic }, "check", tinta, tinta, tinta, a);
+}
+
+// Diametro relativo ao cartao (26..40).
+static float checkDiametro(float w) {
+  float d = w * 0.13f;
+  return d < 26.0f ? 26.0f : d > 40.0f ? 40.0f : d;
+}
+
+// SELO ESCRITO (opcao "Escrito"): a pilula de antes do check unico (a8c59a84),
+// intacta: escura translucida, check no acento e a palavra "Assistido". Altura
+// e recuo acompanham a largura do cartao (26..32); abaixo de 150 so o check.
+// (mx,my) e o canto superior esquerdo; devolve a borda esquerda.
+static float seloEscritoEm(float mx, float my, float w, float a, int ancora_dir, float *largura) {
+  float h = w * 0.13f, ic, pw, ar, ag, ab;
+  int compacto = w < 150.0f;
+  TxtLinha t = { 0 };
+  if (h < 26.0f) h = 26.0f;
+  if (h > 32.0f) h = 32.0f;
+  ic = h * 0.58f;
+  if (!compacto) t = txt_linha(TXT_CAPTION, i18n("Assistido"), 240, 240, 245, 255);
+  pw = compacto ? h : h * 0.36f + ic + 6.0f + (float)t.w + h * 0.46f;
+  if (largura) *largura = pw;
+  if (ancora_dir) mx -= pw;
+  ajustes_acento(&ar, &ag, &ab);
+  gfx_cor((GfxRect){ mx, my + 3.0f, pw, h }, 0.5f, 0, 0, 0, 0.28f * a);
+  gfx_vidro_ou_solido((GfxRect){ mx, my, pw, h }, 0.5f, GFX_VIDRO_DENS, a, 0.05f, 0.055f, 0.067f, 0.80f);
+  { float ix = compacto ? mx + (h - ic) * 0.5f : mx + h * 0.36f;
+    gfx_icone((GfxRect){ ix, my + (h - ic) * 0.5f, ic, ic }, "check", ar, ag, ab, a);
+    if (!compacto) txt_desenhar_alpha(t, ix + ic + 6.0f, my + (h - t.h) * 0.5f, a); }
+  return mx;
+}
+
+// Check no cartao `card` (retangulo do cartaz/disco). redondo: a 45 graus no
+// canto inferior direito da circunferencia; senao: canto superior direito, no
+// raio seguro. Devolve a borda esquerda do selo.
+float badges_check_cartao(GfxRect card, int redondo, float a) {
+  float d = checkDiametro(card.w), m = card.w * 0.06f;
+  float cx, cy;
+  if (m < 8.0f) m = 8.0f;
+  if (m > 14.0f) m = 14.0f;
+  if (ajustes_selo_visto_modo() == 2) {
+    if (redondo) {   // pilula ancorada a direita no mesmo ponto a 45 graus
+      float r = card.w * 0.5f, pw;
+      cy = card.y + r + r * 0.7071f - d * 0.1f;
+      return seloEscritoEm(card.x + r + r * 0.7071f + d * 0.4f, cy - d * 0.5f, card.w, a, 1, &pw);
+    }
+    return seloEscritoEm(card.x + card.w - m, card.y + m, card.w, a, 1, NULL);
+  }
+  if (redondo) {
+    float r = card.w * 0.5f;
+    cx = card.x + r + r * 0.7071f - d * 0.1f;
+    cy = card.y + r + r * 0.7071f - d * 0.1f;
+  } else {
+    cx = card.x + card.w - m - d * 0.5f;
+    cy = card.y + m + d * 0.5f;
+  }
+  badges_check_disco(cx, cy, d, a);
+  return cx - d * 0.5f;
+}
+
+// Barra fina de "Parou em": rente a base do cartao, trilha escura + acento.
+void badges_progresso(GfxRect card, float frac, float a) {
+  float ar, ag, ab, h = 5.0f, m = card.w * 0.06f, w;
+  if (frac <= 0.0f) return;
+  if (frac > 1.0f) frac = 1.0f;
+  if (m < 8.0f) m = 8.0f;
+  if (m > 14.0f) m = 14.0f;
+  w = card.w - m * 2;
+  ajustes_acento(&ar, &ag, &ab);
+  gfx_cor((GfxRect){ card.x + m, card.y + card.h - m - h, w, h }, 0.5f, 0, 0, 0, 0.55f * a);
+  gfx_cor((GfxRect){ card.x + m, card.y + card.h - m - h, w * frac < h ? h : w * frac, h }, 0.5f, ar, ag, ab, a);
+}
+
+// SELO DE ASSISTIDO do cartaz (Home e Biblioteca): o mesmo check. Devolve a
+// borda esquerda dele (o chip de amigos desvia).
+float badges_selo_visto(float px, float py, float w, float a) {
+  return badges_check_cartao((GfxRect){ px, py, w, w * 1.5f }, 0, a);
 }

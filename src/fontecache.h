@@ -1,4 +1,4 @@
-// Cache de fontes POR CANAL, e o prefetch dos vizinhos no guia.
+// Cache de fontes por canal e de respostas recentes de filmes/episodios.
 //
 // O QUE ELE ENCURTA, e o que nao conserta. Abrir um canal pergunta as fontes a
 // todos os addons e so entao toca; zapear e repetir essa espera a cada canal.
@@ -16,8 +16,8 @@
 // daquilo — e o resultado fica aqui, chaveado por id, ate alguem pedir.
 //
 // REGRAS, todas visiveis daqui:
-//   - So canal ao vivo (tipo "tv"/"channel"). Filme e serie ja tem renovacao
-//     de link propria em app.c (NV_LINK_VALIDO_MS) e nao zapeiam.
+//   - O guia antecipa canais; posplay antecipa a lista do proximo episodio.
+//     Ambos so consultam metadados: nao preabrem video nem resolvem debrid.
 //   - Validade CURTA (FONTECACHE_VALIDADE_MS): o link de canal e assinado e
 //     expira; ver stream_idade_ms em streams.h.
 //   - ACERTO CONSOME a entrada. A lista guardada e um "proximo passo pronto",
@@ -25,11 +25,13 @@
 //     falhar vai a rede, como antes.
 //   - Lista VAZIA nao entra. Zero fontes e indistinguivel de rede fora, e o
 //     pedido real tem de ir ver por si.
-//   - O prefetch so ARRANCA com a busca principal ociosa e o player parado, e
-//     CEDE (fontecache_ceder) assim que um pedido real vai a rede.
+//   - O prefetch so ARRANCA com a busca principal ociosa; o guia evita o
+//     player carregando, posplay antecipa enquanto toca. Ambos CEDEM
+//     (fontecache_ceder) assim que um pedido real vai a rede.
 #ifndef NV_FONTECACHE_H
 #define NV_FONTECACHE_H
 #include "streams.h"
+#include <stdint.h>
 
 // --- a chamada do guia --------------------------------------------------------
 //
@@ -65,6 +67,8 @@ void fontecache_engatilhar(const char *idAntes, const char *baseAntes,
 // addon respondeu com fonte) nos demais casos.
 int  addons_consultar(const char *id, const char *tipo, const char *base, int fios,
                       int (*cancelado)(void *), void *ctx, Stream **saida);
+int addons_consultar_sessao(const char *id, const char *tipo, const char *base, int fios,
+                      int (*cancelado)(void *), void *ctx, Stream **saida, uint64_t sessao);
 
 enum { FC_NADA = 0, FC_ACERTO, FC_EM_CURSO };
 
@@ -87,7 +91,7 @@ void fontecache_guardar(const char *id, const char *tipo, const Stream *lista, i
 // pedir aos addons que faltam e descarta o que juntou: uma lista pela metade
 // nao pode ficar guardada como se fosse inteira. O download que ja esta no ar
 // termina sozinho (libcurl nao interrompe), por isso o custo do cancelamento e
-// no maximo UMA resposta a mais chegando.
+// no maximo FONTECACHE_FIOS respostas de addons a mais chegando.
 void fontecache_ceder(void);
 
 // A busca principal esta OCIOSA neste quadro: se ha prefetch pendente e as
@@ -100,18 +104,53 @@ void fontecache_avancar(void);
 
 // Cancela e espera o fio de prefetch, e esvazia o cache. addons_encerrar chama.
 void fontecache_encerrar(void);
+// Invalida listas e pedidos antigos sem esperar a rede em curso.
+void fontecache_abrir_sessao(void);
+void fontecache_guardar_sessao(const char *id, const char *tipo, const Stream *lista, int n, uint64_t sessao);
 
 // Quantas entradas VALIDAS ha agora. Diagnostico e teste.
 int  fontecache_n(void);
 
+// Respostas VOD, separadas do prefetch de canais. A chave inclui conta/perfil,
+// versao dos addons e origem, alem de id/tipo (o id inclui T/E em series).
+// `geracao` e capturada antes da rede; limpar invalida tambem respostas tardias.
+typedef struct {
+  char conta[80];
+  int perfil;
+  unsigned addons, geracao;
+  uint64_t sessao;
+} FontecacheEscopo;
+// UI: mesmo escopo que addons_buscar; proximo usa origem vazia (todos).
+void addons_capturar_escopo(FontecacheEscopo *escopo);
+int fontecache_precarregar_proximo(const char *id, const FontecacheEscopo *escopo);
+void fontecache_cancelar_proximo(void);
+unsigned fontecache_vod_geracao(void);
+void fontecache_vod_limpar(void);
+// Copia a resposta completa, sem truncar. `quando` e o fim da consulta original,
+// nao o momento da publicacao na UI. Vazio/erro/lista grande ficam fora.
+void fontecache_vod_guardar(const char *id, const char *tipo, const char *origem,
+                            const FontecacheEscopo *escopo,
+                            const Stream *lista, int n, Uint32 quando);
+// Devolve uma copia e a idade original. A entrada continua disponivel ate o
+// prazo original, sem prolongar a validade a cada acerto. Nenhuma rede aqui.
+int fontecache_vod_pegar(const char *id, const char *tipo, const char *origem,
+                        const FontecacheEscopo *escopo,
+                        Stream **lista, int *n, Uint32 *idade);
+// Recarregar/iniciar retry descarta a resposta anterior deste alvo.
+void fontecache_vod_apagar(const char *id, const char *tipo, const char *origem,
+                          const FontecacheEscopo *escopo);
+#define FONTECACHE_VOD_MAX 2
+#define FONTECACHE_VOD_BYTES (512u * 1024u)
+#define FONTECACHE_VOD_VALIDADE_MS 30000
+
 // --- dimensoes, expostas porque o teste as exercita ------------------------------
 //
-// TETO DE ENTRADAS E DE FONTES, com a conta. sizeof(Stream) e 7680 bytes
-// (url[4096] + descricao[2048] + arquivo[512] + cabecalhos[512] + o resto;
+// TETO DE ENTRADAS E DE FONTES, com a conta. sizeof(Stream) e 8320 bytes
+// (url[4096] + descricao[2048] + fontes[640] + cabecalhos[512] + o resto;
 // medido com o compilador do Mac, e o alinhamento no ARM/Wasm nao muda a
 // ordem de grandeza). O pior caso do cache inteiro e
-//   FONTECACHE_MAX * FONTECACHE_FONTES_MAX * 7680 = 4 * 16 * 7680 = 491.520 B,
-// 480 KiB, ou 0,18% dos 256 MiB fixos do heap no Tizen. A memoria so e pedida
+//   FONTECACHE_MAX * FONTECACHE_FONTES_MAX * 8320 = 4 * 16 * 8320 = 532.480 B,
+// 520 KiB, ou 0,20% dos 256 MiB fixos do heap no Tizen. A memoria so e pedida
 // quando a entrada e usada (malloc por entrada), entao o caso comum e menor.
 //
 // Quatro entradas: o canal no ar (guardado pela busca real, para o zap de
@@ -123,6 +162,11 @@ int  fontecache_n(void);
 // nunca entregar uma lista diferente da que a rede entregaria.
 #define FONTECACHE_MAX        4
 #define FONTECACHE_FONTES_MAX 16
+
+// VOD tem teto em bytes: duas listas de no maximo 512 KiB cada (1 MiB),
+// independentes dos 520 KiB de canais. Hoje cabem 63 fontes por lista; se
+// Stream crescer, o limite de bytes continua valendo. Listas maiores seguem
+// funcionando pela busca normal e nao entram no cache. So memoria, sem disco.
 
 // VALIDADE. Metade de NV_LINK_VALIDO_MS (60 s, app.c): stream_definir_lista
 // recomeca stream_idade_ms do zero quando o cache e servido, entao o app nao
@@ -136,7 +180,7 @@ int  fontecache_n(void);
 // fica em torno de 100 ms; 350 ms so acontece quando a pessoa parou num canal.
 #define FONTECACHE_ESPERA_MS 350
 
-// Fios de rede do prefetch: dois, e nao os ADD_FIOS (4) da busca real. O
+// Fios de rede do prefetch: dois, e nao os ADD_FIOS (12) da busca real. O
 // prefetch divide o mesmo enlace com o pedido real que pode chegar a qualquer
 // momento; metade dos fios e metade da concorrencia que ele impoe.
 #define FONTECACHE_FIOS 2

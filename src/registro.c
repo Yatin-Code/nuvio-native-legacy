@@ -1,106 +1,114 @@
+#include "app_id.h"
 #include "registro.h"
 #include "dados.h"
 #include "gfx.h"
 #include "text.h"
 #include "idioma.h"
+#include "idiomacod.h"
 #include "layout.h"
+#include "teclavoltar.h"
+#include "ajustes.h"
+#include "avisos.h"
+#include "redesaude.h"
+#include "tex_cache.h"
+#define NV_ESCALA_TELA   // o arquivo inteiro mede pela tela virtual (escala.h)
+#include "escala.h"
+#include "ponteiro.h"
+#include "rolagemtoque.h"
+#include "telefonecartao.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <math.h>
+#include <sys/stat.h>
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#endif
+
+#ifndef NV_VERSAO
+#define NV_VERSAO "dev"
 #endif
 
 // TECLA VERMELHA NO webOS: 486, CONFERIDO no header do SDK que compila o alvo
 // ARM (SDL_webOS.h: SDL_WEBOS_SCANCODE_RED 486, na mesma tabela de onde
 // layout.h tirou BACK=482 e BLUE=489). Nao esta em layout.h porque este arquivo
-// nao e dono dela; se um dia o azul e o vermelho ficarem lado a lado, o lugar
-// certo dos dois e la.
+// nao e dono dela.
 //
 // O que NAO foi conferido: se a tecla chega ao app no aparelho. O BACK precisou
-// de um hint proprio na criacao da janela (SDL_WEBOS_ACCESS_POLICY_KEYS_BACK)
-// para nao ser engolido pelo compositor; para as coloridas nao existe hint
-// equivalente em SDL_webOS.h, e o atalho do perfil em app.c ja aposta que o
-// AZUL chega. Se o vermelho nao abrir o painel na TV da LG, a causa mais
-// provavel e essa e nao o numero.
+// de um hint proprio na criacao da janela (SDL_WEBOS_ACCESS_POLICY_KEYS_BACK);
+// para as coloridas nao existe hint equivalente. Se o vermelho nao abrir o
+// painel na TV da LG, a causa mais provavel e essa e nao o numero — e por isso
+// existe Ajustes > Sobre e ajuda > "Ver o registro na tela" (registro_abrir).
 #define REG_SCANCODE_VERMELHA 486
 
 // A MESMA tecla precisa existir sem controle de TV: no Mac nao ha vermelha, e
-// no Tizen a vermelha e traduzida pelo shell (keyCode 403 -> F9) porque o
-// keyCode das coloridas da Samsung nao existe na tabela do SDL. F9 e nao uma
+// no Tizen a vermelha e traduzida pelo shell (keyCode 403 -> F9). F9 e nao uma
 // letra: o painel e roteado ANTES de todas as telas, e uma letra abriria o
 // painel no meio de quem estivesse digitando na busca.
 #define REG_TECLA_TECLADO SDLK_F9
 
 // Quantos bytes do FIM do arquivo sao lidos, e quantas linhas ficam guardadas.
-// Ler o arquivo inteiro ficaria pior a cada minuto de app aberto, e o que
-// interessa e sempre o fim. 40 KB cobrem as 200 linhas do anel mesmo quando
-// todas sao longas.
+// O que interessa e sempre o fim. As linhas que nao cabem nas 200 ainda entram
+// nas CONTAGENS das areas ("Tudo 214"): o painel mostra 200 das ultimas N.
 //
-// REG_COL e 320 e nao a largura que CABE na tela (~165 caracteres a 21px):
-// guardar a linha inteira e o que permite ao ehFalha achar o "<<< SEM
-// PERSISTENCIA" que vive no FIM da linha de FPS, que e a mais comprida do app.
-// A linha e cortada na EXIBICAO (txt_linha_corta), nao no armazenamento — e
-// assim a marca vermelha aparece mesmo quando o texto que a causou nao cabe.
+// REG_COL e 512 e nao a largura que CABE na tela: guardar a linha inteira e o
+// que permite ao ehFalha achar o "<<< SEM PERSISTENCIA" que vive no FIM da
+// linha de FPS, e ao detalhe mostrar a linha toda.
 #define REG_JANELA 40960
 #define REG_MAX    200
-#define REG_COL    320
+#define REG_COL    512
 
-// Geometria. Margem folgada de proposito: em TV com overscan uma faixa das
-// bordas nao aparece, e um painel para FOTOGRAFAR nao pode ter a primeira
-// coluna cortada.
-#define REG_X    56.0f
-#define REG_Y    44.0f
-#define REG_W    (NV_TELA_W - REG_X * 2.0f)
-#define REG_H    (NV_TELA_H - REG_Y * 2.0f)
-#define REG_PAD  26.0f
-#define REG_LINHA_H 26.0f
-// 32 e nao 34, e a diferenca foi VISTA na tela da C9.
-//
-// 34 e o numero que o painel DOM do Tizen guarda e cabia na conta da altura —
-// mas a conta esquecia o rodape de ajuda, que e desenhado ancorado na BASE do
-// cartao. Com 34 a ultima linha de log terminava 4 px antes dele: nao chega a
-// sobrepor, e na foto da TV os dois se leem como um borrao unico, que e
-// justamente o que um painel para fotografar nao pode fazer. 32 devolve 52 px
-// de folga e custa duas linhas.
-//
-// 21px de corpo com 26 de entrelinha continua sendo o menor que ainda da para
-// ler numa foto da TV — isso a medida original acertou.
-#define REG_VISIVEIS 32
+// AO VIVO (dono, 03/10): com o painel aberto o arquivo e relido a cada
+// segundo — so quando o tamanho mudou. Rolar para cima PAUSA (a lista para de
+// andar debaixo do foco) e conta as linhas novas; descer ate o fim volta a
+// seguir.
+#define REG_RELER_MS 1000u
 
 static int aberto;
 static int aviso;
+static int legal; // 1: aviso curto; 2: leitura em Ajustes
+static int legalVisto;
 static int avisoDecidido;
 // A soltura do MESMO toque que abriu/fechou algo aqui. ARMADILHA JA PAGA NESTE
-// REPO: a barra lateral (menu.c) decide no KEYDOWN e se fecha ali mesmo; o
-// KEYUP do mesmo toque chega quando ela ja fechou e vaza para a home, que abria
-// um filme (issue #8). Toda vez que este modulo age num KEYDOWN ele guarda a
-// tecla e engole o KEYUP correspondente.
-//
-// SYM E SCANCODE, os dois. As coloridas do webOS chegam por SCANCODE e o sym
-// delas provavelmente e SDLK_UNKNOWN (0) — guardar so o sym deixaria justamente
-// o toque da tecla vermelha vazando, que e o unico toque que este modulo trata
-// em todas as telas.
+// REPO: o KEYUP de um toque que fechou uma camada vaza para a tela de tras
+// (issue #8). Toda vez que este modulo age num KEYDOWN ele guarda a tecla e
+// engole o KEYUP. SYM E SCANCODE: as coloridas do webOS chegam por SCANCODE.
 static SDL_Keycode soltarSym;
 static int soltarScan = -1;
-
 static void engolirSoltura(const SDL_Event *e) {
   soltarSym  = e->key.keysym.sym;
   soltarScan = e->key.keysym.scancode;
 }
 
-static char anel[REG_MAX][REG_COL];
-static int  nLin, ini;
-static int  desloc;          // primeira linha visivel
-static int  semFonte;        // 1 = nao existe de onde ler nesta compilacao
+// --- AS LINHAS ---------------------------------------------------------------
+// Areas: a etiqueta entre colchetes do printf ([rede], [video]...) agrupada em
+// cinco. Toda linha cai em exatamente uma (o que nao se reconhece vai para
+// Sistema), entao as contagens das cinco somam o "Tudo".
+enum { RG_TUDO = 0, RG_PROB, RG_VIDEO, RG_REDE, RG_FONTES, RG_IMAGENS, RG_SISTEMA, RG_N };
+typedef struct {
+  char t[REG_COL];          // a linha inteira, com as URLs cortadas no host
+  short msg;                // onde o texto comeca, depois de "[area] "
+  char area[24];            // "video", "quadros" (a linha FPS=), "" sem etiqueta
+  unsigned char sev;        // 0 normal, 1 aviso, 2 erro
+  unsigned char grupo;      // RG_VIDEO..RG_SISTEMA
+  unsigned char fps;        // linha FPS= de main.c
+} RegLinha;
+static RegLinha lin[REG_MAX];
+static int nLin;            // linhas guardadas (as ultimas REG_MAX)
+static int nLidas;          // linhas na janela lida (>= nLin)
+static int cont[RG_N];      // por area, sobre a janela lida
+static int nErros, nAvisos;
+static int semFonte;        // 1 = nao existe de onde ler nesta compilacao
+static long marcaLida;      // tamanho do arquivo (ou n de linhas no wasm) na ultima leitura
+static Uint32 ultLeitura;
 
 static char cru[REG_JANELA + 1];
 
 const char *registro_arquivo(void) {
 #ifdef __EMSCRIPTEN__
   // Nao ha arquivo util no navegador: o "sistema de arquivos" e MEMFS, morre a
-  // cada recarga, e o log ja esta no console. Devolver NULL faz main.c pular o
-  // freopen, que e exatamente o que ele ja fazia por NV_SEM_WEBOS.
+  // cada recarga, e o log ja esta no console. NULL faz main.c pular o freopen.
   return NULL;
 #else
   static char caminho[256];
@@ -109,30 +117,29 @@ const char *registro_arquivo(void) {
     const char *env = getenv("NUVIO_LOG");
     resolvido = 1;
     if (env && env[0]) snprintf(caminho, sizeof caminho, "%s", env);
-#ifdef __APPLE__
-    // No Mac o log vai para o TERMINAL e continua assim: redirecionar por
-    // padrao deixaria a previa muda para quem esta rodando tools/mac.sh, que e
-    // o jeito normal de trabalhar aqui. Para exercitar o painel na previa:
-    //     NUVIO_LOG=/tmp/nuvio.log bash tools/mac.sh
+#if defined(__APPLE__) || defined(NV_LINUX_DESKTOP)
+    // No Mac o log vai para o TERMINAL e continua assim. Para exercitar o
+    // painel na previa:  NUVIO_LOG=/tmp/nuvio.log bash tools/mac.sh
     else caminho[0] = 0;
 #elif defined(NV_ANDROID)
-    // Sem /tmp: o NuvioActivity ja exporta NUVIO_LOG; isto e so rede de seguranca.
     else snprintf(caminho, sizeof caminho, "%s/nuvio.log",
                   getenv("NUVIO_DADOS") ? getenv("NUVIO_DADOS") : ".");
 #else
+#ifdef NV_DTS_DEBUG
+    else snprintf(caminho, sizeof caminho, "/tmp/" NV_APP_ID ".log");
+#else
     else snprintf(caminho, sizeof caminho, "/tmp/nuvio.log");
+#endif
 #endif
   }
   return caminho[0] ? caminho : NULL;
 #endif
 }
 
-// Corta a URL no HOST. Ver a nota de privacidade no topo de registro.h: a chave
-// do debrid viaja no CAMINHO da URL, e este painel aparece na TV da sala.
-//
-// So mascara quando o caminho tem 4 bytes ou mais, que e o tamanho de "/…" em
-// UTF-8: assim a substituicao nunca cresce a linha e o memmove anda sempre para
-// a esquerda. Caminho de 1 a 3 bytes nao guarda credencial nenhuma.
+// Corta a URL no HOST. Ver a nota de privacidade em registro.h: a chave do
+// debrid viaja no CAMINHO da URL, e este painel aparece na TV da sala. So
+// mascara quando o caminho tem 4 bytes ou mais (o tamanho de "/…" em UTF-8):
+// a substituicao nunca cresce a linha.
 static void mascarar(char *s) {
   char *p = s;
   while ((p = strstr(p, "://")) != NULL) {
@@ -148,10 +155,8 @@ static void mascarar(char *s) {
   }
 }
 
-// Corta lixo de UTF-8 no FIM. snprintf trunca por BYTE, e uma linha de log
-// carrega titulo com acento ("[app] assistido marcado: Coração..."): cortada no
-// meio de um caractere, a sequencia invalida chega ao SDL_ttf, que devolve linha
-// VAZIA — perde-se a linha inteira para economizar um caractere.
+// Corta lixo de UTF-8 no FIM: snprintf trunca por BYTE, e uma sequencia
+// invalida faz o SDL_ttf devolver linha VAZIA.
 static void aparaUtf8(char *s) {
   size_t n = strlen(s), i;
   unsigned char c;
@@ -161,63 +166,134 @@ static void aparaUtf8(char *s) {
   while (i > 0 && ((unsigned char)s[i - 1] & 0xC0) == 0x80 && n - i < 3) i--;
   if (i == 0) return;
   c = (unsigned char)s[i - 1];
-  quer = c < 0x80 ? 1
-       : (c & 0xE0) == 0xC0 ? 2
-       : (c & 0xF0) == 0xE0 ? 3
-       : (c & 0xF8) == 0xF0 ? 4 : 1;
+  quer = c < 0x80 ? 1 : (c & 0xE0) == 0xC0 ? 2 : (c & 0xF0) == 0xE0 ? 3 : (c & 0xF8) == 0xF0 ? 4 : 1;
   if ((int)(n - i + 1) < quer) s[i - 1] = 0;
 }
 
-static void empurrar(const char *s) {
-  int i = (ini + nLin) % REG_MAX;
-  if (nLin == REG_MAX) { i = ini; ini = (ini + 1) % REG_MAX; }
-  else nLin++;
-  snprintf(anel[i], REG_COL, "%s", s);
-  aparaUtf8(anel[i]);
-  mascarar(anel[i]);
+// ERRO: o que o painel ja pintava de vermelho, sem mudar (heuristica, nao
+// classificacao: o C nao sabe qual printf era erro; "Homem de Ferro" sai
+// vermelho. Falso positivo custa uma linha colorida; falso negativo, o
+// defeito passar batido numa foto da tela).
+static int ehFalha(const char *s) {
+  return strstr(s, "<<<") || strstr(s, "FALH") || strstr(s, "falh") ||
+         strstr(s, "erro") || strstr(s, "Erro") || strstr(s, "ERRO");
+}
+// "HTTP 4xx" ou "HTTP 5xx" em qualquer ponto da linha; devolve o codigo.
+static int httpErro(const char *s) {
+  const char *p = s;
+  while ((p = strstr(p, "HTTP ")) != NULL) {
+    p += 5;
+    if ((p[0] == '4' || p[0] == '5') && p[1] >= '0' && p[1] <= '9' && p[2] >= '0' && p[2] <= '9' &&
+        !(p[3] >= '0' && p[3] <= '9')) return (p[0] - '0') * 100 + (p[1] - '0') * 10 + (p[2] - '0');
+  }
+  return 0;
+}
+// AVISO (ambar, decisao do dono de 03/10): o servidor ou a conexao reclamou,
+// mas o app seguiu. A lista e curta de proposito: cada palavra e uma que os
+// printf do app usam para isso.
+static int ehAviso(const char *s) {
+  return strstr(s, "sem resposta") || strstr(s, "caiu") || strstr(s, "corte") ||
+         strstr(s, "nao se despediu") ||
+         strstr(s, "recusou") || httpErro(s);
 }
 
-static const char *linhaDe(int k) { return anel[(ini + k) % REG_MAX]; }
+static const char *const AREA_VIDEO[] = {
+  "video", "player", "mkv", "mkvass", "legenda", "legendas", "ass", "serieaud",
+  "posplay", "pg", "seekr", "trailer", "4k", "vazao", "proxy-ts", "livetv",
+  "livetv-diag", "xtream", "xtepg", "stalker", "epg", "guia", "faixas", NULL };
+static const char *const AREA_REDE[] = {
+  "rede", "addons", "sync", "avisos", "trakt", "simkl", "recomenda", "nuvem",
+  "atualizacao", "noticia", "noticias", "tmdb", "sessao", "login", "celular",
+  "telemetria", "diagnostico", NULL };
+static const char *const AREA_FONTES[] = {
+  "fonte", "voltafonte", "fontecache", "fontes", "debrid", "desc", "p2p",
+  "streams", "extras", NULL };
+static const char *const AREA_IMAGENS[] = {
+  "tex", "tex-trace", "tex-nitidez", "arte", "poster", "webp", "jpeg", "gif",
+  "hero", "cor", "desfoque", "logo", NULL };
+static int naLista(const char *const *l, const char *a) {
+  for (; *l; l++) if (!strcmp(*l, a)) return 1;
+  return 0;
+}
+static int grupoDe(const char *a) {
+  if (naLista(AREA_VIDEO, a)) return RG_VIDEO;
+  if (naLista(AREA_REDE, a)) return RG_REDE;
+  if (naLista(AREA_FONTES, a)) return RG_FONTES;
+  if (naLista(AREA_IMAGENS, a)) return RG_IMAGENS;
+  return RG_SISTEMA;
+}
 
-// Quebra o bloco lido em linhas. `parcial` = a primeira linha pode estar
-// cortada no meio (o arquivo foi lido do fim, nao do comeco) e por isso e
+// Etiqueta, gravidade e area de uma linha ja mascarada.
+static void classificar(RegLinha *L) {
+  const char *s = L->t;
+  L->msg = 0; L->area[0] = 0; L->fps = 0;
+  if (s[0] == '[') {
+    const char *f = strchr(s, ']');
+    if (f && f - s - 1 > 0 && f - s - 1 < (long)sizeof L->area) {
+      memcpy(L->area, s + 1, (size_t)(f - s - 1));
+      L->area[f - s - 1] = 0;
+      f++;
+      while (*f == ' ') f++;
+      L->msg = (short)(f - s);
+    }
+  } else if (!strncmp(s, "FPS=", 4)) {
+    snprintf(L->area, sizeof L->area, "quadros");
+    L->fps = 1;
+  }
+  L->sev = ehFalha(s) ? 2 : ehAviso(s) ? 1 : 0;
+  L->grupo = (unsigned char)(L->fps ? RG_SISTEMA : grupoDe(L->area));
+}
+
+// Quebra o bloco lido em linhas e guarda as ultimas REG_MAX. `parcial` = a
+// primeira linha pode estar cortada no meio (o arquivo foi lido do fim) e e
 // descartada — meia linha de log confunde mais do que ajuda.
 static void fatiar(char *texto, int parcial) {
+  static char *ptr[REG_JANELA / 2];
+  int n = 0, i, k;
   char *p = texto, *q;
-  nLin = 0; ini = 0;
+  nLin = 0; nLidas = 0; nErros = nAvisos = 0;
+  memset(cont, 0, sizeof cont);
   if (parcial) {
     q = strchr(p, '\n');
     if (!q) return;
     p = q + 1;
   }
-  while (*p) {
+  while (*p && n < (int)(sizeof ptr / sizeof *ptr)) {
     q = strchr(p, '\n');
     if (q) *q = 0;
     { char *fim = p + strlen(p);
       while (fim > p && (fim[-1] == '\r' || fim[-1] == ' ')) *--fim = 0; }
-    if (*p) empurrar(p);
+    if (*p) ptr[n++] = p;
     if (!q) break;
     p = q + 1;
   }
+  nLidas = n;
+  k = n > REG_MAX ? n - REG_MAX : 0;
+  for (i = 0; i < n; i++) {
+    static RegLinha tmp;
+    RegLinha *L = i >= k ? &lin[i - k] : &tmp;
+    snprintf(L->t, REG_COL, "%s", ptr[i]);
+    aparaUtf8(L->t);
+    mascarar(L->t);
+    classificar(L);
+    cont[L->grupo]++;
+    if (L->sev) { cont[RG_PROB]++; if (L->sev == 2) nErros++; else nAvisos++; }
+  }
+  nLin = n - k;
+  cont[RG_TUDO] = nLidas;
 }
 
 #ifdef __EMSCRIPTEN__
-// As linhas que o shell (tools/tizen-shell.html) guarda em texto puro. E a
-// mesma lista que alimenta o painel DOM: aqui nao ha uma segunda captura, so
-// uma segunda forma de MOSTRAR.
-//
-// slice(-180) porque o que interessa e o fim, e porque stringToUTF8 corta o
-// FINAL quando o buffer nao cabe — cortar o comeco em JS deixa no C exatamente
-// as ultimas linhas, que sao as do defeito.
-// Devolve -1 quando a lista nem existe (shell antigo, ou a pagina servida sem
-// tools/tizen-shell.html) e 0 quando existe e esta vazia: sao dois estados
-// diferentes e o painel escreve mensagens diferentes para cada um.
-EM_JS(int, nv_registro_js, (char *dst, int tam), {
+// As linhas que o shell (tools/tizen-shell.html) guarda em texto puro, a mesma
+// lista que alimenta o painel DOM. -1 = a lista nem existe (shell antigo), 0 =
+// existe e esta vazia: o painel tem frases diferentes para cada um.
+EM_JS(int, nv_registro_js, (char *dst, int tam, int *total), {
   try {
     var a = (typeof window !== "undefined") ? window.__nvLinhas : null;
     if (!a) return -1;
+    HEAP32[total >> 2] = a.length;
     if (!a.length) return 0;
-    var t = a.slice(-180).join("\n");
+    var t = a.slice(-260).join("\n");
     if (t.length > tam - 8) t = t.slice(-(tam - 8));
     stringToUTF8(t, dst, tam);
     return 1;
@@ -225,12 +301,43 @@ EM_JS(int, nv_registro_js, (char *dst, int tam), {
 });
 #endif
 
-static void carregar(void) {
-  nLin = 0; ini = 0; desloc = 0; semFonte = 0;
+// Tamanho atual da fonte (bytes do arquivo, ou linhas no wasm); -1 sem fonte.
+static long marcaAtual(void) {
 #ifdef __EMSCRIPTEN__
-  { int r;
+  int total = 0;
+  if (nv_registro_js(cru, 2, &total) < 0) return -1;
+  return total;
+#else
+  struct stat st;
+  const char *c = registro_arquivo();
+  if (!c || stat(c, &st) != 0) return -1;
+  return (long)st.st_size;
+#endif
+}
+
+#ifdef REGISTRO_TESTE
+static const char *regTesteTexto;   // linhas fixas do harness (tests/registro_shot.c)
+static int regTesteSemFonte;
+#endif
+
+static void carregar(void) {
+  nLin = 0; nLidas = 0; semFonte = 0;
+  ultLeitura = SDL_GetTicks();
+  memset(cont, 0, sizeof cont);
+#ifdef REGISTRO_TESTE
+  if (regTesteSemFonte) { semFonte = 1; return; }
+  if (regTesteTexto) {
+    snprintf(cru, sizeof cru, "%s", regTesteTexto);
+    fatiar(cru, 0);
+    marcaLida = (long)strlen(regTesteTexto);
+    return;
+  }
+#endif
+#ifdef __EMSCRIPTEN__
+  { int r, total = 0;
     cru[0] = 0;
-    r = nv_registro_js(cru, (int)sizeof cru);
+    r = nv_registro_js(cru, (int)sizeof cru, &total);
+    marcaLida = total;
     if (r <= 0) { semFonte = (r < 0); return; }
     fatiar(cru, 0); }
 #else
@@ -249,29 +356,163 @@ static void carregar(void) {
     n = fread(cru, 1, REG_JANELA, f);
     cru[n] = 0;
     fclose(f);
+    marcaLida = tam;
     fatiar(cru, comeco > 0); }
 #endif
-  // Abre no FIM. O defeito esta na ultima linha, nunca na primeira, e rolar 200
-  // linhas com o D-pad para chegar la seria o painel inteiro jogado fora.
-  desloc = nLin > REG_VISIVEIS ? nLin - REG_VISIVEIS : 0;
 }
 
-static void rolar(int n) {
-  int max = nLin > REG_VISIVEIS ? nLin - REG_VISIVEIS : 0;
-  desloc += n;
-  if (desloc > max) desloc = max;
-  if (desloc < 0) desloc = 0;
+// --- O ESTADO DO PAINEL ------------------------------------------------------
+static int area;            // RG_* da aba
+static int segEd;           // escolhendo a area (o segmentado no acento)
+static int pausado;         // ↑ pausou: a lista nao anda
+static int foco = -1;       // linha em foco (indice em vis), pausado
+static int detalhe;         // a linha em foco aberta por inteiro
+static int focoEnviar;      // foco no "Enviar agora" do inspetor
+static int novas;           // linhas que chegaram desde a pausa
+static long marcaPausa;
+static int focoEtapa;       // Sistema com rastro de etapas: a etapa em foco
+
+// A lista filtrada: indice em lin e se e linha de CONTEXTO (apagada, na aba
+// Problemas: a linha de antes de cada problema).
+static int vis[REG_MAX * 2];
+static unsigned char visCtx[REG_MAX * 2];
+static int nVis;
+#ifdef NV_TOUCH_UI
+static ToqueRolagem toqueRegistro, toqueEtapas, toqueAreas;
+static float toqueRegistroOffset, toqueEtapasOffset, toqueAreasOffset;
+static ToqueRolagem *toqueRegAtiva;
+#endif
+static void filtrar(void) {
+#ifdef NV_TOUCH_UI
+  toquerol_limpar(&toqueRegistro); toquerol_limpar(&toqueEtapas);
+#endif
+  int i;
+  nVis = 0;
+  for (i = 0; i < nLin; i++) {
+    const RegLinha *L = &lin[i];
+    if (area == RG_TUDO) { vis[nVis] = i; visCtx[nVis++] = 0; continue; }
+    if (area == RG_PROB) {
+      if (!L->sev) continue;
+      if (i > 0 && !lin[i - 1].sev && !lin[i - 1].fps && (!nVis || vis[nVis - 1] != i - 1)) {
+        vis[nVis] = i - 1; visCtx[nVis++] = 1;
+      }
+      vis[nVis] = i; visCtx[nVis++] = 0;
+      continue;
+    }
+    if (L->grupo == area) { vis[nVis] = i; visCtx[nVis++] = 0; }
+  }
+}
+
+static void recarregar(void) {
+  carregar();
+  filtrar();
+  if (foco >= nVis) foco = nVis - 1;
+}
+
+static void pausar(int focoEm) {
+  pausado = 1;
+  novas = 0;
+  marcaPausa = marcaLida;
+  foco = focoEm < 0 ? 0 : focoEm >= nVis ? nVis - 1 : focoEm;
+  detalhe = 1;
+}
+static void seguir(void) {
+#ifdef NV_TOUCH_UI
+  toquerol_limpar(&toqueRegistro);
+#endif
+  pausado = 0; foco = -1; detalhe = 0; novas = 0;
+  recarregar();
+}
+#ifdef NV_TOUCH_UI
+static int toqueRegistroRolar(const PonteiroRolagem *e) {
+  if (e->fase == PONT_ROL_INICIO) {
+    toqueRegAtiva = NULL;
+    if (telefoneui_ativo() && toquerol_evento(&toqueAreas, e)) { toqueRegAtiva = &toqueAreas; return 1; }
+    if (toquerol_evento(&toqueEtapas, e)) toqueRegAtiva = &toqueEtapas;
+    else if (toquerol_evento(&toqueRegistro, e)) toqueRegAtiva = &toqueRegistro;
+    if (toqueRegAtiva) { pausado = 1; marcaPausa = marcaLida; return 1; }
+    return 0;
+  }
+  return toqueRegAtiva ? toquerol_evento(toqueRegAtiva, e) : 0;
+}
+static void toqueRegLinha(int i, int b) {
+  (void)b;
+  if (i < 0 || i >= nVis) return;
+  pausar(i); detalhe = 0; segEd = focoEnviar = 0;
+}
+static void toqueRegArea(int i, int b) {
+  (void)b;
+  if (i < 0 || i >= RG_N) return;
+  area = i; segEd = 1; focoEnviar = 0; seguir();
+}
+static void toqueRegSeguir(int a, int b) { (void)a; (void)b; seguir(); }
+static void toqueRegEnviar(int a, int b) { (void)a; (void)b; segEd = 0; focoEnviar = 1; }
+static void toqueRegEtapa(int a, int b) { (void)b; focoEtapa = a; segEd = focoEnviar = 0; }
+#endif
+
+// Chamado por quadro com o painel aberto: rele ao vivo, ou conta as novas.
+static void passoAoVivo(void) {
+  Uint32 agora = SDL_GetTicks();
+  long m;
+  if (agora - ultLeitura < REG_RELER_MS) return;
+  ultLeitura = agora;
+#ifdef REGISTRO_TESTE
+  if (regTesteTexto || regTesteSemFonte) return;
+#endif
+  fflush(stdout);
+  m = marcaAtual();
+  if (m == marcaLida) return;
+  if (!pausado) { recarregar(); return; }
+  // Pausado: conta as linhas que chegaram depois da pausa, sem mexer na lista.
+#ifdef __EMSCRIPTEN__
+  novas = (int)(m - marcaPausa);
+#else
+  { const char *c = registro_arquivo();
+    FILE *f = c ? fopen(c, "rb") : NULL;
+    if (f) {
+      static char buf[REG_JANELA];
+      long de = marcaPausa > m - (long)REG_JANELA ? marcaPausa : m - (long)REG_JANELA;
+      size_t n, k;
+      int q = 0;
+      fseek(f, de, SEEK_SET);
+      n = fread(buf, 1, sizeof buf, f);
+      fclose(f);
+      for (k = 0; k < n; k++) if (buf[k] == '\n') q++;
+      novas = q;
+    } }
+#endif
+  if (novas < 0) novas = 0;
 }
 
 int registro_aberto(void) { return aberto; }
 
+static void abrir(void) {
+#ifdef NV_TOUCH_UI
+  toquerol_limpar(&toqueAreas); toqueAreasOffset = 0;
+#endif
+  aberto = 1;
+  area = RG_TUDO; segEd = 0; pausado = 0; foco = -1; detalhe = 0; focoEnviar = 0;
+  novas = 0; focoEtapa = 0;
+  fflush(stdout);   // o que este fio ja imprimiu entra no arquivo antes da leitura
+  recarregar();
+}
+// "NOVO" na linha de Ajustes ate a primeira abertura (a marca e um arquivo).
+static int jaAberto = -1;
+int registro_ja_aberto(void) {
+  if (jaAberto < 0) { char *s = dados_ler("registro-aberto.txt"); jaAberto = s != NULL; free(s); }
+  return jaAberto;
+}
+void registro_abrir(void) {
+  if (aberto) return;
+  abrir();
+  if (!registro_ja_aberto()) { jaAberto = 1; dados_gravar("registro-aberto.txt", "1\n"); }
+}
+
 static void fecharAviso(void) {
   if (!aviso) return;
   aviso = 0;
-  // Grava DEPOIS de ter sido visto, nao ao abrir: se o app morrer com o cartao
-  // na tela, a pessoa ve o aviso de novo — que e o certo. Sem pasta gravavel
-  // (dados_dir() vazio) isto e no-op e o aviso volta no proximo arranque; e
-  // honesto, e o log ja disse por que nao ha pasta.
+  // Grava DEPOIS de ter sido visto: se o app morrer com o cartao na tela, a
+  // pessoa ve o aviso de novo. Sem pasta gravavel e no-op e o aviso volta.
   dados_gravar("aviso-log.txt", "1\n");
 }
 
@@ -284,26 +525,54 @@ void registro_aviso_primeira_vez(void) {
   aviso = 1;
 }
 
+void registro_legal_abrir(void) { legal = 2; }
+int registro_legal_aberto(void) { return legal; }
+void registro_aviso_legal(void) {
+  char *s;
+  if (legalVisto) return;
+  s = dados_ler("aviso-legal.txt");
+  if (s) { free(s); legalVisto = 1; return; }
+  legalVisto = 1;
+  dados_gravar("aviso-legal.txt", "1\n");
+  legal = 1;
+}
+
 static int ehAlternar(const SDL_Event *e) {
   if (e->key.repeat) return 0;
   if (e->key.keysym.sym == REG_TECLA_TECLADO) return 1;
-  // A AZUL (489) fica de fora de proposito: ela ja e o atalho do perfil em
-  // app.c, e roubar a tecla aqui mataria aquele atalho em silencio.
+  // A AZUL (489) fica de fora de proposito: e o atalho do perfil em app.c.
   if (e->key.keysym.scancode == REG_SCANCODE_VERMELHA) return 1;
   return 0;
 }
 
-static int ehVoltar(const SDL_Event *e) {
-  SDL_Keycode k = e->key.keysym.sym;
-  // O BACK do webOS ja chega normalizado como AC_BACK (main.c), e o Return do
-  // controle Samsung tambem — o shell traduz 10009 em Escape e main.c converte.
-  return k == SDLK_AC_BACK || k == SDLK_ESCAPE || k == SDLK_BACKSPACE ||
-         e->key.keysym.scancode == NV_SCANCODE_BACK;
+static int ehOk(SDL_Keycode k) { return k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE; }
+
+static int etapasN(void);   // registro_ilha.inc
+static int temEtapas(void) { return area == RG_SISTEMA && etapasN() > 0; }
+
+static void trocarArea(int d) {
+  int a = area + d;
+  if (a < 0 || a >= RG_N) return;
+  area = a; focoEtapa = 0;
+  if (pausado) { pausado = 0; foco = -1; detalhe = 0; }
+  filtrar();
 }
 
+int registro_envio_aberto(void);
+int registro_envio_evento(const SDL_Event *e);
+
 int registro_evento(const SDL_Event *e) {
-  int ehTecla = (e->type == SDL_KEYDOWN || e->type == SDL_KEYUP ||
-                 e->type == SDL_TEXTINPUT);
+#ifdef NV_TOUCH_UI
+  if (toquerol_navegacao(e)) {
+    if (toquerol_livre(&toqueRegistro) && nVis > 0) {
+      foco = (int)(toqueRegistroOffset / 32.0f);
+      if (foco >= nVis) foco = nVis - 1;
+      segEd = 0;
+    }
+    toquerol_limpar(&toqueRegistro); toquerol_limpar(&toqueEtapas); toquerol_limpar(&toqueAreas);
+  }
+#endif
+  int ehTecla = (e->type == SDL_KEYDOWN || e->type == SDL_KEYUP || e->type == SDL_TEXTINPUT);
 
   if (e->type == SDL_KEYUP &&
       ((soltarSym && e->key.keysym.sym == soltarSym) ||
@@ -313,19 +582,23 @@ int registro_evento(const SDL_Event *e) {
     return 1;
   }
 
+  if (legal) {
+    if (e->type == SDL_KEYDOWN && (ehOk(e->key.keysym.sym) || nv_tecla_voltar(e))) {
+      legal = 0; engolirSoltura(e);
+    }
+    return ehTecla;
+  }
+
   if (e->type == SDL_KEYDOWN && ehAlternar(e)) {
-    // Quem faz o gesto nao precisa mais do aviso que o ensina.
-    fecharAviso();
+    fecharAviso();   // quem faz o gesto nao precisa mais do aviso que o ensina
     if (aberto) aberto = 0;
-    else { aberto = 1; carregar(); }
+    else abrir();
     engolirSoltura(e);
     return 1;
   }
 
   if (!aberto && aviso) {
-    // CARTAO, nao tela: QUALQUER tecla o dispensa, e a tecla morre aqui. Uma
-    // tecla perdida uma vez na vida e menos atrapalho que um cartao que fica
-    // enquanto o foco se move atras dele.
+    // CARTAO, nao tela: QUALQUER tecla o dispensa, e a tecla morre aqui.
     if (e->type == SDL_KEYDOWN) { fecharAviso(); engolirSoltura(e); return 1; }
     return ehTecla;
   }
@@ -335,170 +608,116 @@ int registro_evento(const SDL_Event *e) {
   // Daqui para baixo o painel e MODAL: nenhuma tecla chega a tela de tras.
   if (e->type == SDL_KEYDOWN) {
     SDL_Keycode k = e->key.keysym.sym;
-    if (k == SDLK_UP) rolar(-1);
-    else if (k == SDLK_DOWN) rolar(1);
-    else if (k == SDLK_LEFT || k == SDLK_PAGEUP) rolar(-REG_VISIVEIS);
-    else if (k == SDLK_RIGHT || k == SDLK_PAGEDOWN) rolar(REG_VISIVEIS);
-    else if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) {
-      carregar();
-      engolirSoltura(e);
-    } else if (ehVoltar(e)) {
-      aberto = 0;
-      engolirSoltura(e);
+    if (nv_tecla_voltar(e)) { aberto = 0; engolirSoltura(e); return 1; }
+    if (semFonte || !nLin) {
+      if (ehOk(k)) { recarregar(); engolirSoltura(e); }
+      return 1;
     }
+    if (focoEnviar) {
+      if (k == SDLK_LEFT || k == SDLK_UP) { focoEnviar = 0; segEd = 1; }
+      else if (ehOk(k)) {
+        aberto = 0;
+        registro_envio_abrir();
+        engolirSoltura(e);
+      }
+      return 1;
+    }
+    if (segEd) {
+      if (k == SDLK_LEFT) trocarArea(-1);
+      else if (k == SDLK_RIGHT) {
+        if (area == RG_N - 1) { segEd = 0; focoEnviar = 1; }
+        else trocarArea(1);
+      }
+      else if (ehOk(k) || k == SDLK_DOWN) { segEd = 0; engolirSoltura(e); }
+      return 1;
+    }
+    if (temEtapas()) {
+      int n = etapasN();
+      if (k == SDLK_UP) { if (focoEtapa > 0) focoEtapa--; else segEd = 1; }
+      else if (k == SDLK_DOWN) { if (focoEtapa < n - 1) focoEtapa++; }
+      else if (k == SDLK_LEFT) { segEd = 1; trocarArea(-1); }
+      else if (k == SDLK_RIGHT) focoEnviar = 1;
+      return 1;
+    }
+    if (!pausado) {
+      if (k == SDLK_UP || ehOk(k)) { if (nVis) pausar(nVis - 1); if (ehOk(k)) engolirSoltura(e); }
+      else if (k == SDLK_LEFT) { segEd = 1; trocarArea(-1); }
+      else if (k == SDLK_RIGHT) {
+        if (area == RG_N - 1) focoEnviar = 1;
+        else { segEd = 1; trocarArea(1); }
+      }
+      return 1;
+    }
+    // Pausado: ↑ ↓ andam de linha, ← → de pagina, OK abre/fecha o detalhe, e
+    // descer alem da ultima volta a seguir o fim.
+    if (k == SDLK_UP) { if (foco > 0) foco--; else { segEd = 1; } }
+    else if (k == SDLK_DOWN) { if (foco < nVis - 1) foco++; else seguir(); }
+    else if (k == SDLK_LEFT || k == SDLK_PAGEUP) { foco -= 16; if (foco < 0) foco = 0; }
+    else if (k == SDLK_RIGHT || k == SDLK_PAGEDOWN) { foco += 16; if (foco >= nVis) seguir(); }
+    else if (ehOk(k)) { detalhe = !detalhe; engolirSoltura(e); }
     return 1;
   }
   return ehTecla;
 }
 
-// Linha que merece cor de erro. Seis buscas por linha VISIVEL, e so com o
-// painel aberto — o painel DOM do Tizen ja marca erro em vermelho e a leitura
-// de uma FOTO da tela depende disso: numa parede de 34 linhas monocromaticas
-// ninguem acha a que importa.
-//
-// E heuristica, nao classificacao: o C nao sabe qual printf era erro. Um titulo
-// com "erro" no nome ("Homem de Ferro") sai vermelho sem ser falha. Falso
-// positivo aqui custa uma linha colorida a mais; falso negativo custaria a
-// linha do defeito passar batida numa foto.
-static int ehFalha(const char *s) {
-  return strstr(s, "<<<") || strstr(s, "FALH") || strstr(s, "falh") ||
-         strstr(s, "erro") || strstr(s, "Erro") || strstr(s, "ERRO");
+#include "registro_ilha.inc"
+#include "registro_envio.inc"
+
+// Leitura legal com as mesmas pecas de texto longo do painel de registro.
+static void legalPonteiro(int a, int b) { (void)a; (void)b; }
+static void desenhaLegal(void) {
+  const char *texto = legal == 1
+    ? "Nuvio Legacy é um player: addons e listas são de terceiros e você é responsável pelo que adiciona.\nAjustes › Sobre e ajuda › Aviso legal."
+    : "Nuvio Legacy é apenas um player. Não hospeda, armazena, indexa, envia nem distribui conteúdo.\nNão vem com fontes: tudo que toca vem de addons, listas, servidores e contas de terceiros que você escolhe.\nVocê é responsável pelo que adiciona e assiste e por ter direito de acesso onde mora.\nO projeto não controla, recomenda nem verifica addons, listas ou serviços e não fornece links para conteúdo sem licença.\nAvisos de direitos autorais devem ir a quem hospeda o conteúdo.\nNão é afiliado ao Stremio, ao Nuvio oficial, a serviços de streaming ou debrid, nem a fabricantes de TV.";
+  float w = fminf(1500, NV_VTELA_W - 96), x = (NV_VTELA_W - w) * 0.5f;
+  float h = rgBlocoAltura(TXT_AJ_TEXTO, texto, w - 88, 30, 24) + 200;
+  float y = (NV_VTELA_H - h) * 0.5f, by, bw;
+  TxtLinha titulo = rgT(TXT_LOG_T34, "Aviso legal");
+  rgIlha((GfxRect){ x, y, w, h }, 36, 1, 0.055f, 0.059f, 0.071f);
+  txt_desenhar(titulo, x + 44, y + 36);
+  rgBloco(TXT_AJ_TEXTO, texto, x + 44, y + 96, w - 88, 30, 0.85f, 24);
+  by = y + h - 84;
+  bw = rgBotao("OK", NULL, x + 44, by, 1, 1);
+  ponteiro_alvo(x + 44, by, bw, 56, legalPonteiro, NULL, 0, 0);
 }
 
-static void desenhaPainel(void) {
-  GfxRect cartao = { REG_X, REG_Y, REG_W, REG_H };
-  float x = REG_X + REG_PAD;
-  float larg = REG_W - REG_PAD * 2.0f;
-  float y;
-  TxtLinha l;
-  char t[96];
-  int i, fim;
-
-  // Alpha 0.94 e nao 1.0: da para ver que ha app atras sem que o texto perca
-  // contraste. app.c NAO pinta a interface por baixo enquanto isto esta aberto
-  // (duas camadas de tela cheia derrubam a GPU da TV), entao o que aparece por
-  // tras e a cor de limpeza do quadro.
-  gfx_cor(cartao, 0.02f, 0.0f, 0.0f, 0.0f, 0.94f);
-
-  l = txt_linha(TXT_CAPTION2, "Registro do app", 184, 245, 192, 255);
-  txt_desenhar(l, x, REG_Y + 20.0f);
-
-  fim = desloc + REG_VISIVEIS;
-  if (fim > nLin) fim = nLin;
-  snprintf(t, sizeof t, i18n("linhas %d-%d de %d"),
-           nLin ? desloc + 1 : 0, fim, nLin);
-  { TxtLinha p = txt_linha(TXT_CAPTION2, t, 150, 152, 160, 255);
-    txt_desenhar(p, REG_X + REG_W - REG_PAD - p.w, REG_Y + 20.0f); }
-
-  y = REG_Y + 20.0f + l.h + 16.0f;
-
-  if (!nLin) {
-    // Ausencia aparece como ausencia, e cada ausencia tem a sua frase: "ainda
-    // nao ha linha" e "nao ha de onde ler" sao problemas diferentes, e um
-    // painel que junta os dois manda procurar no lugar errado.
-    const char *msg;
-    if (!semFonte) msg = "Nenhuma linha de log ainda.";
-#ifdef __EMSCRIPTEN__
-    else msg = "A página não expôs as linhas do log. O log completo continua "
-               "no console do navegador.";
-#else
-    else msg = "Esta versão manda o log para o terminal, não para um arquivo. "
-               "Para ler aqui, rode com NUVIO_LOG apontando para um arquivo.";
-#endif
-    txt_bloco(TXT_CAPTION, msg, 183, 186, 194, x, y, larg, 32.0f, 1.0f, 3);
-  }
-  for (i = desloc; i < fim; i++) {
-    const char *s = linhaDe(i);
-    int falha = ehFalha(s);
-    // txt_linha_corta e nao txt_linha: uma linha de log nao tem comprimento
-    // garantido, e uma textura de 320 caracteres passaria da largura do painel
-    // (e do teto de textura de GPU antiga) sem dizer nada.
-    l = txt_linha_corta(TXT_CAPTION2, s,
-                        falha ? 255 : 184, falha ? 139 : 245, falha ? 122 : 192,
-                        255, larg);
-    txt_desenhar(l, x, y);
-    y += REG_LINHA_H;
-  }
-
-  l = txt_linha(TXT_CAPTION2,
-                "↑ ↓  rolar   ·   ← →  página   ·   OK  atualizar   ·   Voltar  fechar",
-                150, 152, 160, 255);
-  txt_desenhar(l, x, REG_Y + REG_H - REG_PAD - l.h);
-}
-
-// O texto do aviso muda por FABRICANTE, e o app sabe em qual alvo esta: o alvo
-// Tizen e sempre Emscripten, e o resto e webOS (ou o Mac, que e a previa dele).
-// Mostrar as duas instrucoes juntas obrigaria a pessoa a descobrir qual e a
-// dela — e uma instrucao errada sobre o proprio controle e pior que instrucao
-// nenhuma.
-//
-// O QUE ESTAS FRASES AFIRMAM, e por que. No controle da Samsung foi conferido
-// que as cores nao sao botoes fisicos nos modelos novos: elas dividem o botao
-// que fica abaixo do liga-desliga com os numeros, e aparecem numa fileira na
-// tela depois de aperta-lo (as fontes divergem entre "segurar" e "apertar
-// varias vezes", entao a frase cobre as duas). No controle da LG NAO foi
-// possivel confirmar em quais modelos existe a fileira de coloridas — o Magic
-// Remote de cada ano tem um desenho diferente — e por isso a frase diz que o
-// vermelho fica nessa fileira "quando o controle tiver", sem prometer que tem.
-static void desenhaAviso(void) {
-  const float w = 1180.0f, h = 348.0f;
-  GfxRect cartao = { (NV_TELA_W - w) * 0.5f, NV_TELA_H - NV_MARGEM_Y - h, w, h };
-  float x = cartao.x + 34.0f;
-  float larg = w - 68.0f;
-  float y = cartao.y + 34.0f;
-  TxtLinha l;
-
-  gfx_cor(cartao, 0.05f, 0.043f, 0.047f, 0.055f, 0.97f);
-
-  l = txt_linha(TXT_HEADLINE, "Ver o registro do app na TV", 255, 255, 255, 255);
-  txt_desenhar(l, x, y);
-  y += l.h + 22.0f;
-
-  y += txt_bloco(TXT_BODY,
-#if defined(NV_ANDROID)
-                 "Aperte Info (i) no controle para abrir e fechar o registro.",
-#elif defined(__EMSCRIPTEN__)
-                 "Aperte o botão vermelho do controle para abrir e fechar o "
-                 "registro. Nos controles Samsung novos o vermelho não é um "
-                 "botão: aperte (ou segure) o botão de números e cores, abaixo "
-                 "do liga-desliga, até a fileira de cores aparecer na tela.",
-#else
-                 "Aperte o botão vermelho do controle para abrir e fechar o "
-                 "registro. No controle da LG ele fica na fileira de botões "
-                 "coloridos, quando o controle tiver essa fileira.",
-#endif
-                 232, 234, 240, x, y, larg, 34.0f, 1.0f, 4);
-  y += 16.0f;
-
-  y += txt_bloco(TXT_CAPTION2,
-#if defined(NV_ANDROID)
-                 "Abre o painel de log por cima de qualquer tela. É dali que sai "
-                 "o print quando alguma coisa dá errado.",
-#elif defined(__EMSCRIPTEN__)
-                 "Na TV da LG é o botão vermelho do controle. Se a tela "
-                 "congelar e o vermelho não responder, o botão verde mostra o "
-                 "painel de arranque.",
-#else
-                 "Na TV da Samsung o vermelho sai do botão de números e cores, "
-                 "abaixo do liga-desliga.",
-#endif
-                 150, 152, 160, x, y, larg, 28.0f, 1.0f, 3);
-  y += 16.0f;
-
-  l = txt_linha(TXT_CAPTION2, "OK ou Voltar para fechar este aviso",
-                183, 186, 194, 255);
-  txt_desenhar(l, x, y);
-}
-
+static void registro_desenharCorpo_(void);
+// Camada ampliada (escala.h): o corpo desenha na tela virtual.
 void registro_desenhar(void) {
-  if (!aberto && !aviso) return;
-  // RECORTE DESLIGADO ANTES DE DESENHAR. Todo chamador de gfx_recorte equilibra
-  // com gfx_sem_recorte, mas isso e uma invariante que ninguem verifica — e
-  // main.c ja paga uma chamada por quadro pelo mesmo motivo antes do glClear.
-  // Aqui vale ainda mais: se uma tela esquecer o recorte ligado, o unico
-  // sintoma seria o painel de DIAGNOSTICO nao aparecer, o que manda procurar o
-  // defeito no lugar errado. Uma chamada, e so com o painel em pe.
+  ESCALA_INI();
+  registro_desenharCorpo_();
+  ESCALA_FIM();
+}
+static void registro_desenharCorpo_(void) {
+#ifdef NV_TOUCH_UI
+  toqueRegistro.offset = toqueEtapas.offset = toqueAreas.offset = NULL;
+#endif
+  if (!aberto && !aviso && !legal) return;
+  // RECORTE DESLIGADO ANTES DE DESENHAR: se uma tela esquecer o recorte ligado,
+  // o unico sintoma seria o painel de DIAGNOSTICO nao aparecer.
   gfx_sem_recorte();
-  if (aberto) desenhaPainel();
+  // PONTEIRO (#99): o aviso e um cartao que qualquer tecla dispensa — camada
+  // sem alvos, o clique e o OK (registro_evento o fecha) e nao vaza para a
+  // tela de tras. O painel aberto ja e camada em app.c.
+  if (legal) { ponteiro_camada(); desenhaLegal(); return; }
+  if (!aberto && aviso) ponteiro_camada();
+  if (aberto) { passoAoVivo(); desenhaPainel(); }
   else desenhaAviso();
 }
+
+#ifdef REGISTRO_TESTE
+void registro_teste_texto(const char *t) { regTesteTexto = t; regTesteSemFonte = 0; }
+void registro_teste_sem_fonte(int s) { regTesteSemFonte = s; }
+void registro_teste_estado(int a, int ed, int pausa, int focoLinha, int det, int nov) {
+  area = a; segEd = ed; focoEnviar = 0; focoEtapa = 0; filtrar();
+  if (pausa) { pausado = 1; foco = focoLinha < 0 ? nVis + focoLinha : focoLinha; detalhe = det; novas = nov; }
+  else { pausado = 0; foco = -1; detalhe = 0; novas = 0; }
+}
+int registro_teste_achar(const char *trecho, int ultima) {
+  int i, r = -1;
+  for (i = 0; i < nVis; i++) if (strstr(lin[vis[i]].t, trecho)) { r = i; if (!ultima) break; }
+  return r;
+}
+void registro_teste_aviso(int a) { aviso = a; }
+void registro_teste_foco_etapa(int f) { focoEtapa = f; }
+#endif

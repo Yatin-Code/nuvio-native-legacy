@@ -645,6 +645,14 @@ void cachearte_nativo_indice_tocar(const char *path) {
   if ((x = *idx_achar(base_name(path))) != NULL) x->uso = (long)time(NULL);
   pthread_mutex_unlock(&s_idx_mtx);
 }
+int cachearte_nativo_indice_tem(const char *path) {
+  int r;
+  if (!path || atomic_load(&s_idx_estado) != 2) return 0;
+  pthread_mutex_lock(&s_idx_mtx);
+  r = *idx_achar(base_name(path)) != NULL;
+  pthread_mutex_unlock(&s_idx_mtx);
+  return r;
+}
 long cachearte_nativo_indice_bytes(void) { return atomic_load(&s_idx_bytes_pub); }
 
 typedef struct { char nome[24]; long bytes; long uso; } NvCand;

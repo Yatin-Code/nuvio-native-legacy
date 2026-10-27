@@ -17,6 +17,7 @@
 
 float gfx_opacidade_grupo = 1.0f;
 void gfx_sem_recorte(void) {}
+float gfx_escala(void) { return 1.0f; }   // layer scale (a8392eaa): identity here
 void gfx_cor(GfxRect r, float raio, float cr, float cg, float cb, float ca) {
   (void)r; (void)raio; (void)cr; (void)cg; (void)cb; (void)ca;
 }

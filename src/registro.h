@@ -53,8 +53,35 @@ void registro_desenhar(void);
 // ser chamada em todo quadro: a decisao acontece uma vez e fica em cache.
 void registro_aviso_primeira_vez(void);
 
-// 1 enquanto o painel esta aberto. app.c usa para nao pintar a interface por
-// baixo de um painel opaco.
+// 1 enquanto o painel esta aberto. app.c usa para CONGELAR a tela de tras: o
+// painel e vidro (Glass UI, 03/10), entao o ultimo quadro da tela e pintado UMA
+// vez numa textura ao abrir e os quadros seguintes so copiam essa textura.
 int  registro_aberto(void);
+
+// Abre o painel sem a tecla vermelha (Ajustes > Sobre e ajuda > "Ver o
+// registro na tela"): nem todo controle LG tem a fileira de cores.
+void registro_abrir(void);
+// Mesma ilha de leitura; aviso informativo apos adicionar fonte, uma vez por TV.
+void registro_legal_abrir(void);
+void registro_aviso_legal(void);
+int registro_legal_aberto(void);
+// 1 depois que o painel foi aberto por Ajustes uma vez (o "NOVO" da linha).
+int  registro_ja_aberto(void);
+
+// O PAINEL DE ENVIO DO REGISTRO (Ajustes > Sobre e ajuda > Enviar registro, e
+// o "Enviar agora" do painel): ilha modal com o fim do log, o andamento, o
+// CODIGO de seis caracteres do recibo (regcodigo.h) ou o motivo da falha
+// (servidor, TV sem internet, prazo). Abrir ja dispara o envio, menos sem
+// internet: ai so explica e espera a rede (avisos.h).
+void registro_envio_abrir(void);
+int  registro_envio_aberto(void);
+int  registro_envio_evento(const SDL_Event *e);   // 1 = consumido
+void registro_envio_desenhar(void);
+// Teste do ponteiro (#99): 0 = "Tentar de novo", 1 = "Fechar" (no erro).
+int  registro_envio_teste_foco(void);
+// O fim do log em mono, numa caixa (o "pacote" do mockup): a previa da linha
+// "Enviar registro" no inspetor de Ajustes e a esquerda do painel de envio.
+// `n` = quantas linhas; `rotDir` e o texto a direita do nome do arquivo.
+void registro_pacote(float x, float y, float w, float h, int n, const char *rotDir, float a);
 
 #endif

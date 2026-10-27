@@ -5,6 +5,10 @@
 //
 //   bash tests/sidebaratv_shot.sh /tmp/nv-sidebaratv
 #include "menu.h"
+#include "nvtmp.h"
+#include "home.h"
+#include "colecoes.h"
+#include "catalogo.h"
 #include "gfx.h"
 #include "text.h"
 #include "tex_cache.h"
@@ -76,7 +80,7 @@ static void quadros(int n, const char *nome) {
 }
 
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nv-sidebaratv";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nv-sidebaratv");
   char nome[600];
   SDL_GLContext gl;
   int i;
@@ -102,6 +106,16 @@ int main(int argc, char **argv) {
   assert(txt_iniciar("deploy/app", 1));
   tex_iniciar(64);
   gfx_icones_dir("deploy/app/art");
+  assert(home_iniciar("deploy/app/art"));
+  assert(col_definir_json("{\"collections\":[{\"id\":\"streaming-fixture\",\"title\":\"Streaming\",\"folders\":[{\"id\":\"netflix-fixture\",\"title\":\"Netflix\",\"sources\":[{\"addonBaseUrl\":\"https://fixture.invalid\",\"type\":\"movie\",\"catalogId\":\"fixture\"}]}]}]}") == 1);
+  { CatItem item = *cat_item(0); CatFileira row = {0};
+    snprintf(row.chave, sizeof row.chave, "streaming-fixture-row");
+    snprintf(row.base, sizeof row.base, "https://fixture.invalid");
+    snprintf(row.catId, sizeof row.catId, "fixture");
+    snprintf(row.tipo, sizeof row.tipo, "movie"); row.n = 1;
+    cat_definir_tudo(&item, 1, &row, 1);
+  }
+  home_atualizar(0.016f, SDL_GetTicks());
   menu_iniciar();
 
   for (i = 0; i < 40; i++) { quadros(1, NULL); SDL_Delay(5); }   // arte de fundo

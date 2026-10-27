@@ -26,7 +26,7 @@ static int falhas;
 
 int main(void) {
   const char *dir = getenv("NUVIO_DADOS");
-  const char *cab[3];
+  const char *cab[4];   // identidade() usa 4 desde o X-Nuvio-Perfil
   char *saude;
 
   if (!dir || !dir[0]) {
@@ -52,7 +52,7 @@ int main(void) {
   // linha 2 refresh, linha 3 "anonima".
   dados_gravar("sessao.txt", "tok-e2e\n\n0\n");
   sessao_iniciar();
-  CONFERE(sessao_token()[0] != 0, "sessao_token devolveu vazio");
+  CONFERE(sessao_logada(), "sessao sem token de usuario");
   if (!mtx) mtx = SDL_CreateMutex();
 
   CONFERE(identidade(cab), "identidade montou os cabecalhos");

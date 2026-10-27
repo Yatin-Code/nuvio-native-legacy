@@ -8,6 +8,8 @@
 // atualizacoes, corviva_quadro (UMA vez, antes do desenho) e so entao o
 // desenho — que e quem pede a cor do quadro seguinte.
 #include "ajustes.h"
+#include "addons.h"
+#include "nvtmp.h"
 #include "artehero.h"
 #include "catalogo.h"
 #include "corviva.h"
@@ -68,6 +70,7 @@ static void quadros(int n, const char *bmp) {
     else home_atualizar(1.0f / 60.0f, agora);
     if (detalhe) detail_atualizar(1.0f / 60.0f, agora);
     corviva_quadro(1.0f / 60.0f, ajustes_cor_viva(), ajustes_cor_logo(), ajustes_animacoes_reduzidas());
+    ajustes_textura_quadro();
     txt_novo_quadro();
     tex_novo_quadro();
     gfx_novo_quadro();
@@ -100,14 +103,17 @@ static void tema(int t) {
   snprintf(cam, sizeof cam, "%s/ajustes.txt", dirDados);
   a = fopen(cam, "w");
   assert(a);
-  // 12 Dinâmica, 13 estilizada, 14 gradiente, 15 imersiva; idioma 0 = pt.
+  // 12 Da arte, 14 gradiente, 15 imersiva, 22 textura, 23 sutil; idioma 0 = pt.
   fprintf(a, "idioma 0\nselected_theme %d\ntrailerHero 1\ncorDaLogoLocal %d\n", t, corDaLogo);
+  if (getenv("NUVIO_ARTEPASTEL_LIGHT") && atoi(getenv("NUVIO_ARTEPASTEL_LIGHT")))
+    fprintf(a, "artToneLocal 1\n");
   fclose(a);
   ajustes_dir(dirDados);
+  if (getenv("NUVIO_ARTEPASTEL_SHOT")) gfx_escala_txt_definir(ajustes_escala_texto());
 }
 
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nuvio-corviva";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nuvio-corviva");
   static CatItem itens[NT];
   CatFileira fil;
   SDL_GLContext gl;
@@ -143,10 +149,12 @@ int main(int argc, char **argv) {
   tema(12);
   assert(home_iniciar("deploy/app/art"));
 
+  AddonRemoto addon = { .nome = "Fixture", .url = "http://127.0.0.1:1/manifest.json", .ativo = 1 };
+  assert(addons_definir_lista(&addon, 1));
   memset(itens, 0, sizeof itens);
   for (i = 0; i < NT; i++) {
     CatItem *c = &itens[i];
-    snprintf(c->imdb, sizeof c->imdb, "tt90000%02d", i);
+    snprintf(c->imdb, sizeof c->imdb, getenv("NUVIO_ARTEPASTEL_SHOT") ? "local-art-%02d" : "tt90000%02d", i);
     snprintf(c->tipo, sizeof c->tipo, "movie");
     snprintf(c->titulo, sizeof c->titulo, "%s", TITULOS[i].nome);
     snprintf(c->genero, sizeof c->genero, "Filme · Drama");
@@ -169,9 +177,20 @@ int main(int argc, char **argv) {
 
   // Foco na fileira, primeiro card: o destaque e o do card focado.
   tecla(SDLK_DOWN);
-  quadros(120, NULL);
+  quadros(240, NULL);
   snprintf(bmp, sizeof bmp, "%s-1-home-dinamica-vermelho.bmp", saida);
   quadros(1, bmp);
+
+  if (getenv("NUVIO_ARTEPASTEL_SHOT")) {
+    HomeItem hi;
+    assert(home_item_focado(&hi));
+    detail_abrir(&hi);
+    detalhe = 1;
+    quadros(150, NULL);
+    snprintf(bmp, sizeof bmp, "%s-detail.bmp", saida);
+    quadros(1, bmp);
+    return 0;
+  }
 
   // Um para a direita: o mar. Meia transicao (~250 ms depois do assentar) e
   // a chegada.
@@ -189,23 +208,23 @@ int main(int argc, char **argv) {
            corviva_retargets() - r0);
     quadros(120, NULL); }
 
-  // Estilizada, no mesmo titulo: o fundo inteiro ganha o azul-noite.
-  tema(13);
+  // Textura, no mesmo titulo (sem logo: o recorte e da arte).
+  tema(22);
   quadros(90, NULL);
-  snprintf(bmp, sizeof bmp, "%s-3-home-estilizada-turquesa.bmp", saida);
+  snprintf(bmp, sizeof bmp, "%s-3-home-textura-turquesa.bmp", saida);
   quadros(1, bmp);
   tecla(SDLK_RIGHT);            // mata verde
   quadros(120, NULL);
-  snprintf(bmp, sizeof bmp, "%s-4-home-estilizada-verde.bmp", saida);
+  snprintf(bmp, sizeof bmp, "%s-4-home-textura-verde.bmp", saida);
   quadros(1, bmp);
 
-  // Pagina do titulo (estilizada): abre o focado.
+  // Pagina do titulo (textura): abre o focado.
   { HomeItem hi;
     assert(home_item_focado(&hi));
     detail_abrir(&hi);
     detalhe = 1;
     quadros(150, NULL);
-    snprintf(bmp, sizeof bmp, "%s-5-detalhe-estilizada-verde.bmp", saida);
+    snprintf(bmp, sizeof bmp, "%s-5-detalhe-textura-verde.bmp", saida);
     quadros(1, bmp); }
   // Volta, vai ao vermelho e abre de novo.
   tecla(SDLK_ESCAPE);
@@ -219,7 +238,7 @@ int main(int argc, char **argv) {
     detail_abrir(&hi);
     detalhe = 1;
     quadros(150, NULL);
-    snprintf(bmp, sizeof bmp, "%s-6-detalhe-estilizada-vermelho.bmp", saida);
+    snprintf(bmp, sizeof bmp, "%s-6-detalhe-textura-vermelho.bmp", saida);
     quadros(1, bmp); }
   // A mesma pagina com "Dinâmica" (so o destaque): o fundo volta ao #0D0D0D.
   tema(12);
@@ -227,9 +246,9 @@ int main(int argc, char **argv) {
   snprintf(bmp, sizeof bmp, "%s-7-detalhe-dinamica-vermelho.bmp", saida);
   quadros(1, bmp);
 
-  // Ajustes, na linha "Cor de destaque", com a estilizada: ninguem pede cor
+  // Ajustes, na linha "Cor de destaque", com a Textura: ninguem pede cor
   // nesta tela, entao fica a do ultimo titulo (o vermelho da pagina acima).
-  tema(13);
+  tema(22);
   detalhe = 0;
   telaAjustes = 1;
   ajustes_iniciar();
@@ -239,7 +258,7 @@ int main(int argc, char **argv) {
   tecla(SDLK_RETURN);
   for (i = 0; i < 3; i++) tecla(SDLK_DOWN); // idioma, animacoes, resolucao -> tema
   quadros(90, NULL);
-  snprintf(bmp, sizeof bmp, "%s-8-ajustes-estilizada.bmp", saida);
+  snprintf(bmp, sizeof bmp, "%s-8-ajustes-textura.bmp", saida);
   quadros(1, bmp);
 
   // --- SEGUNDA PARTE: titulos com LOGO (argv[2] = pasta com <tt>-bg.jpg e
@@ -290,7 +309,16 @@ int main(int argc, char **argv) {
       corDaLogo = 0; tema(15);   // imersiva
       quadros(120, NULL);
       snprintf(bmp, sizeof bmp, "%s-12-detalhe-imersiva-catchme.bmp", saida);
-      quadros(1, bmp); }
+      quadros(1, bmp);
+      tema(22);   // textura: o recorte do LOGO na pilula em foco
+      quadros(120, NULL);
+      snprintf(bmp, sizeof bmp, "%s-12b-detalhe-textura-logo.bmp", saida);
+      quadros(1, bmp);
+      tema(23);
+      quadros(90, NULL);
+      snprintf(bmp, sizeof bmp, "%s-12c-detalhe-textura-sutil-logo.bmp", saida);
+      quadros(1, bmp);
+      tema(15); quadros(60, NULL); }
     tecla(SDLK_ESCAPE);
     quadros(60, NULL);
     detalhe = 0;

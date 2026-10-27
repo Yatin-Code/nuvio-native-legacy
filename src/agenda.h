@@ -1,3 +1,4 @@
+#include "arteurl.h"
 // AGENDA: quando sai o proximo episodio das series que o dono acompanha, e o
 // lembrete para o dia em que sair.
 //
@@ -72,7 +73,7 @@ typedef enum {
 typedef struct {
   char imdb[24];
   char titulo[160];
-  char poster[512];
+  char poster[NV_ARTE_URL_MAX];
   int  situacao;          // AgSituacao
   int  temporada, episodio;
   char nomeEp[120];
@@ -97,6 +98,11 @@ typedef struct {
   // Primeiro genero (TMDB genres[0].name ou Cinemeta genres[0]). A tela so usa
   // quando o catalogo nao tem o item: com catalogo, o genero dele manda.
   char genero[48];
+  // ARTE DE PAISAGEM para a coluna da esquerda da Agenda (C1): o still do
+  // proximo episodio quando o TMDB ja tem, senao o backdrop da serie (TMDB ou
+  // `background` do Cinemeta), senao o backdrop do catalogo. "" = so o cartaz.
+  // Sai dos MESMOS corpos que o fio ja baixa: nenhum pedido novo.
+  char fundo[512];
 } AgItem;
 
 // Le o cache e os lembretes do perfil ativo. Chamar depois de dados_iniciar.
@@ -122,6 +128,10 @@ void agenda_registrar_extra(const char *imdb, const char *sinopse,
                             const char *tipoEp, const char *rede,
                             const char *genero, int duracao, int temporadas);
 
+// A arte de paisagem (still do episodio ou backdrop) no MESMO registro.
+// Vazio nao apaga o que ja estava; sem registro nao cria.
+void agenda_registrar_fundo(const char *imdb, const char *url);
+
 // Registro guardado, ou NULL. O ponteiro vale ate a proxima escrita — copie
 // se for atravessar um quadro.
 const AgItem *agenda_registro(const char *imdb);
@@ -139,6 +149,14 @@ int agenda_pode_lembrar(const char *imdb);
 int agenda_lembrete(const char *imdb);            // 1 = ligado
 // Liga/desliga e GRAVA. Devolve o estado novo. Ignora quem nao pode lembrar.
 int agenda_alternar_lembrete(const char *imdb);
+
+// Movie alerts share profile-scoped reminder storage. Unknown stream count = -1.
+int agenda_filme_elegivel(const char *lancamento, const char *digital, int fontes);
+int agenda_filme_alternar(const char *imdb, const char *titulo, const char *poster);
+int agenda_filme_devido(AgItem *saida);
+void agenda_filme_aberto(const char *imdb);
+// UI tick: captures add-ons, starts/reaps one bounded worker; never waits for network.
+void agenda_filmes_atualizar(void);
 
 // --- calendario -------------------------------------------------------------
 // Remonta a lista das series seguidas a partir do catalogo, do progresso e do
@@ -207,6 +225,9 @@ void agenda_apoio(const AgItem *it, char *dst, size_t tam);
 int agenda_devidos(const AgItem **saida, int max);
 // Marca como avisado e GRAVA: o mesmo episodio nao avisa duas vezes.
 void agenda_marcar_avisado(const char *imdb);
+// Quantos lembretes ainda nao foram avisados. Barato (so a tabela de
+// lembretes): o aviso da home pergunta isto antes de montar a agenda inteira.
+int agenda_lembretes_pendentes(void);
 
 // --- atualizacao das seguidas ----------------------------------------------
 // Sobe um fio que busca as series seguidas cujo registro esta faltando ou

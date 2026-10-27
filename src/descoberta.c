@@ -1,6 +1,9 @@
+#include "arteurl.h"
 #include "descoberta.h"
+#include "dados.h"
 #include "idioma.h"
 #include "ajustes.h"
+#include "extras.h"
 #include "catordem.h"
 #include "cotacat.h"
 #include "fileiras.h"
@@ -8,6 +11,8 @@
 #include "sessao.h"
 #include "colecoes.h"
 #include "marco.h"
+#include "metaprov.h"
+#include "armids.h"
 #include <SDL2/SDL.h>
 #include "catalogo.h"
 #include "addons.h"
@@ -15,15 +20,23 @@
 #include "nuvem.h"
 #include "cwordem.h"
 #include "js.h"
+#include "metaep.h"
 #include "recomenda.h"
 #include "trakt.h"
 #include "simkl.h"
 #include "progresso.h"
 #include "contalib.h"
+#include "vistoep.h"
 #include "proximo.h"
 #include "perfis.h"
+#include "perfisessao.h"
 #include "artereserva.h"
+#include "artefontes.h"
 #include "idbase.h"
+#include "cwfrente.h"
+#include "servidores.h"
+#include "descdebounce.h"
+#include "nlanc.h"
 #include <stdint.h>   /* uintptr_t: a geracao viaja no argumento do fio */
 #include <stdio.h>
 #include <string.h>
@@ -31,7 +44,87 @@
 #include <pthread.h>
 #include <time.h>
 
-#define CINEMETA "https://v3-cinemeta.strem.io"
+// Optional imports belong to consumers: public declarations keep producers strong.
+extern int contapend_reenviar(void) NV_PERFIL_OPCIONAL;
+// Isolated legacy fixtures may omit this boundary: missing means DEFER,
+// never a fabricated empty/complete account list. Complete apps link addons.c.
+extern int addons_copiar_identidades(AddonIdentidade *, int, unsigned, int) NV_PERFIL_OPCIONAL;
+extern int addons_travar_lista(unsigned, int) NV_PERFIL_OPCIONAL;
+extern void addons_destravar_lista(void) NV_PERFIL_OPCIONAL;
+extern int fil_podar_catalogos_de(const char *const *, const char *const *, int, int, unsigned) NV_PERFIL_OPCIONAL;
+extern int trakt_enfeitar_lote_sessao(CatItem *, int, uint64_t) NV_PERFIL_OPCIONAL;
+extern int recomenda_social_mesclar_sessao(CatItem *, int, int, uint64_t) NV_PERFIL_OPCIONAL;
+
+// Detached jobs retain the session of their request, including A -> B -> A.
+static pthread_key_t descSessaoChave;
+static pthread_once_t descSessaoUma = PTHREAD_ONCE_INIT;
+static void descSessaoCriar(void) { pthread_key_create(&descSessaoChave, free); }
+static int descSessaoVincular(NvPerfilSessao sessao) {
+  NvPerfilSessao *p;
+  pthread_once(&descSessaoUma, descSessaoCriar);
+  p = pthread_getspecific(descSessaoChave);
+  if (!p) { p = malloc(sizeof *p); if (!p) return 0; pthread_setspecific(descSessaoChave, p); }
+  *p = sessao;
+  return nv_perfil_sessao_atual(sessao);
+}
+static NvPerfilSessao descSessao(void) {
+  NvPerfilSessao *p;
+  pthread_once(&descSessaoUma, descSessaoCriar);
+  p = pthread_getspecific(descSessaoChave);
+  return p ? *p : nv_perfil_sessao_ler();
+}
+static int descSessaoAtual(void) { return nv_perfil_sessao_atual(descSessao()); }
+static int descEnfeitar(CatItem *itens, int n) {
+  if (!descSessaoAtual()) return 0;
+  return trakt_enfeitar_lote_sessao ? trakt_enfeitar_lote_sessao(itens, n, descSessao())
+                                  : trakt_enfeitar_lote(itens, n);
+}
+#define DESC_PUBLICAR(expr) do { \
+  if (nv_perfil_sessao_travar(descSessao())) { \
+    expr; nv_perfil_sessao_destravar(); \
+  } \
+} while (0)
+
+// Apply delayed catalog and CW bookkeeping only to the request's session.
+static void descCatAtualizar(void (*f)(int, const CatItem *), int i, const CatItem *c) {
+  DESC_PUBLICAR(f(i, c));
+}
+static void descCatEpisodios(int i, const CatEp *eps, int n) {
+  DESC_PUBLICAR(cat_definir_episodios(i, eps, n));
+}
+static int descCatAcrescentar(const CatItem *c) {
+  int r = -1;
+  DESC_PUBLICAR(r = cat_acrescentar(c));
+  return r;
+}
+static int descCatMesclar(const CatItem *c, int n) {
+  int r = 0;
+  DESC_PUBLICAR(r = cat_mesclar_listas(c, n));
+  return r;
+}
+static int descCatSinopse(int i, const char *id, const char *sin, const char *tit) {
+  int r = 0;
+  DESC_PUBLICAR(r = cat_completar_sinopse(i, id, sin, tit));
+  return r;
+}
+static int descCatBasico(int i, const CatItem *c) {
+  int r = 0;
+  DESC_PUBLICAR(r = cat_completar_basico(i, c));
+  return r;
+}
+static int descCatLocalizado(int i, const char *id, const char *tit,
+                            const char *sin, const char *logo, const char *fundo) {
+  int r = 0;
+  DESC_PUBLICAR(r = cat_aplicar_localizado(i, id, tit, sin, logo, fundo));
+  return r;
+}
+static void descCwoDefinir(void (*f)(const char *const *, int), const char *const *ids, int n) {
+  DESC_PUBLICAR(f(ids, n));
+}
+static void descCwoEstreia(const char *id, long long ms) {
+  DESC_PUBLICAR(cwo_marcar_estreia(id, ms));
+}
+
 #define TMDB     "https://api.themoviedb.org/3"
 
 // "2026-07-29" -> "29 de julho de 2026". Formato do web, que usa
@@ -69,6 +162,7 @@ void desc_data_extenso(const char *iso, char *dst, size_t tam) {
 // Chave do TMDB, em art/tmdb.txt. SEGREDO do dono (saiu do dist/nuvio.env.js do
 // app web) — nao versionar. Sem ela o elenco continua so com nomes.
 static char tmdbChave[64];
+static char tmdbChavePacote[64];
 static char dirArteDesc[512];
 
 void desc_tmdb_definir(const char *chave) {
@@ -95,12 +189,13 @@ void desc_tmdb(const char *dirArte) {
 #endif
   snprintf(caminho, sizeof caminho, "%s/tmdb.txt", dirArte ? dirArte : ".");
   f = fopen(caminho, "r");
-  if (!f) return;
+  if (!f) { snprintf(tmdbChavePacote, sizeof tmdbChavePacote, "%s", tmdbChave); return; }
   if (fgets(tmdbChave, sizeof tmdbChave, f)) {
     char *fim = tmdbChave + strlen(tmdbChave);
     while (fim > tmdbChave && (fim[-1] == '\n' || fim[-1] == '\r')) *--fim = 0;
   }
   fclose(f);
+  snprintf(tmdbChavePacote, sizeof tmdbChavePacote, "%s", tmdbChave);
   printf("[desc] tmdb %s\n", tmdbChave[0] ? "ok" : "ausente");
 }
 
@@ -323,6 +418,35 @@ static int ehSvg(const char *s) {
   return n > 4 && !strcmp(s + n - 4, ".svg");
 }
 
+// URL DE ARTE INTEIRA OU NENHUMA (#361). js_texto corta calado no tamanho do
+// destino, e um PREFIXO de URL nao e uma URL: o cartaz de provedor com nota
+// (pictorium, ~600 caracteres com a query) virava um 404 que ninguem via. Le
+// num buffer maior que qualquer campo de arte e so copia se couber; se nao
+// couber, o campo fica vazio — quem desenha cai na arte seguinte (metahub,
+// cartaz, nome) — e o registro diz qual campo e de quantos bytes.
+//   1 = copiada, 0 = ausente, -1 = nao cabe (vazia, com linha no registro).
+// `soRaiz`: so a chave da raiz do objeto (js_texto_raiz_em); 0 tenta a raiz e
+// depois a primeira de qualquer nivel, a ordem de deMeta (#200).
+#define DESC_URL_LIDA (NV_ARTE_URL_MAX + 1)
+static int urlArteInteira(const char *ini, const char *fim, const char *chave,
+                          int soRaiz, char *dst, size_t tam, const char *dono) {
+  char v[DESC_URL_LIDA];
+  size_t n;
+  dst[0] = 0;
+  if (!js_texto_raiz_em(ini, fim, chave, v, sizeof v) &&
+      (soRaiz || !js_texto(ini, fim, chave, v, sizeof v))) return 0;
+  n = strlen(v);
+  if (n >= tam) {
+    printf("[descoberta] %s de \"%s\" tem %s%zu bytes e o campo guarda %zu: "
+           "descartada inteira, nao cortada (#361)\n", chave, dono && dono[0] ? dono : "?",
+           n + 1 >= sizeof v ? ">=" : "", n, tam - 1);
+    fflush(stdout);
+    return -1;
+  }
+  memcpy(dst, v, n + 1);
+  return 1;
+}
+
 // Primeiro provedor do array `chave` dentro de [ini,fim): nome e logo no
 // formato w92 do TMDB. flatrate/rent/buy sao arrays de provedores; o primeiro
 // e o principal na pratica (o TMDB ordena por relevancia local).
@@ -346,8 +470,39 @@ static int provedorEntre(const char *ini, const char *fim, const char *chave,
 // id do IMDb e so entao pedir os creditos.
 // `manter`: bits de DESC_MANTER_* dos textos que ja vieram do addon de
 // metadados (#176) e o TMDB nao pode trocar.
+int desc_tmdb_pos_creditos(const char *json) {
+  // /movie com append_to_response traz "keywords": {"keywords": [...]}. O
+  // /tv/<id>/keywords solto traz {"id":..,"results":[...]}. "results" so vale
+  // sem a chave "keywords": num corpo /movie ele tambem existe em
+  // recommendations/release_dates, e os "id" dali sao de OUTROS filmes.
+  const char *anexo = json ? strstr(json, "\"keywords\"") : NULL;
+  const char *objeto = NULL;
+  const char *lista = NULL;
+  if (!json) return 0;
+  if (anexo) {   // so o valor da propria chave: "keywords":null nao pula para outra secao
+    objeto = anexo + 10;
+    while (*objeto == ' ' || *objeto == '\t' || *objeto == '\n' || *objeto == '\r') objeto++;
+    if (*objeto != ':') return 0;
+    objeto++;
+    while (*objeto == ' ' || *objeto == '\t' || *objeto == '\n' || *objeto == '\r') objeto++;
+    if (*objeto != '{') return 0;
+  }
+  if (anexo) {   // filme: keywords.keywords[]; serie com append: keywords.results[]
+    if (objeto) lista = js_array(objeto, NULL, "keywords");
+    if (!lista && objeto) lista = js_array(objeto, NULL, "results");
+  } else lista = js_array(json, NULL, "results");
+  if (!lista) return 0;
+  for (const char *p = lista; p && *p == '{'; p = js_prox(js_fim(p))) {
+    long id = (long)js_num(p, js_fim(p), "id", 0);
+    if (id == 179430 || id == 179431) return 1;
+  }
+  return 0;
+}
+
 #define DESC_MANTER_TITULO  1
 #define DESC_MANTER_SINOPSE 2
+#define DESC_MANTER_ELENCO 4
+static int tmdbElenco(const char *json, CatItem *d, int soVazios);
 static void fotosDoElenco(CatItem *d, const char *imdbSerie, int serie, int manter) {
   char url[400], *corpo;
   const char *chave;
@@ -358,19 +513,25 @@ static void fotosDoElenco(CatItem *d, const char *imdbSerie, int serie, int mant
   // SEM `if (!d->nElenco) return;`: esta funcao tambem traduz titulo e sinopse
   // (mais abaixo), e um /meta do Cinemeta sem elenco — comum em anime, em
   // titulo novo e em item raso — saia daqui antes de pedir o TMDB, deixando a
-  // sinopse em ingles num app em outro idioma. O elenco, que e o que precisa
-  // de nomes para casar, fica atras da propria guarda.
+  // sinopse em ingles num app em outro idioma.
   chave = desc_chave_tmdb();            // "" com a integracao desligada
-  if (!chave[0]) return;
+  if (!chave[0]) {
+    printf("[desc] elenco %s: sem chave do TMDB (integracao %s)\n", imdbSerie,
+           ajustes_tmdb_ligado() ? "ligada, chave vazia" : "desligada");
+    fflush(stdout);
+    return;
+  }
   snprintf(url, sizeof url, "%s/find/%s?api_key=%s&external_source=imdb_id",
            TMDB, imdbSerie, chave);
   corpo = rede_baixar(url, 20);
-  if (!corpo) return;
+  // Cada saida muda diz por que: elenco sem foto e sem clique (Samsung, Ted
+  // Lasso, 05/10/2026) chegou ao log sem nenhuma linha que apontasse a causa.
+  if (!corpo) { printf("[desc] elenco %s: /find do TMDB nao respondeu\n", imdbSerie); fflush(stdout); return; }
   { const char *vet = serie ? "tv_results" : "movie_results";
     const char *p = js_array(corpo, NULL, vet);
     if (p) idTmdb = (long)js_num(p, js_fim(p), "id", 0); }
   free(corpo);
-  if (!idTmdb) return;
+  if (!idTmdb) { printf("[desc] elenco %s: o TMDB nao conhece este id (%s)\n", imdbSerie, serie ? "tv" : "movie"); fflush(stdout); return; }
   d->tmdb = idTmdb;
 
   // TITULO E SINOPSE NO IDIOMA DA INTERFACE.
@@ -399,17 +560,29 @@ static void fotosDoElenco(CatItem *d, const char *imdbSerie, int serie, int mant
   // append_to_response=images: o logo do titulo no idioma configurado
   // substitui o do catalogo, que e quase sempre o ingles do Cinemeta.
   if (ajustes_tmdb_basico() || ajustes_tmdb_arte()) {
-    char incImg[64] = "";
+    char incImg[96] = "";
     if (ajustes_tmdb_arte())
       // include_image_language aceita a lista; "%.2s" de "pt-BR" da "pt".
       snprintf(incImg, sizeof incImg,
-               "&append_to_response=images&include_image_language=%.2s,null,en",
-               desc_tmdb_idioma());
+               "&append_to_response=images%s&include_image_language=%.2s,null,en",
+               serie ? "" : ",keywords", desc_tmdb_idioma());
+    else if (!serie) snprintf(incImg, sizeof incImg, "&append_to_response=keywords");
     snprintf(url, sizeof url, "%s/%s/%ld?api_key=%s&language=%s%s",
              TMDB, serie ? "tv" : "movie", idTmdb, chave, desc_tmdb_idioma(),
              incImg);
     corpo = rede_baixar(url, 20);
     if (corpo) {
+      if (!serie) d->posCreditos = desc_tmdb_pos_creditos(corpo);
+      else {
+        // /tv/{id}/keywords: o append_to_response de serie nao traz keywords.
+        // Uma viagem a mais, so na abertura do titulo, e o sinal fica no item
+        // (cat_atualizar_item_sem_abas abaixo publica o edit inteiro).
+        char uK[400];
+        char *cK;
+        snprintf(uK, sizeof uK, "%s/tv/%ld/keywords?api_key=%s", TMDB, idTmdb, chave);
+        cK = rede_baixar(uK, 20);
+        if (cK) { d->posCreditos = desc_tmdb_pos_creditos(cK); free(cK); }
+      }
       // Guarda o backdrop do proprio TMDB como uma variante separada. O
       // catalogo continua mandando na arte efetiva por padrao; a escolha do
       // hero pode pedir esta origem sem fazer outra consulta.
@@ -436,33 +609,43 @@ static void fotosDoElenco(CatItem *d, const char *imdbSerie, int serie, int mant
         // d->logo vira "resposta nao e imagem" no tex e o titulo fica sem a
         // arte para sempre (o FALHOU e lembrado). Visto no log da TV em
         // 21/09 com /f91b8uWsSaeGRYCj8k73uIFj9pu.svg.
+        // ORDEM (af_tmdb_logo): o do idioma, o ingles, o sem idioma, e
+        // nenhuma outra lingua. O do idioma e o PRIMEIRO da lista (o mais
+        // votado); era o ultimo, que mudava conforme a ordem da resposta.
         const char *im = strstr(corpo, "\"images\"");
         const char *imObj = im ? strchr(im, '{') : NULL;
         const char *imFim = imObj ? js_fim(imObj) : NULL;
-        const char *p = (imObj && imFim) ? js_array(imObj, imFim, "logos")
-                                         : NULL;
-        char base[3] = "", local[160] = "", neutro[160] = "", en[160] = "";
+        char base[3] = "", esc[160] = "", escIso[8] = "";
         snprintf(base, sizeof base, "%.2s", desc_tmdb_idioma());
-        while (p) {
-          const char *f = js_fim(p);
-          char iso[8] = "", fp[160] = "";
-          js_texto(p, f, "iso_639_1", iso, sizeof iso);
-          js_texto(p, f, "file_path", fp, sizeof fp);
-          if (fp[0] == '/' && !ehSvg(fp)) {
-            if      (!strcmp(iso, base)) snprintf(local,  sizeof local,  "%s", fp);
-            else if (!iso[0] && !neutro[0]) snprintf(neutro, sizeof neutro, "%s", fp);
-            else if (!strcmp(iso, "en") && !en[0]) snprintf(en, sizeof en, "%s", fp);
+        if (imObj && imFim) {
+          size_t tam = (size_t)(imFim - imObj) + 1;
+          char *imCopia = (char *)malloc(tam + 1);
+          if (imCopia) {
+            memcpy(imCopia, imObj, tam); imCopia[tam] = 0;
+            af_tmdb_logo(imCopia, base, esc, sizeof esc, escIso, sizeof escIso);
+            // O FUNDO do TMDB tambem: o backdrop_path da raiz pode ter letreiro
+            // em qualquer lingua (af_tmdb_fundo_padrao).
+            if (d->backdropTmdb[0]) {
+              const char *fp = strstr(d->backdropTmdb, "/t/p/w1280");
+              char ok[160];
+              if (fp && af_tmdb_fundo_padrao(imCopia, base, fp + 10, ok, sizeof ok))
+                snprintf(d->backdropTmdb, sizeof d->backdropTmdb,
+                         "https://image.tmdb.org/t/p/w1280%s", ok);
+              else if (fp) d->backdropTmdb[0] = 0;
+            }
+            free(imCopia);
           }
-          p = js_prox(f);
         }
         // "LOGO DO ADDON" (Ajustes, desligado de fabrica): o logo que o addon
         // mandou no catalogo fica; o do TMDB so entra em quem nao tinha.
         int manterAddon = ajustes_logo_addon() && d->origem[0] && logoAntes[0] &&
                           !ehSvg(logoAntes) && strcmp(logoAntes, d->poster);
-        { const char *esc = local[0] ? local : neutro[0] ? neutro : en;
-          if (esc[0] && !manterAddon)
+        { if (esc[0] && !manterAddon) {
             snprintf(d->logo, sizeof d->logo,
-                     "https://image.tmdb.org/t/p/w500%s", esc); }
+                     "https://image.tmdb.org/t/p/w500%s", esc);
+            snprintf(d->logoIdioma, sizeof d->logoIdioma, "%s", escIso);
+            snprintf(d->logoIdiomaUrl, sizeof d->logoIdiomaUrl, "%s", d->logo);
+          } }
         // LIMPA O QUE JA ESTAVA ENVENENADO: item do cache do catalogo pode ter
         // entrado com logo .svg (desta funcao antes do filtro, ou de um addon
         // que mande svg em `logo` — ver deMeta). Sem uso possivel, fora.
@@ -479,16 +662,37 @@ static void fotosDoElenco(CatItem *d, const char *imdbSerie, int serie, int mant
 
   // Elenco com foto e `tmdb_use_credits`. O `free` mora DENTRO do if porque o
   // watch/providers logo abaixo nao depende dele.
-  if (ajustes_tmdb_elenco() && d->nElenco > 0) {
+  if (ajustes_tmdb_elenco()) {
+    int semNomes = d->nElenco == 0;
+    const char *endpoint = "credits";
     // language= tambem aqui: o nome do PERSONAGEM (`character`) vem localizado
     // quando o TMDB tem (o mesmo pedido, so um parametro a mais).
     snprintf(url, sizeof url, "%s/%s/%ld/credits?api_key=%s&language=%s",
              TMDB, serie ? "tv" : "movie", idTmdb, chave, desc_tmdb_idioma());
     corpo = rede_baixar(url, 20);
-    if (corpo) {
-      desc_tmdb_elenco(corpo, d);
+    int casados = corpo ? tmdbElenco(corpo, d, (manter & DESC_MANTER_ELENCO) != 0) : 0;
+    // Anthologies can have cast only in the credits aggregated across episodes.
+    if (semNomes && serie && !d->nElenco) {
       free(corpo);
+      endpoint = "aggregate_credits";
+      snprintf(url, sizeof url, "%s/tv/%ld/aggregate_credits?api_key=%s&language=%s",
+               TMDB, idTmdb, chave, desc_tmdb_idioma());
+      corpo = rede_baixar(url, 20);
+      if (corpo) casados = tmdbElenco(corpo, d, (manter & DESC_MANTER_ELENCO) != 0);
     }
+    if (corpo) {
+      int comFoto = 0, k;
+      for (k = 0; k < d->nElenco; k++) comFoto += d->elenco[k].foto[0] != 0;
+      if (semNomes)
+        printf("[desc] elenco %s: %d nome(s) do TMDB (/%s), %d com foto\n", imdbSerie, d->nElenco, endpoint, comFoto);
+      else
+        printf("[desc] elenco %s: %d nome(s), %d casaram com o TMDB, %d com foto\n", imdbSerie, d->nElenco, casados, comFoto);
+      free(corpo);
+    } else printf("[desc] elenco %s: /%s do TMDB nao respondeu\n", imdbSerie, endpoint);
+    fflush(stdout);
+  } else {
+    printf("[desc] elenco %s: sem fotos (\"Elenco do TMDB\" desligado nos ajustes)\n", imdbSerie);
+    fflush(stdout);
   }
 
   // Onde assistir. Os campos provLogo/provNome existiam no CatItem e NUNCA
@@ -524,14 +728,34 @@ static void fotosDoElenco(CatItem *d, const char *imdbSerie, int serie, int mant
 // Definida adiante, junto do resto do parse de meta do Stremio; declarada aqui
 // porque a busca, logo abaixo, monta CatItem a partir da mesma resposta.
 static int deMeta(const char *ini, const char *fim, const char *tipo, CatItem *d);
+// "Ocultar nao lancados" (hideUnreleasedContent) nas fileiras da Home e na grade
+// de colecao / Ver tudo; ver nlanc.h. Desligado, nunca esconde nada.
+static int descOcultaNaoLancado(const CatItem *it) {
+  time_t t;
+  struct tm tmv;
+  if (!ajustes_ocultar_nao_lancados()) return 0;
+  t = time(NULL);
+  if (!gmtime_r(&t, &tmv)) return 0;
+  return nlanc_meta_futuro(it->meta, tmv.tm_year + 1900);
+}
+
+// O meta da rede nao tem a posicao local de playback. Reusar so a evidencia
+// do item canonico faz o filtro acompanhar o selo tambem sem historico remoto;
+// cat_visto continua dando precedencia a um "nao visto" explicito. A copia
+// por identidade e sob a trava dos publicadores, inclusive nos fios de rede.
+int desc_filme_visto(const CatItem *it) {
+  CatItem conhecido;
+  if (!it || strcmp(it->tipo, "movie")) return 0;
+  return cat_visto(it) ||
+         (it->imdb[0] && cat_copiar_por_id(it->imdb, it->tipo, &conhecido) &&
+          cat_visto(&conhecido));
+}
 
 // --- DE QUAL ADDON VEIO O ITEM (CatItem.origem) ------------------------------
 //
-// O detalhe pergunta a ficha (/meta) primeiro a quem PUBLICOU o titulo, e para
-// isso o item precisa lembrar quem foi. Guarda-se o "id" do manifesto — nunca a
-// base: ela carrega credencial (o Xperience embute um JWT no caminho) e o
-// CatItem vai inteiro para o cache em disco. Enquanto o manifesto nao foi lido
-// (id vazio) vale "#<hash da base>", que tambem nao expoe nada.
+// Detail requests metadata from the instance that published the title.
+// Store the transport hash, never credentials or a shared manifest ID.
+// addonDaOrigem also accepts manifest IDs from existing disk caches.
 static unsigned hashBaseAddon(const char *b) {
   unsigned h = 2166136261u;
   for (; b && *b; b++) h = (h ^ (unsigned char)*b) * 16777619u;
@@ -541,7 +765,23 @@ static unsigned hashBaseAddon(const char *b) {
 // Cinemeta e "origem" tambem, mas nao e um addon da lista do usuario (ou e, com
 // outro nome): so o texto "cinemeta" na base o identifica.
 static int baseEhCinemeta(const char *base) {
-  return base && strstr(base, "cinemeta") != NULL;
+  return base && (strstr(base, "cinemeta") != NULL ||
+                  strstr(base, "catalog.nuvio.tv") != NULL);
+}
+
+// #303-bis (Cinemeta ainda aparecia na busca): com "Buscar no Cinemeta" desligado,
+// o que e do addon Cinemeta sai da busca em TODO lugar, nao so dos alvos de
+// rede: tambem das fileiras locais (busca.c, spotlight.c), que varrem as
+// fileiras da Home. Casa pela base (o Cinemeta e "cinemeta" na URL), sem tocar
+// no catalogo do Nuvio.
+int desc_busca_base_oculta(const char *base) {
+  char b[NV_ADDON_URL_MAX];
+  size_t i;
+  if (ajustes_busca_cinemeta() || !base || !base[0]) return 0;
+  for (i = 0; base[i] && i + 1 < sizeof b; i++)
+    b[i] = (char)((base[i] >= 'A' && base[i] <= 'Z') ? base[i] + 32 : base[i]);
+  b[i] = 0;
+  return strstr(b, "cinemeta") != NULL;
 }
 
 static void origemDaBase(const char *base, char *dst, size_t n) {
@@ -554,9 +794,7 @@ static void origemDaBase(const char *base, char *dst, size_t n) {
   for (i = 0; i < k; i++) {
     const char *b = addons_base(i);
     if (b && !strcmp(b, base)) {
-      const char *id = addons_id_manifesto(i);
-      if (id && id[0]) snprintf(dst, n, "%s", id);
-      else snprintf(dst, n, "#%08x", hashBaseAddon(base));
+      snprintf(dst, n, "#%08x", hashBaseAddon(base));
       return;
     }
   }
@@ -621,14 +859,11 @@ static void urlEscapar(const char *s, char *dst, size_t tam) {
 
 static int lerBusca(const char *tipo, const char *termo, CatItem *saida,
                     int max) {
-  char url[500], esc[300];
   char *corpo;
   const char *p;
   int n = 0;
-  urlEscapar(termo, esc, sizeof esc);
-  snprintf(url, sizeof url, "%s/catalog/%s/top/search=%s.json",
-           CINEMETA, tipo, esc);
-  corpo = rede_baixar(url, 20);
+  corpo = metaprov_busca_com(tipo, termo, METAPROV_NUVIO_S, 20, metaprov_get_rede,
+                             NULL, NULL);
   if (!corpo) return 0;
   p = js_array(corpo, NULL, "metas");
   while (p && n < max) {
@@ -650,15 +885,45 @@ static int lerBusca(const char *tipo, const char *termo, CatItem *saida,
 // Antes so o Cinemeta era consultado, e era isso que o dono via como "nao ta
 // procurando em todos os catalogos" — porque de fato nao estava.
 #define BUSCA_ALVOS  16
-#define BUSCA_POR_ALVO 12          // uma fileira por alvo, 12 cabem na tela
+#define BUSCA_POR_ALVO DESC_BUSCA_POR_ALVO
 #define BUSCA_FIOS    3            // quantos alvos em voo ao mesmo tempo
 
+// O PEDIDO A UM ADDON COUBE NO BUFFER? `w` e o retorno do snprintf que o
+// montou (addonurl.h). Pedido cortado nao sai: o addon responderia a OUTRA URL
+// como se fosse a certa. O log leva o nome do addon e o tamanho, nunca a URL —
+// nela viaja a chave de debrid.
+static int descPedidoCoube(const char *base, int w, size_t tam) {
+  const char *nome = "";
+  int i;
+  if (w >= 0 && (size_t)w < tam) return 1;
+  for (i = 0; base && i < addons_n(); i++)
+    if (!strcmp(addons_base(i), base)) { nome = addons_nome(i); break; }
+  return nv_addon_pedido_coube(nome, w, tam);
+}
+
+// Catalog type and id are path segments, including ids containing '/' or '?'.
+// Keep extras separate and preserve the installed addon's query via nv_addon_url.
+static void catalogoExtras(const char *base, const char *tipo, const char *id,
+                           const char *extra, char *saida, size_t n);
+static int catalogoUrl(char *url, size_t n, const char *base, const char *tipo,
+                       const char *id, const char *extra) {
+  char tipoUrl[24], idUrl[288], extras[1024];
+  catalogoExtras(base, tipo, id, extra, extras, sizeof extras);
+  if (!nv_addon_id(tipoUrl, sizeof tipoUrl, tipo) ||
+      !nv_addon_id(idUrl, sizeof idUrl, id)) { if (n) url[0] = 0; return -1; }
+  return nv_addon_url(url, n, base, "/catalog/%s/%s%s%s.json", tipoUrl, idUrl,
+                      extras[0] ? "/" : "", extras);
+}
+
 typedef struct {
-  char base[300];
+  // NV_ADDON_URL_MAX e nao 300: com 300 a base do Xperience (367) e a do Comet
+  // (870) eram cortadas e a busca perguntava a outra URL, em silencio (#201).
+  char base[NV_ADDON_URL_MAX];
   char tipo[8];
   char id[96];
   char titulo[96];
   char addon[64];
+  int  nuvio;           // 1 = catalogo do Nuvio, com o Cinemeta de reserva
 } AlvoBusca;
 
 static AlvoBusca alvos[BUSCA_ALVOS];
@@ -673,26 +938,42 @@ static struct {
   int     geracao;
 } resAlvo[BUSCA_ALVOS];
 
+static NvPerfilSessao buscaSessao;
 static int  geracao;            // sobe a cada termo novo
+static int  respGeracao = -1;   // geracao da ultima resposta aceita (desc_busca_chegou)
 static int  proximoAlvo;        // fila de trabalho: proximo indice a consultar
 static int  fiosVivos;
 
 void desc_alvos_busca_zerar(void) {
   pthread_mutex_lock(&buscaTrava);
-  // O Cinemeta entra SEMPRE e primeiro: e a unica fonte que nao depende de
-  // addon nenhum, entao a busca continua funcionando numa instalacao limpa.
+  // O catalogo do Nuvio entra SEMPRE e primeiro (o Cinemeta so responde por
+  // ele, quando ele falha): e a fonte que nao depende de addon nenhum, entao a
+  // busca continua funcionando numa instalacao limpa.
   nAlvos = 0;
   { int t; const char *tt[2] = { "movie", "series" };
     const char *rot[2] = { "Filmes", "Séries" };
     for (t = 0; t < 2; t++) {
       AlvoBusca *a = &alvos[nAlvos++];
-      snprintf(a->base,  sizeof a->base,  "%s", CINEMETA);
+      snprintf(a->base,  sizeof a->base,  "%s", METAPROV_NUVIO_HOST);
       snprintf(a->tipo,  sizeof a->tipo,  "%s", tt[t]);
-      snprintf(a->id,    sizeof a->id,    "%s", "top");
+      snprintf(a->id,    sizeof a->id,    "%s", "popular");
       snprintf(a->titulo,sizeof a->titulo,"%s", rot[t]);
-      snprintf(a->addon, sizeof a->addon, "%s", "Cinemeta");
+      snprintf(a->addon, sizeof a->addon, "%s", "Nuvio");
+      a->nuvio = 1;
     } }
   memset(resAlvo, 0, sizeof resAlvo);
+  // ESQUECE O TERMO JA PEDIDO. Sem isto, depois que a lista de addons muda (um
+  // addon novo, o ciclo de sync) os resultados eram apagados aqui mas
+  // desc_buscar(o mesmo texto) voltava cedo por "termo igual" e nao consultava
+  // os alvos novos: a busca ficava so com as pessoas, que vem do TMDB por outro
+  // caminho (dono, 05/10: "o spotlight so ta achando pessoas"). Subir a geracao
+  // tambem descarta o que os fios ainda estiverem trazendo dos alvos antigos,
+  // cujos indices ja nao valem.
+  buscaPedido[0] = 0;
+  buscaTermo[0] = 0;
+  proximoAlvo = 0;
+  geracao++;
+  buscaSessao = nv_perfil_sessao_ler();
   pthread_mutex_unlock(&buscaTrava);
 }
 
@@ -706,6 +987,7 @@ void desc_alvo_busca(const char *base, const char *tipo, const char *id,
     snprintf(a->id,     sizeof a->id,     "%s", id ? id : "");
     snprintf(a->titulo, sizeof a->titulo, "%s", titulo ? titulo : "");
     snprintf(a->addon,  sizeof a->addon,  "%s", addon ? addon : "");
+    a->nuvio = 0;
   } else {
     // Teto cheio: o alvo NAO sera consultado. Antes era em silencio, e quem
     // tem addons demais via a busca "nao achar" o titulo local sem nenhuma
@@ -719,76 +1001,121 @@ void desc_alvo_busca(const char *base, const char *tipo, const char *id,
 // Consulta UM alvo. Devolve quantos itens leu.
 static int consultarAlvo(const AlvoBusca *a, const char *termo,
                          CatItem *saida, int max) {
-  char url[600], esc[300];
+  char url[NV_ADDON_PEDIDO_MAX], esc[300], extra[320];
   char *corpo;
   const char *p;
   int n = 0;
-  urlEscapar(termo, esc, sizeof esc);
-  snprintf(url, sizeof url, "%s/catalog/%s/%s/search=%s.json",
-           a->base, a->tipo, a->id, esc);
   // 6 s por alvo, como o web (SEARCH_CATALOG_TIMEOUT 6500). Addon lento nao
   // trava a tela: a fileira dele so aparece quando chegar, e as outras ja
-  // estao la.
-  corpo = rede_baixar(url, 6);
+  // estao la. O alvo do Nuvio tem 5 s e, se falhar, o Cinemeta mais 6.
+  // #231: com "Buscar no Cinemeta" desligado, nem o add-on Cinemeta nem a reserva
+  // do catalogo do Nuvio (seg_cine < 0) respondem.
+  if (a->nuvio && ajustes_busca_nuvio() == 2) return 0;   // #311: Nuvio fora da busca
+  if (!a->nuvio && !ajustes_busca_cinemeta() &&
+      (baseEhCinemeta(a->base) || desc_busca_base_oculta(a->base) ||
+       !strcasecmp(a->addon, "cinemeta"))) return 0;
+  if (a->nuvio) {
+    corpo = metaprov_busca_com(a->tipo, termo, METAPROV_NUVIO_S,
+                               ajustes_busca_cinemeta() ? 6 : -1,
+                               metaprov_get_rede, NULL, NULL);
+  } else {
+    urlEscapar(termo, esc, sizeof esc);
+    if (addons_base_desligada(a->base)) return 0;
+    snprintf(extra, sizeof extra, "search=%s", esc);
+    if (!descPedidoCoube(a->base, catalogoUrl(url, sizeof url, a->base,
+                                           a->tipo, a->id, extra), sizeof url)) return 0;
+    corpo = rede_baixar(url, 6);
+  }
   if (!corpo) return 0;
   p = js_array(corpo, NULL, "metas");
   { char orig[96];
     origemDaBase(a->base, orig, sizeof orig);   // o resultado abre pelo addon que o achou
-    while (p && n < max) {
+    // #555: o TMDB ordena por popularidade e a serie de nome IGUAL ao termo
+    // ("Bigg Boss", 20 temporadas) vinha em 14o, atras do corte de `max`. Le a
+    // resposta toda e leva os de titulo igual ao termo para a frente (estavel).
+    CatItem *it = malloc(sizeof *it);
+    int exatos = 0;
+    while (it && p) {
       const char *f = js_fim(p);
-      if (deMeta(p, f, a->tipo, &saida[n])) {
-        snprintf(saida[n].origem, sizeof saida[n].origem, "%s", orig);
-        n++;
+      if (deMeta(p, f, a->tipo, it)) {
+        int exato = exatos < max && !strcasecmp(it->titulo, termo);
+        snprintf(it->origem, sizeof it->origem, "%s", orig);
+        if (exato) {
+          int fim = n < max ? n : max - 1;
+          memmove(&saida[exatos + 1], &saida[exatos], sizeof *saida * (size_t)(fim - exatos));
+          saida[exatos++] = *it;
+          if (n < max) n++;
+        } else if (n < max) saida[n++] = *it;
       }
       p = js_prox(f);
-    } }
+    }
+    free(it); }
   free(corpo);
   return n;
 }
 
 static void *fioBusca(void *arg) {
+  // O lote cabe na memoria limitada da busca, sem consumir quase toda a
+  // pilha de 512 KiB de um fio no macOS. Reutilizado ate a fila esvaziar.
+  CatItem *achados = malloc(sizeof(CatItem) * BUSCA_POR_ALVO);
   (void)arg;
+  if (!achados) {
+    pthread_mutex_lock(&buscaTrava);
+    fiosVivos--;
+    pthread_mutex_unlock(&buscaTrava);
+    return NULL;
+  }
   for (;;) {
     AlvoBusca a;
     char termo[96];
     int meu, g;
-    CatItem achados[BUSCA_POR_ALVO];
     int n;
 
     pthread_mutex_lock(&buscaTrava);
     if (proximoAlvo >= nAlvos || !buscaPedido[0]) {
       fiosVivos--;
       pthread_mutex_unlock(&buscaTrava);
+      free(achados);
       return NULL;
     }
     meu = proximoAlvo++;
     a = alvos[meu];
     g = geracao;
+    NvPerfilSessao sessao = buscaSessao;
     snprintf(termo, sizeof termo, "%s", buscaPedido);
     pthread_mutex_unlock(&buscaTrava);
 
+    if (!termo[0] || !descSessaoVincular(sessao)) continue;
     n = consultarAlvo(&a, termo, achados, BUSCA_POR_ALVO);
 
     pthread_mutex_lock(&buscaTrava);
     // Geracao velha = o dono digitou outra coisa enquanto isto voltava. O
     // resultado nasceu obsoleto; descartar e mais barato que mostrar e trocar.
-    if (g == geracao) {
+    if (g == geracao && descSessaoAtual()) {
       memcpy(resAlvo[meu].itens, achados, sizeof(CatItem) * (size_t)n);
       resAlvo[meu].n = n;
       resAlvo[meu].geracao = g;
+      respGeracao = g;
       snprintf(buscaTermo, sizeof buscaTermo, "%s", termo);
     }
     pthread_mutex_unlock(&buscaTrava);
   }
 }
 
+static int cinemetaVisto = 1;   // ultimo valor de ajustes_busca_cinemeta()/_nuvio() visto aqui (#311: junta os dois)
+
 void desc_buscar(const char *termo) {
   int k, faltam;
   if (!termo) return;
   pthread_mutex_lock(&buscaTrava);
+  // Mudar "Buscar no Cinemeta" com a mesma palavra ainda guardada nao pode
+  // devolver o resultado de antes: o interruptor invalida o termo pedido.
+  { int cine = (ajustes_busca_cinemeta() ? 1 : 0) | (ajustes_busca_nuvio() == 2 ? 2 : 0);
+    if (cine != cinemetaVisto) { cinemetaVisto = cine; buscaPedido[0] = 0; buscaTermo[0] = 0; } }
   if (!strcmp(termo, buscaPedido)) { pthread_mutex_unlock(&buscaTrava); return; }
   snprintf(buscaPedido, sizeof buscaPedido, "%s", termo);
   geracao++;
+  buscaSessao = nv_perfil_sessao_ler();
   proximoAlvo = 0;
   // Zera a contagem, nao os itens: a tela pode estar desenhando o quadro
   // corrente e ler item pela metade seria pior que uma fileira a menos.
@@ -807,6 +1134,16 @@ void desc_buscar(const char *termo) {
       pthread_detach(t);
     }
   }
+}
+
+// Ja chegou ALGUMA resposta para este termo? Ate la a tela mantem as fileiras
+// do termo anterior (sem piscar); depois, so as do termo novo.
+int desc_busca_chegou(const char *termo) {
+  int r;
+  pthread_mutex_lock(&buscaTrava);
+  r = termo && !strcmp(termo, buscaTermo) && respGeracao == geracao;
+  pthread_mutex_unlock(&buscaTrava);
+  return r;
 }
 
 int desc_busca_geracao(void) {
@@ -836,6 +1173,30 @@ const char *desc_busca_alvo_addon(int alvo) {
   return (alvo >= 0 && alvo < nAlvos) ? alvos[alvo].addon : "";
 }
 
+int desc_busca_alvo_nuvio(int alvo) {
+  return (alvo >= 0 && alvo < nAlvos) ? alvos[alvo].nuvio : 0;
+}
+
+// #311: quantas FONTES (nomes de addon distintos) a busca consulta de fato, com
+// "Nuvio" e "Cinemeta" ja descontados quando desligados. Com uma so, o nome da
+// fonte sob o grupo e ruido: a tela o omite. Conta alvos, nao resultados, para
+// o rotulo nao aparecer e sumir enquanto as respostas chegam.
+int desc_busca_n_fontes(void) {
+  int i, j, n = 0;
+  for (i = 0; i < nAlvos; i++) {
+    const AlvoBusca *a = &alvos[i];
+    int repetida = 0;
+    if (a->nuvio ? ajustes_busca_nuvio() == 2
+                 : (!ajustes_busca_cinemeta() &&
+                    (baseEhCinemeta(a->base) || desc_busca_base_oculta(a->base) ||
+                     !strcasecmp(a->addon, "cinemeta")))) continue;
+    for (j = 0; j < i && !repetida; j++)
+      if (!strcasecmp(alvos[j].addon, a->addon)) repetida = 1;
+    if (!repetida) n++;
+  }
+  return n;
+}
+
 int desc_busca_alvo_item(int alvo, int i, CatItem *dst) {
   int ok = 0;
   pthread_mutex_lock(&buscaTrava);
@@ -859,10 +1220,25 @@ static int buscando;
 // Identidade da montagem em voo. Troca de conta/perfil/config invalida o fio
 // antigo antes que ele publique ou grave um snapshot privado no contexto novo.
 static volatile unsigned montagemGeracao;
+static NvPerfilSessao montagemSessao;
+// 0 = nao espere; 1 = espere (perfil ainda nao escolhido); 2 = espere, com prazo.
+static int (*esperaAddons)(void);
+void desc_espera_addons_definir(int (*f)(void)) { esperaAddons = f; }
 // Lido pelo fio de montagem no fim do ciclo e escrito pelo laco principal.
 // `volatile` porque sao fios diferentes; nao ha corrida real de valor — o pior
 // caso e uma remontagem a mais, que e barata perto de perder o pedido.
 static volatile int repetirAoFim;
+// DEBOUNCE (descdebounce.h): quando a ultima volta comecou e se ha inicio agendado.
+static NvDescDeb descDeb;
+static void descIniciarAdiado(void);
+// Pedido da PESSOA (desc_repetir: troca de perfil, idioma, addons, ordem) nao
+// passa pelo minimo entre voltas: condena a volta no ar e a seguinte comeca ja.
+// Sem isso a volta do perfil que saiu (recente, nao condenada) publicava as
+// fileiras dele na Home do perfil novo (#294) e o pedido esperava ate 10 s.
+static volatile int descPedidoPessoa;
+// Sob listaTrava (junto com buscando e descDeb): o fio adiado leva a marca de
+// quando foi agendado e confere contra esta para saber se ja foi atendido.
+static volatile unsigned descVoltas;
 // GERACAO DO PEDIDO DE REMONTAGEM, e a razao dela existir esta medida.
 //
 // `repetirAoFim` sozinho nao distingue duas coisas muito diferentes: um pedido
@@ -892,6 +1268,16 @@ static unsigned geracaoLida;
 // completa.
 static pthread_mutex_t listaTrava = PTHREAD_MUTEX_INITIALIZER;
 static int listaLidaNaVolta;
+// Reset creates a pending opening; sync releases it only after the target
+// addon cache is installed. main.c remains the first bootstrap dispatcher.
+static NvPerfilSessao aberturaSessao;
+static int aberturaPendente, aberturaFontesProntas, descobertaInicializada;
+static unsigned long long aberturaRetentarEm;
+static void descTentarAbertura(void);
+// Fim de volta: `buscando` cai sob a mesma trava em que desc_iniciar o testa e marca.
+static void buscandoSoltar(void) {
+  pthread_mutex_lock(&listaTrava); buscando = 0; pthread_mutex_unlock(&listaTrava);
+}
 // O QUE ESTA NA TELA E PARCIAL: publicado em partes por uma volta que nao
 // chegou ao fim (condenada no meio, ou ainda no ar). A volta seguinte continua
 // publicando em partes por cima disso em vez de montar em silencio: sem isto,
@@ -903,7 +1289,7 @@ static int catalogosFora;
 // Quantos catalogos NAO DESLIGADOS o teto impediu de pedir na ultima montagem,
 // sem o clamp de catalogosFora. Ver o uso em desc_remontar_fileiras.
 static int catalogosNaoPedidos;
-static pthread_t fio, fioEp;
+static pthread_t fioEp;
 static int epItem = -1, epTemp, fioEpVivo;
 
 int desc_buscando(void) {
@@ -924,10 +1310,19 @@ int desc_buscando(void) {
 //
 // Antes disto tudo que nao fosse "series" era FILME, e um canal de TV ao vivo
 // aparecia como "Filme" na linha de genero e "- Filme" no titulo da fileira
-// (issue #37). Os tipos que o Stremio usa para canal sao `channel` e `tv`; os
-// dois chegam nos addons do dono.
+// (issue #37). A lista e a MESMA do guia e do leitor de manifesto de
+// addons.c — "channel" e "tv" sao os do Stremio, e "channels"/"live"/
+// "iptv" sao os que addons de lista usam: um manifesto MISTO (filme+serie+
+// canal, como o do M3U Mux e os de IPTV caseiros) declara cada catalogo com
+// o tipo dele, e um que venha como "live" tem de ir para o guia, nao virar
+// fileira de filmes quebrada.
 static int ehCanal(const char *tipo) {
-  return tipo && (!strcmp(tipo, "channel") || !strcmp(tipo, "tv"));
+  static const char *tipos[] = { "channel", "tv", "channels", "live", "iptv" };
+  int i;
+  if (!tipo || !tipo[0]) return 0;
+  for (i = 0; i < (int)(sizeof tipos / sizeof tipos[0]); i++)
+    if (!strcasecmp(tipo, tipos[i])) return 1;
+  return 0;
 }
 static const char *rotuloTipoSing(const char *tipo) {
   if (ehCanal(tipo)) return "Canal";
@@ -947,17 +1342,18 @@ static int deMeta(const char *ini, const char *fim, const char *tipo, CatItem *d
   // primeira chave de qualquer nivel: o card mostrava o cartaz do TMDB, sem a
   // nota, so nos titulos que vinham do cache dele. A raiz manda; o aninhado so
   // entra quando a raiz nao tem o campo (era o comportamento de antes).
-  if (!js_texto_raiz_em(ini, fim, "poster", d->poster, sizeof d->poster) &&
-      !js_texto(ini, fim, "poster", d->poster, sizeof d->poster)) return 0;
-  if (!js_texto_raiz_em(ini, fim, "background", d->backdrop, sizeof d->backdrop))
-    js_texto(ini, fim, "background", d->backdrop, sizeof d->backdrop);
+  //
+  // Poster comprido demais ate para NV_ARTE_URL_MAX (#361): o titulo fica, sem cartaz
+  // e com a linha no registro — sumir da fileira seria o defeito calado.
+  if (!urlArteInteira(ini, fim, "poster", 0, d->poster, sizeof d->poster, d->titulo))
+    return 0;
+  urlArteInteira(ini, fim, "background", 0, d->backdrop, sizeof d->backdrop, d->titulo);
   snprintf(d->backdropCatalogo, sizeof d->backdropCatalogo, "%s", d->backdrop);
   if (strstr(d->backdrop, "image.tmdb.org/t/p/"))
     snprintf(d->backdropTmdb, sizeof d->backdropTmdb, "%s", d->backdrop);
   if (strstr(d->backdrop, "media.trakt.tv/"))
     snprintf(d->backdropTrakt, sizeof d->backdropTrakt, "%s", d->backdrop);
-  if (!js_texto_raiz_em(ini, fim, "logo", d->logo, sizeof d->logo))
-    js_texto(ini, fim, "logo", d->logo, sizeof d->logo);
+  urlArteInteira(ini, fim, "logo", 0, d->logo, sizeof d->logo, d->titulo);
   // LOGO IGUAL AO POSTER NAO E LOGO. MEDIDO no catalogo gravado da C9 em 18/09:
   // o Xperience manda, para "O Fim da Rua", o MESMO arquivo do TMDB
   // (4kfDP13cYwCx55YP2gLGtcUFZlC.jpg) em `poster` e em `logo` — e um addon
@@ -988,7 +1384,12 @@ static int deMeta(const char *ini, const char *fim, const char *tipo, CatItem *d
                (int)(o - d->backdrop), d->backdrop, o + 14);
       snprintf(d->backdrop, sizeof d->backdrop, "%s", novo);
     } }
-  if (!d->backdrop[0]) snprintf(d->backdrop, sizeof d->backdrop, "%s", d->poster);
+  // So se o poster CABE no fundo (512 contra 2048, #361): o cartaz de ~600
+  // caracteres entrava aqui cortado, e o card deitado, o destaque e a busca
+  // pedem `backdrop` antes do poster — o 404 era deles. Sem fundo, todos ja
+  // caem no metahub pelo id e depois no proprio poster inteiro.
+  if (!d->backdrop[0] && strlen(d->poster) < sizeof d->backdrop)
+    snprintf(d->backdrop, sizeof d->backdrop, "%s", d->poster);
   // A variante de catálogo é a mesma arte que alimenta o card, já com a
   // dimensão segura para a TV. O TMDB/Trakt ficam em campos separados quando
   // chegam por seus próprios caminhos.
@@ -996,8 +1397,10 @@ static int deMeta(const char *ini, const char *fim, const char *tipo, CatItem *d
   if (d->backdropTmdb[0] && strstr(d->backdropTmdb, "image.tmdb.org/t/p/"))
     snprintf(d->backdropTmdb, sizeof d->backdropTmdb, "%s", d->backdrop);
 
-  if (!js_texto(ini, fim, "imdb_id", d->imdb, sizeof d->imdb))
-    js_texto(ini, fim, "id", d->imdb, sizeof d->imdb);
+  // Preserve the catalog identity used for streams and saved progress (#524).
+  // Provider mappings (including nested imdb_id fields) are not that identity.
+  if (!js_texto_raiz_em(ini, fim, "id", d->imdb, sizeof d->imdb) || !d->imdb[0])
+    js_texto_raiz_em(ini, fim, "imdb_id", d->imdb, sizeof d->imdb);
   snprintf(d->tipo, sizeof d->tipo, "%s", tipo);
   // O TIPO DO PROPRIO ITEM VENCE O DO CATALOGO. Catalogo de anime do
   // AIOMetadata declara `type: "anime"` (simkl.trending.anime, mal.*), e o app
@@ -1062,8 +1465,12 @@ static int deMeta(const char *ini, const char *fim, const char *tipo, CatItem *d
   js_texto(ini, fim, "releaseInfo", v, sizeof v);
   { char dur[24] = "";
     js_texto(ini, fim, "runtime", dur, sizeof dur);
-    // "2024–" vira "2024": o travessao de serie em andamento polui a linha.
+    metaprov_duracao(dur, sizeof dur);   // "148m" do catalogo do Nuvio -> "148 min"
+    // "2024–" vira "2024": o travessao de serie em andamento polui a linha. O
+    // catalogo do Nuvio usa hifen ASCII ("2011-2019"): mesmo corte, so depois
+    // de um ano de 4 digitos (data ISO inteira nao chega aqui).
     { char *tr = strstr(v, "\xe2\x80\x93"); if (tr) *tr = 0; }
+    if (v[0] >= '0' && v[0] <= '9' && v[1] && v[2] && v[3] && v[4] == '-') v[4] = 0;
     snprintf(d->meta, sizeof d->meta, "%.20s%s%.20s", v,
              (v[0] && dur[0]) ? "  \xc2\xb7  " : "", dur); }
   js_texto(ini, fim, "description", d->sinopse, sizeof d->sinopse);
@@ -1091,12 +1498,14 @@ static int deMeta(const char *ini, const char *fim, const char *tipo, CatItem *d
 // era exatamente por isso que nao dava para dizer o que falhou num arranque.
 static int lerCatalogo(const char *base, const char *tipo, const char *id,
                        CatItem *saida, int max, int quantos, int *respondeu) {
-  char url[900];
+  char url[NV_ADDON_PEDIDO_MAX];
   char *corpo;
   const char *p;
   int n = 0;
   if (respondeu) *respondeu = 0;
-  snprintf(url, sizeof url, "%s/catalog/%s/%s.json", base, tipo, id);
+  if (addons_base_desligada(base)) return 0;   // desligado na conta: nenhuma rede
+  if (!descPedidoCoube(base, catalogoUrl(url, sizeof url, base, tipo, id, ""),
+                       sizeof url)) return 0;
   // 8 s e nao 25: um addon fora do ar segurava um dos tres fios por 25 s, e a
   // fileira dele atrasa TODAS as seguintes porque a montagem caminha em ordem.
   // E a mesma licao ja registrada no cache de texturas — la o timeout caiu de
@@ -1110,7 +1519,7 @@ static int lerCatalogo(const char *base, const char *tipo, const char *id,
     origemDaBase(base, orig, sizeof orig);      // ver CatItem.origem
     while (p && n < max && n < quantos) {
       const char *f = js_fim(p);
-      if (deMeta(p, f, tipo, &saida[n])) {
+      if (deMeta(p, f, tipo, &saida[n]) && !descOcultaNaoLancado(&saida[n])) {
         snprintf(saida[n].origem, sizeof saida[n].origem, "%s", orig);
         n++;
       }
@@ -1118,6 +1527,73 @@ static int lerCatalogo(const char *base, const char *tipo, const char *id,
     } }
   free(corpo);
   return n;
+}
+
+// #366: o prefixo original continua no catalogo canonico e no cache; so a
+// reserva seguinte pula os vistos, que antes nem cabiam na fileira da Home.
+// Sao ate 24 originais mais ate seis suplementos (~2,1 MB extras em 20
+// fileiras). A reserva tem teto de RAM, alem do teto de slots CAT_MAX.
+// Varremos a resposta inteira: 60 vistos no inicio de uma pagina de 100 nao
+// impedem os 40 seguintes de preencher a tela. Um addon que declara skip pode
+// ceder uma pagina a mais, usando a contagem CRUA recebida como proximo skip.
+#define HOME_VISTOS_MAX (DESC_ITENS_POR_FILEIRA + 6)
+static int lerCatalogoHomeParcial(const char *base, const char *tipo, const char *id,
+                           CatItem *saida, int max, int quantos,
+                           int paginavel, int *respondeu,
+                           int (*primeira)(const CatItem *, int, void *), void *usuario) {
+  int n = 0, visiveis = 0, skip = 0;
+  char orig[96];
+  if (!ajustes_ocultar_filmes_vistos() || strcmp(tipo, "movie"))
+    return lerCatalogo(base, tipo, id, saida, max, quantos, respondeu);
+  if (max > HOME_VISTOS_MAX) max = HOME_VISTOS_MAX;
+  if (respondeu) *respondeu = 0;
+  if (addons_base_desligada(base)) return 0;
+  origemDaBase(base, orig, sizeof orig);
+  for (int pagina = 0; pagina < (paginavel ? 2 : 1); pagina++) {
+    char url[NV_ADDON_PEDIDO_MAX], extra[32] = "", *corpo;
+    int w, raw = 0, novos = 0;
+    if (skip) snprintf(extra, sizeof extra, "skip=%d", skip);
+    w = catalogoUrl(url, sizeof url, base, tipo, id, extra);
+    if (!descPedidoCoube(base, w, sizeof url)) break;
+    corpo = rede_baixar(url, 8);
+    if (!corpo) break;
+    if (respondeu && !pagina) *respondeu = 1;
+    for (const char *p = js_array(corpo, NULL, "metas"); p; p = js_prox(js_fim(p))) {
+      const char *f = js_fim(p);
+      raw++;
+      if (n >= max || visiveis >= quantos) continue;
+      if (!deMeta(p, f, tipo, &saida[n]) || descOcultaNaoLancado(&saida[n])) continue;
+      int repetido = 0;
+      // O prefixo conserva ate repeticoes que o addon ja mandava. So a
+      // reserva adicional rejeita ids repetidos, para nao preencher com o
+      // mesmo cartaz nem continuar perseguindo uma pagina que ignora skip.
+      int suplemento = pagina > 0 || n >= DESC_ITENS_POR_FILEIRA;
+      if (suplemento) for (int i = 0; i < n; i++)
+        if (saida[n].imdb[0] && !strcmp(saida[i].imdb, saida[n].imdb) &&
+            !strcmp(saida[i].tipo, saida[n].tipo)) { repetido = 1; break; }
+      if (repetido) continue;
+      saida[n].ranking = skip + raw;
+      int visto = desc_filme_visto(&saida[n]);
+      if (suplemento && visto) continue;
+      snprintf(saida[n].origem, sizeof saida[n].origem, "%s", orig);
+      if (!visto) visiveis++;
+      n++; novos++;
+    }
+    free(corpo);
+    if (!raw || !novos || n >= max || visiveis >= quantos) break;
+    // O montador pode largar um GET lento. A primeira resposta boa fica
+    // disponivel em memoria IMUTAVEL antes da tentativa opcional; assim o
+    // timeout dela nao apaga a fileira que ja respondeu.
+    if (!pagina && paginavel && primeira && !primeira(saida, n, usuario)) break;
+    skip += raw;
+  }
+  return n;
+}
+static int lerCatalogoHome(const char *base, const char *tipo, const char *id,
+                           CatItem *saida, int max, int quantos,
+                           int paginavel, int *respondeu) {
+  return lerCatalogoHomeParcial(base, tipo, id, saida, max, quantos,
+                               paginavel, respondeu, NULL, NULL);
 }
 
 // --- fileiras da home: catalogos declarados pelos addons ---------------------
@@ -1139,11 +1615,12 @@ static int lerCatalogo(const char *base, const char *tipo, const char *id,
 // SOZINHO tomando tudo; o que ela nao resolve e o TOTAL — com muitos addons
 // modestos (nenhum sozinho estoura a cota) a SOMA dos catalogos legitimos
 // passava de 256 e os ultimos, por addon, eram cortados mesmo cabendo de
-// sobra na memoria (Decl tem ~950 bytes; 512 custam ~475 KB, uma unica vez,
-// por ciclo). 512 nao e "o numero certo" — nao ha um; e so mais folga antes de
+// sobra na memoria. Cada declaracao guarda tambem a propria URL: o vetor
+// persistente ocupa cerca de 1,4 MiB, sem depender da pilha de lerManifesto.
+// 512 nao e "o numero certo" — nao ha um; e so mais folga antes de
 // o mesmo corte voltar a acontecer com addons de sobra.
 #define DECL_MAX 512
-// Quantos itens cada fileira mostra. A home desenha no maximo MAX_CARDS (12) e
+// Quantos itens cada fileira mostra. A home desenha no maximo MAX_CARDS (41) e
 // buscar mais e trafego que ninguem ve.
 #define MAX_POR_FILEIRA DESC_ITENS_POR_FILEIRA   // ver descoberta.h (#163)
 
@@ -1168,11 +1645,12 @@ typedef struct {
   char titulo[96];
   char tipo[8];
   char id[96];
-  const char *base;
+  char base[NV_ADDON_URL_MAX]; // copia propria; a declaracao sobrevive ao leitor
   // 1 quando o catalogo aceita BUSCA. O manifesto declara isso em
   // `extra: [{name:"search"}]` (formato novo) ou `extraSupported: ["search"]`
   // (antigo) — os addons do dono usam os dois.
   int buscavel;
+  int paginavel;        // skip declarado: preenchimento limitado do #366
   // 1 quando o manifesto marca o extra `search` como `isRequired` — ou seja, o
   // catalogo so responde a quem digitou um termo, e a home nao tem termo. Ele
   // continua servindo a BUSCA; o que ele nao pode e virar fileira. Ver a nota
@@ -1251,6 +1729,8 @@ static void lerPrefs(void) {
 // "engolidas=0" enquanto o engolimento acontecia — mais cedo, em outro ponto.
 // Um contador que mede metade do caminho ja me custou uma rodada.
 static int engolidasNaDeclaracao;
+// #327: chave da fileira baixada so para alimentar o destaque (vazia = nenhuma).
+static char heroAlimChave[192];
 
 // A VISIBILIDADE DO GRUPO FAZ PARTE DA PERGUNTA, E EU JA A TIREI UMA VEZ.
 //
@@ -1274,16 +1754,18 @@ static int engolidasNaDeclaracao;
 static int dentroDeColecaoVisivelBase(const char *base, const char *tipo,
                                       const char *id) {
   const ColFolder *f;
-  char chaveGrupo[96];
+  char chaveGrupo[192];
   if (!base || !base[0]) return 0;
   f = col_por_catalogo(base, tipo, id);
   if (!f) return 0;
-  col_chave_grupo(f->group, chaveGrupo, sizeof chaveGrupo);
-  if (fil_oculta(chaveGrupo) || catordem_oculta(chaveGrupo, chaveGrupo)) return 0;
+  col_chave_pasta(f, chaveGrupo, sizeof chaveGrupo);
+  if (fil_oculta(chaveGrupo) || (catordem_oculta(chaveGrupo, chaveGrupo) && !fil_adicionada_na_tv(chaveGrupo))) return 0;
   return 1;
 }
 
 static int dentroDeColecaoVisivel(const Decl *d) {
+  // #327: o que a pessoa adicionou a Home na TV nao e engolido pela pasta.
+  if (fil_adicionada_na_tv(d->chave)) return 0;
   return dentroDeColecaoVisivelBase(d->base, d->tipo, d->id);
 }
 
@@ -1298,7 +1780,7 @@ static int desligada(const Decl *d) {
   // A conta manda junto com o arquivo local, nao no lugar dele: quem desligou
   // uma fileira no app web ve a TV concordar, e quem desligou so na TV
   // continua valendo.
-  if (catordem_oculta(d->chave, d->desativar)) return 1;
+  if (catordem_oculta(d->chave, d->desativar) && !fil_adicionada_na_tv(d->chave)) return 1;
   for (i = 0; i < nPrefOff; i++)
     if (!strcmp(prefOff[i], d->chave) || !strcmp(prefOff[i], d->desativar)) return 1;
   return 0;
@@ -1354,10 +1836,29 @@ static void formatarTitulo(const char *nome, const char *tipo, char *dst, size_t
 #define MANI_MAX  12
 #define MANI_FIOS  4
 static struct {
-  char  url[900];
+  char  url[NV_ADDON_PEDIDO_MAX];   // <base>/manifest.json inteiro (addonurl.h)
+  char  base[NV_ADDON_URL_MAX];
   char *corpo;
+  int   ativo, erro;
   int   pronto;      // 1 = tentativa terminada (corpo pode ser NULL)
+  int   largado;     // 1 = a montagem desistiu de esperar por ele nesta volta
 } mani[MANI_MAX];
+// A MONTAGEM NAO ESPERA UM MANIFESTO LENTO PARA SEMPRE (B2, arranque). Os
+// manifestos eram lidos em ordem e cada um esperava ate o download de 20 s: um
+// addon pendurado (baby-beamup, "falha 28 ... 20009 ms" no log da C9) segurava
+// TODOS os catalogos, que so comecam depois de "manifestos lidos". Agora a
+// espera por um manifesto acaba em MANI_ESPERA_MS contados da largada (com
+// MANI_ESPERA_FOLGA_MS minimos a partir do pedido); o addon segue baixando, o
+// corpo entra na cache, e a volta seguinte o encontra pronto. Addon lento mas
+// valido nao se perde: ele so entra uma volta depois.
+#ifndef MANI_ESPERA_MS
+#define MANI_ESPERA_MS 6000
+#endif
+#ifndef MANI_ESPERA_FOLGA_MS
+#define MANI_ESPERA_FOLGA_MS 1500
+#endif
+static unsigned long long maniLargadaMs;
+static unsigned long long descAgoraMs(void);
 
 // CACHE DE CORPO DE MANIFESTO ENTRE CICLOS.
 //
@@ -1384,7 +1885,7 @@ static struct {
 // e na pratica ~300 KB (manifestos tipicos tem <30 KB).
 #define MANI_CACHE_BYTES (128 * 1024)
 static struct {
-  char    url[900];
+  char    url[NV_ADDON_PEDIDO_MAX];
   unsigned versao;
   char   *corpo;
 } maniCache[MANI_MAX];
@@ -1399,6 +1900,39 @@ static int  maniProx;
 // addon. Ele descobre que ficou para tras aqui, joga o proprio download fora e
 // sai.
 static unsigned maniGeracao;
+static unsigned maniVersao;
+static NvPerfilSessao maniSessao;
+
+static pthread_mutex_t cargaTrava = PTHREAD_MUTEX_INITIALIZER;
+// 1 = a volta em curso foi pedida em segundo plano (desc_repetir_silencioso).
+// Um pedido da pessoa (desc_repetir) a derruba para 0; o contrario nao a
+// esconde. Escrita so no fio principal.
+static volatile int montSilenciosa;
+static DescHomeCarga carga;
+static Uint32 cargaDesde;
+static void cargaFase(int fase) {
+  pthread_mutex_lock(&cargaTrava); carga.fase = fase; pthread_mutex_unlock(&cargaTrava);
+}
+void desc_home_carga(DescHomeCarga *estado) {
+  if (!estado) return;
+  pthread_mutex_lock(&cargaTrava);
+  // O ALERTA DA ILHA (app.c) SO ACENDE PARA UMA VOLTA VISIVEL: a de arranque ou
+  // a que a pessoa pediu. O refazer do "Continuar assistindo" (cwVivo: a cada
+  // 10 min, a cada saida do player, a cada sync) e as voltas silenciosas do
+  // sync nao entram — desc_montando() segue contando as duas para quem espera
+  // a home (troca de perfil). Prova: tests/homecarga_ilha.sh.
+  carga.ativo = buscando && !montSilenciosa;
+  if (carga.ativo && cargaDesde) carga.ms = SDL_GetTicks() - cargaDesde;
+  *estado = carga;
+  pthread_mutex_unlock(&cargaTrava);
+  pthread_mutex_lock(&maniTrava);
+  estado->addonsProntos = estado->addonsTotal = 0;
+  for (int i = 0; i < maniN; i++) if (mani[i].ativo) {
+    estado->addonsTotal++;
+    if (mani[i].pronto) { estado->addonsProntos++; estado->falhas += mani[i].erro; }
+  }
+  pthread_mutex_unlock(&maniTrava);
+}
 
 // --- cache de corpo de manifesto -------------------------------------------
 // maniPegar/lerManifesto tomam posse do corpo e o liberam. A cache guarda uma
@@ -1481,21 +2015,39 @@ static void *fioManifesto(void *u) {
   for (;;) {
     int meu;
     char *corpo;
-    char url[900];
+    char url[NV_ADDON_PEDIDO_MAX];
+    char base[NV_ADDON_URL_MAX];
+    unsigned versao;
+    NvPerfilSessao sessao;
     pthread_mutex_lock(&maniTrava);
+    if (minha == maniGeracao)
+      while (maniProx < maniN && mani[maniProx].pronto) maniProx++;
     if (minha != maniGeracao || maniProx >= maniN) {
       pthread_mutex_unlock(&maniTrava); return NULL;
     }
     meu = maniProx++;
     snprintf(url, sizeof url, "%s", mani[meu].url);
+    snprintf(base, sizeof base, "%s", mani[meu].base);
+    versao = maniVersao; sessao = maniSessao;
     pthread_mutex_unlock(&maniTrava);
     corpo = rede_baixar(url, 20);
+    // Colecoes precisam somente da identidade. Nao esperar o CW ou o leitor
+    // de catalogos da Home para resolver o addon que ja respondeu. A chamada
+    // fica fora de maniTrava (a sonda usa a ordem addonTrava -> maniTrava).
+    int aplicada = addons_identidade_recebida(base, versao, sessao, corpo);
     pthread_mutex_lock(&maniTrava);
     if (minha != maniGeracao) {
       pthread_mutex_unlock(&maniTrava); free(corpo); return NULL;
     }
-    mani[meu].corpo = corpo;
-    mani[meu].pronto = 1;
+    if (!aplicada) {
+      // This generation belongs to a replaced list/session. Wake every
+      // waiter, including slots that no worker has started, without publishing.
+      for (int i = 0; i < maniN; i++) if (!mani[i].pronto) {
+        mani[i].erro = 1; mani[i].pronto = 1;
+      }
+      pthread_cond_broadcast(&maniCond);
+      pthread_mutex_unlock(&maniTrava); free(corpo); return NULL;
+    }
     // ARMAZENA NA CACHE uma copia propria, se o corpo couber no teto de
     // memoria. A copia vive enquanto a versao da lista nao mudar; o corpo
     // original e consumido por maniPegar/lerManifesto e liberado por eles.
@@ -1503,9 +2055,26 @@ static void *fioManifesto(void *u) {
       size_t n = strlen(corpo);
       if (n < MANI_CACHE_BYTES) {
         char *copia = malloc(n + 1);
-        if (copia) { memcpy(copia, corpo, n + 1); maniCacheColocar(url, addons_versao(), copia); }
+        if (copia) { memcpy(copia, corpo, n + 1); maniCacheColocar(url, versao, copia); }
       }
     }
+    if (mani[meu].largado && corpo) {
+      // Chegou depois de a montagem seguir sem ele: ninguem o consome nesta
+      // volta. Fica na cache para a proxima; se nao ha volta no ar, pede uma
+      // (silenciosa) para o addon entrar agora e nao so em 5 min.
+      free(corpo);
+      corpo = NULL;
+      mani[meu].pronto = 1;
+      pthread_cond_broadcast(&maniCond);
+      pthread_mutex_unlock(&maniTrava);
+      printf("[desc] manifesto lento chegou depois da montagem seguir sem ele; fica para a proxima volta\n");
+      fflush(stdout);
+      if (!buscando) desc_repetir_silencioso();
+      continue;
+    }
+    mani[meu].corpo = corpo;
+    mani[meu].erro = !corpo;
+    mani[meu].pronto = 1;
     pthread_cond_broadcast(&maniCond);
     pthread_mutex_unlock(&maniTrava);
   }
@@ -1515,16 +2084,25 @@ static void *fioManifesto(void *u) {
 static void maniLargar(void) {
   int nAd = addons_n(), i, criados = 0;
   unsigned versao = addons_versao();
+  NvPerfilSessao sessao = descSessao();
   pthread_t fios[MANI_FIOS];
   pthread_mutex_lock(&maniTrava);
+  addons_lista_travar();
+  nAd = addons_n();
+  versao = addons_versao();
   // Sobra da volta anterior (ninguem pediu, addon trocado no meio): nao pode
   // virar vazamento nem ser entregue como se fosse desta volta.
   for (i = 0; i < maniN; i++) { free(mani[i].corpo); mani[i].corpo = NULL; }
-  maniN = nAd > MANI_MAX ? MANI_MAX : nAd;
-  for (i = 0; i < maniN; i++) {
+  maniN = 0;
+  for (int pass = 0; pass < 2; pass++)
+  for (int ad = 0; ad < nAd && maniN < MANI_MAX; ad++) {
+    if (!!addons_ativo(ad) != (pass == 0)) continue;
+    i = maniN++;
+    mani[i].ativo = addons_ativo(ad);
+    snprintf(mani[i].base, sizeof mani[i].base, "%s", addons_base(ad));
     int cache;
-    snprintf(mani[i].url, sizeof mani[i].url, "%s/manifest.json", addons_base(i));
-    mani[i].pronto = 0;
+    nv_addon_url(mani[i].url, sizeof mani[i].url, mani[i].base, "/manifest.json");
+    mani[i].pronto = 0; mani[i].erro = 0;
     // CACHE HIT: o manifesto deste addon ja foi baixado numa volta com a
     // MESMA versao da lista (lista inalterada). Reaproveita sem rede. A
     // copia da cache e strdup para mani[i].corpo; a cache mantem a sua e
@@ -1541,17 +2119,37 @@ static void maniLargar(void) {
       }
     }
   }
+  addons_lista_destravar();
   maniProx = 0;
   maniGeracao++;
+  maniVersao = versao; maniSessao = sessao;
+  maniLargadaMs = descAgoraMs();
+  for (i = 0; i < maniN; i++) mani[i].largado = 0;
   // Ninguem mais espera por um `pronto` que a volta passada deixou pendente.
   pthread_cond_broadcast(&maniCond);
+  int pendentes = 0;
+  for (i = 0; i < maniN; i++) if (!mani[i].pronto) pendentes++;
   { unsigned g = maniGeracao;
     pthread_mutex_unlock(&maniTrava);
+  // Cache hits have no download worker. Publish their identities from an
+  // owned copy too, without lending a body that maniPegar can consume/free.
+  for (i = 0; i < MANI_MAX; i++) {
+    char base[NV_ADDON_URL_MAX], *copia = NULL;
+    pthread_mutex_lock(&maniTrava);
+    if (g == maniGeracao && i < maniN && mani[i].corpo) {
+      snprintf(base, sizeof base, "%s", mani[i].base);
+      copia = strdup(mani[i].corpo);
+    }
+    pthread_mutex_unlock(&maniTrava);
+    if (copia) {
+      addons_identidade_recebida(base, versao, sessao, copia);
+      free(copia);
+    }
+  }
   if (maniN < 1) return;
   // So dispara fios para os slots que NAO vieram da cache. Os outros ja
   // estao prontos e maniPegar os entrega na hora.
-  for (i = 0; i < MANI_FIOS && i < maniN; i++) {
-    if (mani[i].pronto) continue;
+  for (i = 0; i < MANI_FIOS && i < pendentes; i++) {
     if (pthread_create(&fios[criados], NULL, fioManifesto,
                        (void *)(uintptr_t)g) == 0) {
       pthread_detach(fios[criados]);
@@ -1560,7 +2158,7 @@ static void maniLargar(void) {
   }
   // Sem fio nenhum o corpo fica NULL e `pronto` fica 0: maniPegar percebe que
   // ninguem esta baixando e baixa no proprio fio, como sempre foi.
-  if (!criados) {
+  if (!criados && pendentes > 0) {
     pthread_mutex_lock(&maniTrava);
     maniN = 0;
     pthread_cond_broadcast(&maniCond);
@@ -1571,21 +2169,68 @@ static void maniLargar(void) {
 
 // O corpo do manifesto de `url`, esperando o download largado por maniLargar se
 // ele ainda estiver em curso. A posse passa para quem chamou.
-static char *maniPegar(const char *url) {
+static char *maniPegar(const char *url, int esperar, int *tentado) {
   int i;
+  *tentado = 0;
   char *corpo = NULL;
   pthread_mutex_lock(&maniTrava);
+  // A body is owned by the request context captured at launch, even when a
+  // new list happens to keep the same URL. Never relabel it with a new version.
+  if (maniVersao != addons_versao() || maniSessao != descSessao()) {
+    pthread_mutex_unlock(&maniTrava);
+    return NULL;
+  }
   for (i = 0; i < maniN; i++) if (!strcmp(mani[i].url, url)) break;
   if (i < maniN) {
     unsigned g = maniGeracao;
     // A espera acaba tambem quando a volta vira: nesse caso o corpo daqui nao
     // serve mais a ninguem e quem chamou baixa por conta propria.
-    while (!mani[i].pronto && g == maniGeracao)
-      pthread_cond_wait(&maniCond, &maniTrava);
-    if (g == maniGeracao) { corpo = mani[i].corpo; mani[i].corpo = NULL; }
+    // Espera em fatias de 10 ms (portavel, sem relogio absoluto de pthread)
+    // ate o prazo de MANI_ESPERA_MS da largada, com a folga minima a partir de
+    // agora para quem chega tarde (o Trakt costuma levar mais que isso).
+    { unsigned long long prazo = maniLargadaMs + MANI_ESPERA_MS,
+                         minimo = descAgoraMs() + MANI_ESPERA_FOLGA_MS;
+      if (prazo < minimo) prazo = minimo;
+      while (esperar && !mani[i].pronto && g == maniGeracao) {
+        if (descAgoraMs() >= prazo) {
+          mani[i].largado = 1;
+          printf("[desc] manifesto lento: %s; a montagem segue sem ele (%llu ms desde a largada)\n",
+                 url, (unsigned long long)(descAgoraMs() - maniLargadaMs));
+          fflush(stdout);
+          break;
+        }
+        pthread_mutex_unlock(&maniTrava);
+        SDL_Delay(10);
+        pthread_mutex_lock(&maniTrava);
+      } }
+    if (g == maniGeracao) {
+      *tentado = 1;
+      if (mani[i].pronto) { corpo = mani[i].corpo; mani[i].corpo = NULL; }
+    }
   }
   pthread_mutex_unlock(&maniTrava);
   return corpo;
+}
+
+// Completed failure is a result, not a cache miss requiring another timeout.
+// Disabled add-ons may finish probing in the background; Home never waits.
+static char *maniObter(const char *url, int ativo) {
+  int tentado;
+  char *corpo = maniPegar(url, ativo, &tentado);
+  if (!corpo && ativo && !tentado) corpo = rede_baixar(url, 20);
+  return corpo;
+}
+
+static int maniIdentidadePendente(const char *url, unsigned versao, NvPerfilSessao sessao) {
+  int pendente = 0;
+  pthread_mutex_lock(&maniTrava);
+  if (maniVersao == versao && maniSessao == sessao)
+    for (int i = 0; i < maniN; i++) if (!strcmp(mani[i].url, url)) {
+      pendente = !mani[i].pronto;
+      break;
+    }
+  pthread_mutex_unlock(&maniTrava);
+  return pendente;
 }
 
 // CATALOGO DE BUSCA NAO PODE VIRAR FILEIRA.
@@ -1617,6 +2262,10 @@ static char *maniPegar(const char *url) {
 static int exigeBusca(const char *p, const char *f) {
   const char *ex = strstr(p, "\"extra\"");
   const char *o;
+  char required[512] = "";
+  js_bruto(p, f, "extraRequired", required, sizeof required);
+  if (strstr(required, "\"search\"") || strstr(required, "\"calendarVideosIds\"") ||
+      strstr(required, "\"lastVideosIds\"")) return 1;
   if (!ex || ex >= f) return 0;
   o = strchr(ex, '[');
   if (!o || o >= f) return 0;
@@ -1638,9 +2287,28 @@ static int exigeBusca(const char *p, const char *f) {
           const char *w = nome + 6;
           while (*w && (*w == ':' || *w == ' ' || *w == '"')) w++;
           if (!strncmp(w, "search", 6)) return 1;
+          // Cinemeta "Calendar videos"/"Last videos": exigem a lista de series
+          // da biblioteca da pessoa, que a home nao manda. Sem ela voltam vazios.
+          if (!strncmp(w, "calendarVideosIds", 17) || !strncmp(w, "lastVideosIds", 13)) return 1;
         }
       }
     }
+  }
+  return 0;
+}
+
+static int aceitaSkip(const char *p, const char *f) {
+  const char *ex = js_array(p, f, "extra");
+  for (; ex && ex < f; ex = js_prox(js_fim(ex))) {
+    char nome[32] = "";
+    if (*ex == '{') js_texto_raiz_em(ex, js_fim(ex), "name", nome, sizeof nome);
+    else js_cadeia(ex, nome, sizeof nome);
+    if (!strcmp(nome, "skip")) return 1;
+  }
+  ex = js_array(p, f, "extraSupported");
+  for (; ex && ex < f; ex = js_prox(js_fim(ex))) {
+    char nome[32] = "";
+    if (*ex == '"' && js_cadeia(ex, nome, sizeof nome) && !strcmp(nome, "skip")) return 1;
   }
   return 0;
 }
@@ -1653,16 +2321,90 @@ static int exigeBusca(const char *p, const char *f) {
 // Xperience sozinho declara 605, mas os que a cota deixa passar sao os que a
 // conta pode citar, e o anel gira em vez de recusar.
 #define NOMECAT_MAX 512
-static struct { char base[300], tipo[8], id[96], nome[96]; } nomeCat[NOMECAT_MAX];
+// `base` aqui e so IDENTIDADE (nunca vira pedido) e fica em 300: 512 entradas
+// com NV_ADDON_URL_MAX custariam ~900 KB. Por isso a comparacao e por PREFIXO
+// (nomeCatBase): com strcmp, a base cortada de um addon de URL longa nunca
+// casava com a inteira e o nome do catalogo dele nunca era achado (#201).
+static struct { char base[300], tipo[8], id[96], nome[96], extras[768]; } nomeCat[NOMECAT_MAX];
+#define nomeCatBase(i, b) (!strncmp(nomeCat[i].base, (b), sizeof nomeCat[i].base - 1))
 static int nNomeCat, nomeCatProx;
 static pthread_mutex_t nomeCatTrava = PTHREAD_MUTEX_INITIALIZER;
+// Required defaults belong to the manifest, not to an addon's hostname.
+static void registrarExtrasCatalogo(const char *base, const char *tipo, const char *id,
+                                    const char *p, const char *f) {
+  char extras[768] = "";
+  for (const char *ex = js_array(p, f, "extra"); ex; ex = js_prox(js_fim(ex))) {
+    const char *end = js_fim(ex);
+    char name[64] = "", value[128] = "", encoded[384];
+    if (*ex != '{' || !js_texto_raiz_em(ex, end, "name", name, sizeof name)) continue;
+    char req[16] = "";
+    js_bruto(ex, end, "isRequired", req, sizeof req);
+    int required = !strcmp(req, "true") || !strcmp(req, "\"true\"");
+    char legacy[512] = "", key[68];
+    js_bruto(p, f, "extraRequired", legacy, sizeof legacy);
+    snprintf(key, sizeof key, "\"%s\"", name);
+    if (strstr(legacy, key)) required = 1;
+    if (!required || !strcmp(name, "search")) continue;
+    const char *option = js_array(ex, end, "options");
+    if (!strcmp(name, "skip")) snprintf(value, sizeof value, "0");
+    else if (!option || !js_cadeia(option, value, sizeof value)) continue;
+    // Encode the entire value: '&' and '/' must not become extra separators.
+    size_t z = 0;
+    for (const unsigned char *c = (const unsigned char *)value; *c; c++) {
+      if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+          (*c >= '0' && *c <= '9') || strchr("-._~", *c)) encoded[z++] = *c;
+      else { snprintf(encoded + z, 4, "%%%02X", *c); z += 3; }
+    }
+    encoded[z] = 0;
+    size_t used = strlen(extras);
+    if (used + strlen(name) + z + 3 >= sizeof extras) continue;
+    snprintf(extras + used, sizeof extras - used, "%s%s=%s", used ? "&" : "", name, encoded);
+  }
+  // Legacy manifests may require skip without declaring an extra object.
+  char legacy[512] = "";
+  js_bruto(p, f, "extraRequired", legacy, sizeof legacy);
+  if (strstr(legacy, "\"skip\"") && !strstr(extras, "skip=") && strlen(extras) + 8 < sizeof extras)
+    strcat(extras, extras[0] ? "&skip=0" : "skip=0");
+  pthread_mutex_lock(&nomeCatTrava);
+  for (int i = 0; i < nNomeCat; i++)
+    if (nomeCatBase(i, base) && !strcmp(nomeCat[i].tipo, tipo) && !strcmp(nomeCat[i].id, id)) {
+      snprintf(nomeCat[i].extras, sizeof nomeCat[i].extras, "%s", extras); break;
+    }
+  pthread_mutex_unlock(&nomeCatTrava);
+}
+static void catalogoExtras(const char *base, const char *tipo, const char *id,
+                           const char *extra, char *saida, size_t n) {
+  char defaults[768] = "";
+  snprintf(saida, n, "%s", extra ? extra : "");
+  pthread_mutex_lock(&nomeCatTrava);
+  for (int i = 0; i < nNomeCat; i++)
+    if (nomeCatBase(i, base) && !strcmp(nomeCat[i].tipo, tipo) && !strcmp(nomeCat[i].id, id)) {
+      snprintf(defaults, sizeof defaults, "%s", nomeCat[i].extras); break;
+    }
+  pthread_mutex_unlock(&nomeCatTrava);
+  char *save = NULL;
+  for (char *v = strtok_r(defaults, "&", &save); v; v = strtok_r(NULL, "&", &save)) {
+    const char *eq = strchr(v, '=');
+    int supplied = 0;
+    if (!eq) continue;
+    size_t key = (size_t)(eq - v) + 1;
+    for (const char *e = extra; e && *e; e = strchr(e, '&')) {
+      if (*e == '&') e++;
+      if (!strncmp(e, v, key)) { supplied = 1; break; }
+    }
+    size_t used = strlen(saida);
+    if (!supplied && used + strlen(v) + 2 < n)
+      snprintf(saida + used, n - used, "%s%s", used ? "&" : "", v);
+  }
+}
 static void registrarNomeCatalogo(const char *base, const char *tipo, const char *id, const char *nome) {
   int i;
   if (!base || !nome || !nome[0]) return;
   pthread_mutex_lock(&nomeCatTrava);
   for (i = 0; i < nNomeCat; i++)
-    if (!strcmp(nomeCat[i].base, base) && !strcmp(nomeCat[i].tipo, tipo) && !strcmp(nomeCat[i].id, id)) break;
+    if (nomeCatBase(i, base) && !strcmp(nomeCat[i].tipo, tipo) && !strcmp(nomeCat[i].id, id)) break;
   if (i == nNomeCat) { i = nomeCatProx; nomeCatProx = (nomeCatProx + 1) % NOMECAT_MAX; if (nNomeCat < NOMECAT_MAX) nNomeCat++; }
+  nomeCat[i].extras[0] = 0;
   snprintf(nomeCat[i].base, sizeof nomeCat[i].base, "%s", base);
   snprintf(nomeCat[i].tipo, sizeof nomeCat[i].tipo, "%s", tipo);
   snprintf(nomeCat[i].id, sizeof nomeCat[i].id, "%s", id);
@@ -1676,7 +2418,7 @@ const char *desc_nome_catalogo(const char *base, const char *tipo, const char *i
   if (!base || !base[0] || !tipo || !id) return saida;
   pthread_mutex_lock(&nomeCatTrava);
   for (i = 0; i < nNomeCat; i++)
-    if (!strcmp(nomeCat[i].base, base) && !strcmp(nomeCat[i].tipo, tipo) && !strcmp(nomeCat[i].id, id)) {
+    if (nomeCatBase(i, base) && !strcmp(nomeCat[i].tipo, tipo) && !strcmp(nomeCat[i].id, id)) {
       snprintf(saida, sizeof saida, "%s", nomeCat[i].nome); break; }
   // SEM A BASE EXATA (pasta Netflix, 01/10: a aba mostrava
   // "streaming_netflix_movies"): a base que a conta grava na fonte pode nao ser
@@ -1723,8 +2465,8 @@ static int prioCatalogo(const char *chave, const char *desativar,
                         int *pos) {
   int k, n;
   *pos = 0;
-  if (dentroDeColecaoVisivelBase(base, tipo, id) || fil_oculta(chave) ||
-      catordem_oculta(chave, desativar))
+  if ((dentroDeColecaoVisivelBase(base, tipo, id) && !fil_adicionada_na_tv(chave)) || fil_oculta(chave) ||
+      (catordem_oculta(chave, desativar) && !fil_adicionada_na_tv(chave)))
     return COTA_DESLIGADO;
   for (k = 0; k < nPrefOff; k++)
     if (!strcmp(prefOff[k], chave) || !strcmp(prefOff[k], desativar))
@@ -1780,8 +2522,8 @@ static char *escolherPelaCota(const char *corpo, const char *fim,
   while (p) {
     const char *f = js_fim(p);
     char tipo[8] = "", id[96] = "", nome[96] = "", chave[192], desativar[352];
-    js_texto(p, f, "type", tipo, sizeof tipo);
-    js_texto(p, f, "id", id, sizeof id);
+    js_texto_raiz_em(p, f, "type", tipo, sizeof tipo);
+    js_texto_raiz_em(p, f, "id", id, sizeof id);
     js_texto_raiz_em(p, f, "name", nome, sizeof nome);
     if (tipo[0] && id[0] && !exigeBusca(p, f)) {
       if (n >= cap) {
@@ -1792,7 +2534,7 @@ static char *escolherPelaCota(const char *corpo, const char *fim,
         pr = novo;
       }
       // As MESMAS duas chaves que lerManifesto monta para o Decl.
-      snprintf(chave, sizeof chave, "%s_%s_%s", addonId[0] ? addonId : base, tipo, id);
+      addons_catalogo_chave(addonId, base, tipo, id, chave, sizeof chave);
       snprintf(desativar, sizeof desativar, "%s_%s_%s_%s", base, tipo, id, nome);
       pr[n].nivel = prioCatalogo(chave, desativar, base, tipo, id, &pr[n].pos);
       n++;
@@ -1813,6 +2555,8 @@ static char *escolherPelaCota(const char *corpo, const char *fim,
 // A versao da lista de addons com que a volta leu os manifestos (ver a poda de
 // fantasmas em montar()). So o fio da descoberta mexe.
 static unsigned versaoManifestos;
+// #392: de quem era a lista e qual perfil das fileiras valia quando a volta a leu.
+static FilPassada passadaVolta;
 
 // Catalogos que so respondem com busca, somados na volta: nao entram mais no
 // vetor de Decl (nao gastam cota), e a linha do log que os contava continua.
@@ -1823,7 +2567,7 @@ static int nSoBuscaVolta;
 // snapshot sem elas as poria atras de todas as outras dali em diante.
 static int nManiFalhouVolta;
 
-// `ativo` = 0 para addon DESLIGADO na conta: o manifesto e lido do mesmo jeito
+// `ativo` = 0 para addon DESLIGADO na conta: o manifesto pronto e lido sem esperar
 // (addons_manifesto_lido aprende o id — a poda de fileiras e as colecoes da
 // conta precisam dele) e os nomes dos catalogos ficam registrados, mas nenhum
 // catalogo vira candidato a fileira, fica "fora da cota" ou vira alvo de busca.
@@ -1833,16 +2577,26 @@ static int nManiFalhouVolta;
 // home da C9 (24/09), e a fonte deles continuava fora das consultas. Desligado
 // e desligado nos dois lugares.
 static int lerManifesto(int iAddon, const char *base, Decl *saida, int max,
-                         int ativo, int *totalReal, int *promovidos) {
-  char url[900], addonId[96] = "", nome[96], tipo[8], id[96];
+                         int ativo, int *totalReal, int *promovidos, unsigned versao) {
+  char url[NV_ADDON_PEDIDO_MAX], addonId[96] = "", nome[96], tipo[8], id[96];
+  char origem[NV_ADDON_URL_MAX];
   char *corpo, *escolhido;
   const char *p, *fim;
   int n = 0, total = 0, e = 0, nEleg = 0;
-  snprintf(url, sizeof url, "%s/manifest.json", base);
+  if (totalReal) *totalReal = 0;
+  if (promovidos) *promovidos = 0;
+  snprintf(origem, sizeof origem, "%s", base);
+  base = origem;
   // Ja largado em paralelo no comeco de montar(); so cai na rede aqui quando
   // este addon nao estava na lista daquele instante.
-  corpo = maniPegar(url);
-  if (!corpo) corpo = rede_baixar(url, 20);
+  corpo = descPedidoCoube(base, nv_addon_url(url, sizeof url, base, "/manifest.json"), sizeof url)
+          ? maniObter(url, ativo) : NULL;
+  // Covers the synchronous fallback too. A round that stopped waiting has
+  // not failed the still-running download; its worker publishes the outcome.
+  if ((corpo || !maniIdentidadePendente(url, versao, descSessao())) &&
+      !addons_identidade_recebida(base, versao, descSessao(), corpo)) {
+    free(corpo); return 0;
+  }
   if (!corpo) {
     // Sem esta linha o log dizia "0 catalogo(s) declarado(s)", igual a um
     // addon que so tem stream.
@@ -1857,7 +2611,9 @@ static int lerManifesto(int iAddon, const char *base, Decl *saida, int max,
   // linha o id e as capacidades do addon so eram aprendidos por quem abrisse a
   // tela de addons nos Ajustes, e sem o id nenhuma colecao da conta encontrava
   // a URL do proprio addon (issue #10).
-  addons_manifesto_lido(iAddon, corpo);
+  if (!addons_manifesto_recebido(base, versao, descSessao(), corpo)) {
+    free(corpo); return 0;
+  }
   // Chave da RAIZ: um manifesto tem "id" tambem dentro de catalogs[] e de
   // behaviorHints, e ha addon que escreve "catalogs" antes de "id" — a leitura
   // crua trazia o id de um CATALOGO como se fosse o do addon. Ver js_texto_raiz.
@@ -1873,8 +2629,9 @@ static int lerManifesto(int iAddon, const char *base, Decl *saida, int max,
   while (p) {
     const char *f = js_fim(p);
     tipo[0] = id[0] = nome[0] = 0;
-    js_texto(p, f, "type", tipo, sizeof tipo);
-    js_texto(p, f, "id",   id,   sizeof id);
+    // Nested extra fields cannot define the catalog's request identity.
+    js_texto_raiz_em(p, f, "type", tipo, sizeof tipo);
+    js_texto_raiz_em(p, f, "id",   id,   sizeof id);
     // RAIZ DO OBJETO, e nao a primeira ocorrencia na faixa. O Bingecat escreve
     // `extra: [{name:"skip"}, {name:"genre"}, ...]` ANTES de `name`, e js_texto
     // devolvia o nome do primeiro extra: as fileiras dele apareciam como "Skip
@@ -1890,6 +2647,7 @@ static int lerManifesto(int iAddon, const char *base, Decl *saida, int max,
       Decl local, *d;
       int exige = exigeBusca(p, f), guardar = 0;
       registrarNomeCatalogo(base, tipo, id, nome);
+      registrarExtrasCatalogo(base, tipo, id, p, f);
       if (!ativo) { p = js_prox(f); continue; }
       // QUEM A COTA LE sai de escolherPelaCota; sem escolha (cabem todos, ou a
       // memoria faltou) vale a regra antiga, os primeiros ate encher. Catalogo
@@ -1905,7 +2663,7 @@ static int lerManifesto(int iAddon, const char *base, Decl *saida, int max,
       // Fora do vetor: usa um Decl de rascunho so para decidir/registrar a busca.
       d = guardar ? &saida[n] : &local;
       memset(d, 0, sizeof *d);
-      d->base = base;
+      snprintf(d->base, sizeof d->base, "%s", base);
       // BUSCA: procura "search" dentro do bloco `extra`/`extraSupported` DESTE
       // catalogo (a faixa [p,f) e o objeto dele, entao nao vaza para o vizinho).
       //
@@ -1949,10 +2707,10 @@ static int lerManifesto(int iAddon, const char *base, Decl *saida, int max,
                                        : (addonId[0] ? addonId : "addon"));
         } }
       d->exigeParam = exige;
+      d->paginavel = aceitaSkip(p, f);
       snprintf(d->tipo, sizeof d->tipo, "%s", tipo);
       snprintf(d->id,   sizeof d->id,   "%s", id);
-      snprintf(d->chave, sizeof d->chave, "%s_%s_%s",
-               addonId[0] ? addonId : base, tipo, id);
+      addons_catalogo_chave(addonId, base, tipo, id, d->chave, sizeof d->chave);
       snprintf(d->desativar, sizeof d->desativar, "%s_%s_%s_%s", base, tipo, id, nome);
       formatarTitulo(nome, tipo, d->titulo, sizeof d->titulo);
       // Nome legivel do addon, para a linha "de <addon>" sob o titulo da
@@ -1985,11 +2743,32 @@ static int lerManifesto(int iAddon, const char *base, Decl *saida, int max,
 // monta caminha na ordem, esperando o balde k ficar pronto. O resultado e a
 // mesma ordem de antes, com o tempo do MAIOR pedido em vez da SOMA.
 #define CAT_FIOS 3
+// QUANTAS FILEIRAS UMA RODADA PEDE, no maximo. Os pedidos em voo ja sao so
+// CAT_FIOS (3) — cem fileiras nunca viram cem GET de uma vez —, mas cada
+// TarefaCat carrega o balde inteiro (MAX_POR_FILEIRA CatItem, ~375 KB), e a
+// rodada aloca todas de uma vez. Nas TVs o teto de 40 deixa isso em ~15 MB; no
+// Android, com fileiras ilimitadas (2.0.4), 200 fileiras seriam 75 MB so de
+// baldes. Fatiando em 24 a rodada custa no maximo ~9 MB e a home continua sendo
+// publicada fileira a fileira; a ordem nao muda porque o cursor e o mesmo.
+#ifdef NV_ANDROID
+#define CAT_RODADA_MAX 24
+#else
+#define CAT_RODADA_MAX CAT_FIL_MAX   // nas TVs o teto ja cabe numa rodada: nada muda
+#endif
+static int catRodadaTamanho(int alvo) {
+  return alvo > CAT_RODADA_MAX ? CAT_RODADA_MAX : alvo;
+}
+int desc_catalogos_por_rodada(int alvo) { return catRodadaTamanho(alvo); }
+int desc_catalogos_em_voo(void) { return CAT_FIOS; }
 
 typedef struct {
   const Decl *d;        // so para quem monta; o fio le as copias abaixo
-  char base[800], tipo[8], id[96];
+  char base[NV_ADDON_URL_MAX], tipo[8], id[96];
   CatItem itens[MAX_POR_FILEIRA];
+  CatItem *extras;      // #366: cauda crua opcional, so para fileira deficiente
+  CatItem *primeira;    // resposta boa preservada enquanto o suplemento faz rede
+  int nPrimeira;
+  int paginavel;
   int  n;
   int  respondeu;
   int  pronto;
@@ -2006,6 +2785,23 @@ typedef struct {
   int nT, prox, refs, fechada;
   unsigned long long inicioMs, ultimoProntoMs;
 } RodadaCat;
+
+// As reservas de preenchimento nao podem ocupar os slots dos outros
+// catalogos nem das listas privadas que a montagem acrescenta no fim. O
+// primeiro bloco de ate 24 itens conserva o comportamento anterior; so a
+// cauda opcional e reduzida quando CAT_MAX nao deixa folga.
+static int homeVistosReserva(void) {
+  int reserva = trakt_ativo() ? 2 * TRAKT_LISTA_MAX : 0;
+  if (ajustes_salvos_no_simkl() && simkl_ativo()) reserva += 300;
+  if (ajustes_jellyfin_ligado() && servidores_conectado()) reserva += SRV_ITENS_MAX;
+  return reserva;
+}
+static int homeVistosLimitar(int got, int usados, int restantes, int reserva) {
+  if (got <= MAX_POR_FILEIRA) return got;
+  int cabe = CAT_MAX - usados - restantes * MAX_POR_FILEIRA - reserva;
+  if (cabe < MAX_POR_FILEIRA) cabe = MAX_POR_FILEIRA;
+  return got > cabe ? cabe : got;
+}
 
 // O TETO DO CATALOGO LENTO. Os dois precisam valer juntos, com a fila da rodada
 // ja vazia: CAT_ESPERA_SILENCIO_MS sem NENHUM catalogo terminar, e este no ar ha
@@ -2042,7 +2838,10 @@ static int fileiraMontada(const CatFileira *v, int n, const char *chave) {
 }
 
 static int fileiraPodeSerPreservada(const CatFileira *f) {
-  return f && f->chave[0] && homeestado_contexto_valido() &&
+  // Personal-server rows come only from the live Jellyfin snapshot: after a
+  // sign-out, token expiry or profile switch they must vanish, not be
+  // re-attached from the previous Home.
+  return f && f->chave[0] && !servidores_chave_fileira(f->chave) && homeestado_contexto_valido() &&
          homeestado_tem_fileira(f->chave);
 }
 
@@ -2080,13 +2879,15 @@ static void preservarFileirasAusentes(CatItem **lote, int *n, int *cap,
   int r;
   // static pelo mesmo motivo do daLinhaAnterior de montar(): 24 CatItem sao
   // ~375 KB, e o fio que monta tem 2 MB de pilha no Tizen. Um fio so chama.
-  static CatItem tmp[MAX_POR_FILEIRA];
+  static CatItem tmp[HOME_VISTOS_MAX];
   // O TETO DE FILEIRAS VALE AQUI TAMBEM (#195). Linha que ficou de fora
   // porque o limite encheu nao e linha ausente: sem isto o substituto de uma
   // fileira que voltou a responder era reanexado e a home passava do limite.
-  int teto = fil_limite();
-  if (teto > CAT_FIL_MAX) teto = CAT_FIL_MAX;
   if (!lote || !*lote || !n || !cap || !fil || !nFil) return;
+  int fixas = 0;
+  for (r = 0; r < *nFil; r++) if (!fil[r].base[0]) fixas++;
+  int teto = fil_limite() + fixas;
+  if (teto > CAT_FIL_MAX) teto = CAT_FIL_MAX;
   for (r = 0; r < cat_n_fileiras() && *nFil < teto; r++) {
     const CatFileira *old = cat_fileira(r);
     int got, need;
@@ -2095,7 +2896,8 @@ static void preservarFileirasAusentes(CatItem **lote, int *n, int *cap,
     // profile, and configuration. A still-configured URL does not make items
     // from the previous profile safe to copy.
     if (!fileiraPodeSerPreservada(old)) continue;
-    got = linhaAnterior(old->chave, tmp, MAX_POR_FILEIRA, NULL);
+    got = linhaAnterior(old->chave, tmp, HOME_VISTOS_MAX, NULL);
+    got = homeVistosLimitar(got, *n, teto - *nFil - 1, homeVistosReserva());
     if (!got && !old->estado) continue;
     need = *n + got;
     if (need > *cap) {
@@ -2118,7 +2920,10 @@ static unsigned long long descAgoraMs(void);
 
 // Sob catTrava.
 static void rodadaSoltarLocked(RodadaCat *r) {
-  if (--r->refs == 0) { free(r->t); free(r); }
+  if (--r->refs == 0) {
+    for (int i = 0; i < r->nT; i++) { free(r->t[i].extras); free(r->t[i].primeira); }
+    free(r->t); free(r);
+  }
 }
 // Quem monta acabou com a rodada (inteira, ou desistiu): nenhum fio pega
 // pedido novo dela, e o ultimo a sair libera.
@@ -2127,6 +2932,19 @@ static void rodadaSoltar(RodadaCat *r) {
   r->fechada = 1;
   rodadaSoltarLocked(r);
   pthread_mutex_unlock(&catTrava);
+}
+
+static int catalogoPrimeiraGuardar(const CatItem *itens, int n, void *usuario) {
+  TarefaCat *t = usuario;
+  CatItem *copia = malloc(sizeof *copia * (size_t)n);
+  if (!copia) return 0;   // sem reserva segura, termina com a primeira pagina
+  memcpy(copia, itens, sizeof *copia * (size_t)n);
+  pthread_mutex_lock(&catTrava);
+  int continuar = !t->largada;
+  if (continuar) { t->primeira = copia; t->nPrimeira = n; }
+  pthread_mutex_unlock(&catTrava);
+  if (!continuar) free(copia);
+  return continuar;
 }
 
 static void *fioCatalogo(void *u) {
@@ -2147,11 +2965,30 @@ static void *fioCatalogo(void *u) {
 
     // QUANTOS e o ajuste (12/18/24, #163); o balde tem sempre o teto.
     { int q = ajustes_itens_fileira();
+      CatItem *ampliados = NULL, *extras = NULL;
       if (q > MAX_POR_FILEIRA) q = MAX_POR_FILEIRA;
-      got = lerCatalogo(t->base, t->tipo, t->id, t->itens,
-                        MAX_POR_FILEIRA, q, &respondeu); }
+      if (ajustes_ocultar_filmes_vistos() && !strcmp(t->tipo, "movie"))
+        ampliados = malloc(sizeof *ampliados * HOME_VISTOS_MAX);
+      got = lerCatalogoHomeParcial(t->base, t->tipo, t->id, ampliados ? ampliados : t->itens,
+                            ampliados ? HOME_VISTOS_MAX : MAX_POR_FILEIRA,
+                            q, t->paginavel, &respondeu, catalogoPrimeiraGuardar, t);
+      if (ampliados) {
+        int primeiros = got > MAX_POR_FILEIRA ? MAX_POR_FILEIRA : got;
+        if (primeiros) memcpy(t->itens, ampliados, sizeof *ampliados * (size_t)primeiros);
+        if (got > MAX_POR_FILEIRA) {
+          extras = malloc(sizeof *extras * (size_t)(got - MAX_POR_FILEIRA));
+          if (extras) memcpy(extras, ampliados + MAX_POR_FILEIRA,
+                             sizeof *extras * (size_t)(got - MAX_POR_FILEIRA));
+          else got = MAX_POR_FILEIRA;
+        }
+        free(ampliados);
+      }
+      // O montador so le o balde depois de `pronto`, publicado sob catTrava.
+      t->extras = extras;
+    }
 
     pthread_mutex_lock(&catTrava);
+    if (!t->largada) { free(t->primeira); t->primeira = NULL; t->nPrimeira = 0; }
     t->n = got;
     t->respondeu = respondeu;
     t->pronto = 1;
@@ -2162,8 +2999,10 @@ static void *fioCatalogo(void *u) {
 
 // "Continuar assistindo" a partir do progresso local (progresso.c), no mesmo
 // formato que trakt_continuar devolve: imdb (composto em serie), tipo,
-// porcentagem, temporada/episodio — e o resto vem do Cinemeta pelo mesmo
-// enfeite. Mais recente primeiro (prog_ler ja ordena). Entra o que esta entre
+// porcentagem, temporada/episodio. Reaproveita o catalogo/cache por identidade
+// antes do enfeite remoto: um id de provider nao e conhecido pelo Cinemeta e
+// uma queda de rede nao pode apagar o registro local. Mais recente primeiro
+// (prog_ler ja ordena). Entra o que esta entre
 // 1% e o Percentual assistido (ajustes_cw_concluido, 90 de fabrica), os mesmos
 // limites de home_registrar_retorno; titulo terminado nao e "continuar". O proximo episodio de uma serie terminada fica para depois.
 // Os registros do disco para montarContinuar, UM buffer para continuarLocal e
@@ -2182,7 +3021,7 @@ static int continuarLocal(CatItem *saida, int max) {
     int j, repetido = 0;
     if (r->durSeg < 60.0) continue;
     p = r->posSeg / r->durSeg;
-    if (p < 0.01 || p * 100.0 >= ajustes_cw_concluido()) continue;
+    if (!prog_inicio_continuar(r, ajustes_cw_minimo()) || p * 100.0 >= ajustes_cw_concluido()) continue;
     // Uma serie com varios episodios gravados entra UMA vez, no mais recente.
     for (j = 0; j < n; j++) {
       size_t L = idbase_len(saida[j].imdb);   // "kitsu:41370" inteiro, nao "kitsu"
@@ -2191,16 +3030,24 @@ static int continuarLocal(CatItem *saida, int max) {
     if (repetido) continue;
     d = &saida[n];
     memset(d, 0, sizeof *d);
+    cat_copiar_por_id(r->contentId, r->episodio > 0 ? "series" : "movie", d);
+    // O catalogo pode guardar outro episodio desta obra. Metadados do titulo
+    // permanecem; o episodio e o tempo pertencem ao progresso de agora.
+    if (d->temporada != r->temporada || d->episodio != r->episodio)
+      d->nomeEpisodio[0] = 0;
+    d->temporada = r->temporada;
+    d->episodio = r->episodio;
     d->progresso = (int)(100.0 * p);
+    if (d->progresso < 1) d->progresso = 1; // Keep early checkpoints in the paused section.
+    d->restanteMin = (int)((r->durSeg - r->posSeg) / 60.0 + 0.5);
     // O instante ja esta aqui, no registro: carimbar agora poupa a busca por
-    // chave que instanteDaConta faria depois, e sobrevive a compactacao do
-    // trakt_enfeitar_lote. Ver retomadoMs em catalogo.h.
+    // chave que instanteDaConta faria depois. Ver retomadoMs em catalogo.h.
     d->retomadoMs = r->lastWatchedMs;
     if (r->episodio > 0) {
       d->temporada = r->temporada;
       d->episodio  = r->episodio;
       snprintf(d->imdb, sizeof d->imdb, "%s:%d:%d", r->contentId,
-               r->temporada ? r->temporada : 1, r->episodio);
+               r->temporada >= 0 ? r->temporada : 1, r->episodio);
       snprintf(d->tipo, sizeof d->tipo, "series");
     } else {
       snprintf(d->imdb, sizeof d->imdb, "%s", r->contentId);
@@ -2208,7 +3055,36 @@ static int continuarLocal(CatItem *saida, int max) {
     }
     n++;
   }
-  n = trakt_enfeitar_lote(saida, n);
+  // O enfeite remoto compacta quem ficou sem poster. Para o progresso local
+  // isso era perda de registro (#158), sobretudo kitsu/tmdb e providers
+  // offline. Enriquece uma copia e reaplica por identidade; uma falha deixa
+  // os metadados conhecidos (ou a reserva da UI), sem inventar arte.
+  if (n > 0) {
+    CatItem *enfeitadas = malloc(sizeof *enfeitadas * (size_t)n);
+    if (enfeitadas) {
+      int ni, j;
+      memcpy(enfeitadas, saida, sizeof *enfeitadas * (size_t)n);
+      // A reserva exibida na rodada offline nao e um titulo resolvido.
+      // Enfeitar completa somente campos vazios; deixe-o substituir essa
+      // reserva quando a rede voltar, sem apagar a copia que a UI ja tem.
+      for (i = 0; i < n; i++)
+        if (!strcmp(enfeitadas[i].titulo,
+                    i18n(!strcmp(enfeitadas[i].tipo, "series") ? "Programa de TV" : "Filme")))
+          enfeitadas[i].titulo[0] = 0;
+      ni = descEnfeitar(enfeitadas, n);
+      for (i = 0; i < n; i++)
+        for (j = 0; j < ni; j++)
+          if (!strcmp(saida[i].imdb, enfeitadas[j].imdb) &&
+              !strcmp(saida[i].tipo, enfeitadas[j].tipo)) {
+            saida[i] = enfeitadas[j]; break;
+          }
+      free(enfeitadas);
+    }
+    for (i = 0; i < n; i++)
+      if (!saida[i].titulo[0])
+        snprintf(saida[i].titulo, sizeof saida[i].titulo, "%s",
+                 i18n(!strcmp(saida[i].tipo, "series") ? "Programa de TV" : "Filme"));
+  }
   if (n) printf("[desc] continuar assistindo local: %d\n", n);
   return n;
 }
@@ -2247,13 +3123,15 @@ static int continuarLocal(CatItem *saida, int max) {
 // 12 e nao 8 (19/09, issue #66): com os itens "a seguir" do Trakt entrando
 // alem dos pausados, 8 lugares eram todos dos pausados e o "a seguir" nunca
 // aparecia. trakt_continuar ordena por instante antes de entregar.
-#define CONT_MAX 12
+// 40 e nao 12 (issue #205): a fileira cortava em 12; o web da 300.
+// Reserva de futuros e pausados em cwo_corte seguem a proporcao de `max`.
+#define CONT_MAX CWO_FILEIRA_MAX
 
 // Os limites que o caminho local sempre teve e o do Trakt nao: os mesmos de
 // home_registrar_retorno. Abaixo de 1% nao se comecou, do Percentual assistido
 // (90% de fabrica) em diante acabou — e "continuar" nao e nem uma coisa nem a
 // outra.
-static int emAndamento(int pct) { return pct >= 1 && pct < ajustes_cw_concluido(); }
+static int emAndamento(int pct) { return pct >= ajustes_cw_minimo() && pct < ajustes_cw_concluido(); }
 
 // QUANDO este item foi visto por ultimo, em ms. 0 = nao se sabe.
 //
@@ -2291,6 +3169,25 @@ static int mesmaObra(const CatItem *a, const CatItem *b) {
   return ia[0] && !strcmp(ia, ib);
 }
 
+// Uma sugestao so supera progresso da mesma obra com conclusao posterior.
+static int candidatoVence(const CatItem *novo, const CatItem *velho) {
+  long long ms = instanteDaConta(novo), antes = instanteDaConta(velho);
+  int np = emAndamento(novo->progresso), vp = emAndamento(velho->progresso);
+  if (!np && vp) {
+    ProgRegistro r;
+    char id[24], chave[48];
+    int t = velho->temporada, e = velho->episodio;
+    prog_content_id(id, sizeof id, velho->imdb, &t, &e);
+    prog_chave(chave, sizeof chave, id, t, e);
+    if (!trakt_cw_concluiu(velho->imdb, antes) &&
+        !(prog_por_chave(chave, &r) && r.durSeg > 1.0 &&
+          r.tocou != 0 && 100.0 * r.posSeg / r.durSeg >= ajustes_cw_concluido() &&
+          r.lastWatchedMs > antes && r.lastWatchedMs <= ms)) return 0;
+  }
+  if (np && !vp) return !candidatoVence(velho, novo);
+  return ms > antes;
+}
+
 // Um candidato da fileira, com o que se sabe sobre QUANDO ele aconteceu.
 typedef struct { CatItem *item; long long ms; int ord; } Cand;
 
@@ -2299,6 +3196,8 @@ typedef struct { CatItem *item; long long ms; int ord; } Cand;
 // trakt_enfeitar_lote, chamado tambem por trakt_social — nao admitem dois
 // montadores ao mesmo tempo, entao a trava cobre os DOIS usos em montar().
 static pthread_mutex_t contTrava = PTHREAD_MUTEX_INITIALIZER;
+// Only publication bookkeeping: never held across network work.
+static pthread_mutex_t cwPubTrava = PTHREAD_MUTEX_INITIALIZER;
 
 // QUAL "CONTINUAR" E O MAIS NOVO (issue #205). montar() calcula a fileira no
 // COMECO da volta e so a publica no fim, segundos depois (manifestos e
@@ -2317,6 +3216,48 @@ static unsigned cwGer;          // ++ a cada montarContinuar
 static unsigned cwGerNaTela;    // a do ultimo fioContinuar que publicou
 static unsigned cwGerMontar;    // a que esta no lote de montar() (um montar por vez)
 
+// O "A SEGUIR" NAO PASSA DO QUE A PESSOA DESMARCOU (Silo, tt14688458, 08/10).
+// O remoto diz "ultimo visto T2E10" e o "a seguir" dele e T3E1 (ou T2E11); mas
+// T2E7..E10 foram desmarcados NESTA TV, e o proximo de verdade e o T2E7. A regra
+// mora aqui, UMA vez, para as tres fontes: o primeiro episodio desmarcado ate a
+// posicao do remoto (vistonao_primeira, que descarta a desmarcacao que o remoto
+// ja superou — folga de 2 min). `remotoMs` e o instante do ultimo visto do
+// remoto. Devolve 1 e troca (*t, *e) quando recuou. Um log por item por montagem.
+static int (*cwPrimeira)(const char *, int, int, long long, int *, int *);
+void desc_lapides_primeira(int (*primeira)(const char *, int, int, long long, int *, int *)) {
+  cwPrimeira = primeira;
+}
+static int recuarPelaDesmarcacao(const char *serie, int *t, int *e, long long remotoMs) {
+  int nt, ne;
+  if (!cwPrimeira || *t < 1 || *e < 1) return 0;
+  if (!cwPrimeira(serie, *t, *e, remotoMs, &nt, &ne) || (nt == *t && ne == *e)) return 0;
+  printf("[desc] continuar assistindo: %s a seguir ajustado pela desmarcacao: T%dE%d -> T%dE%d\n",
+         serie, *t, *e, nt, ne);
+  *t = nt; *e = ne;
+  return 1;
+}
+// Os ids que ele moveu nesta montagem; montarContinuar os publica (cwordem.c)
+// antes de perguntar quem e "a seguir".
+static char ajustadosIds[CONT_MAX * 3][sizeof(((CatItem *)0)->imdb)];
+static int nAjustados;
+static void ajustarASeguir(CatItem *it) {
+  char serie[sizeof it->imdb], velho[sizeof it->imdb];
+  int t = it->temporada, e = it->episodio;
+  snprintf(serie, sizeof serie, "%s", it->imdb);
+  { char *dp = strchr(serie, ':'); if (dp) *dp = 0; }
+  if (!recuarPelaDesmarcacao(serie, &t, &e, it->retomadoMs)) return;
+  snprintf(velho, sizeof velho, "%s", it->imdb);
+  it->temporada = t; it->episodio = e;
+  snprintf(it->imdb, sizeof it->imdb, "%s:%d:%d", serie, t, e);
+  // O que o remoto sabia do episodio de ANTES nao descreve este.
+  it->nomeEpisodio[0] = 0;
+  it->restanteMin = 0;
+  // Episodio antigo: ja foi ao ar (sem isto contaria "sem data de estreia").
+  descCwoEstreia(it->imdb, 0);
+  if (nAjustados < (int)(sizeof ajustadosIds / sizeof *ajustadosIds))
+    snprintf(ajustadosIds[nAjustados++], sizeof ajustadosIds[0], "%s", it->imdb);
+}
+
 // Aplica a um lote REMOTO (Trakt ou Simkl) os limites de 1% a 90% e o
 // cruzamento com o registro local mais novo. Compacta no lugar; devolve quantos
 // ficaram. `aSeguir` diz quais itens sao "a seguir" (entram com 0%).
@@ -2326,7 +3267,8 @@ static int filtrarRemoto(CatItem *v, int n, int (*aSeguir)(const char *),
   for (i = 0, w = 0; i < n; i++) {
     // "A SEGUIR" (issue #66) entra com 0%: e o proximo episodio de uma serie
     // cujo ultimo terminou. Nao e "pausado", mas e "continuar".
-    if (!aSeguir(v[i].imdb) && !emAndamento(v[i].progresso)) { (*fora)++; continue; }
+    if ((!ajustes_cw_proximo() || !aSeguir(v[i].imdb)) &&
+        !emAndamento(v[i].progresso)) { (*fora)++; continue; }
     // O REGISTRO LOCAL MAIS NOVO VENCE A RESPOSTA REMOTA. Sem este cruzamento
     // a refazagem da fileira (issue #38) lia um /sync/playback que ainda nao
     // recebeu o scrobble que acabamos de mandar: o titulo terminado voltava a
@@ -2362,7 +3304,7 @@ static int filtrarRemoto(CatItem *v, int n, int (*aSeguir)(const char *),
     // passa ao proximo episodio (continuar_desenhar). Remoto que esta ADIANTE
     // na serie nao e episodio antigo e fica como veio. O instante decide, como
     // no resto desta funcao: registro mais VELHO que o paused_at nao manda.
-    if (v[i].temporada > 0 && v[i].episodio > 0) {
+    if (v[i].temporada >= 0 && v[i].episodio > 0) {
       size_t L = idbase_len(v[i].imdb);
       const ProgRegistro *r = NULL;
       int j;
@@ -2380,7 +3322,7 @@ static int filtrarRemoto(CatItem *v, int n, int (*aSeguir)(const char *),
                  "T%dE%d visto aqui (%d%%); fica o daqui\n", r->contentId,
                  v[i].temporada, v[i].episodio, r->temporada, r->episodio, pct);
           snprintf(v[i].imdb, sizeof v[i].imdb, "%s:%d:%d", r->contentId,
-                   r->temporada ? r->temporada : 1, r->episodio);
+                   r->temporada >= 0 ? r->temporada : 1, r->episodio);
           v[i].temporada = r->temporada;
           v[i].episodio = r->episodio;
           v[i].progresso = pct;
@@ -2391,6 +3333,10 @@ static int filtrarRemoto(CatItem *v, int n, int (*aSeguir)(const char *),
         }
       }
     }
+    if (!ajustes_cw_proximo() && !emAndamento(v[i].progresso)) { (*fora)++; continue; }
+    // "A seguir" que passa da desmarcacao da pessoa recua (ajustarASeguir).
+    if (v[i].progresso == 0 && v[i].temporada >= 0 && v[i].episodio > 0 &&
+        aSeguir(v[i].imdb)) ajustarASeguir(&v[i]);
     if (w != i) v[w] = v[i];
     w++;
   }
@@ -2422,25 +3368,49 @@ static void localizarContinuarPublicado(void);
 // So sem Trakt e sem Simkl no ar: e quando o web le os vistos da conta
 // (shouldUseSupabaseWatchProgressSync) e quando sync.c os aplica. Com um deles
 // vinculado, o "a seguir" ja vem dele.
-static int contaASeguir(CatItem *lista, int n, int max) {
+#define CONTA_JANELA_MS (60LL * 24 * 3600 * 1000)
+static int contaASeguir(CatItem *lista, int n, int max, int comOutraFonte) {
   static ContaSemente sem[PROX_MAX_BUSCAS];
   static const char *ids[PROX_MAX_BUSCAS];
   static char idsTxt[PROX_MAX_BUSCAS][sizeof(((CatItem *)0)->imdb)];
   CatItem *lote;
   int nSem, nLote = 0, i, j, confirmados, entraram = 0;
+  int fVelho = 0, fVisto = 0, fPausado = 0;
+  if (!ajustes_cw_proximo()) { descCwoDefinir(cwo_conta_definir, NULL, 0); return n; }
   nSem = contalib_sementes_a_seguir(sem, PROX_MAX_BUSCAS,
                                     ajustes_cw_do_episodio_mais_alto());
-  if (nSem < 1) { cwo_conta_definir(NULL, 0); return n; }
+  if (nSem < 0) {
+    printf("[desc] continuar assistindo: a seguir da conta: vistos da conta nao puxados "
+           "ou velhos; nenhuma semente\n");
+    descCwoDefinir(cwo_conta_definir, NULL, 0);
+    return n;
+  }
+  if (nSem < 1) { descCwoDefinir(cwo_conta_definir, NULL, 0); return n; }
   lote = (CatItem *)malloc(sizeof(CatItem) * PROX_MAX_BUSCAS);
-  if (!lote) { cwo_conta_definir(NULL, 0); return n; }
+  if (!lote) { descCwoDefinir(cwo_conta_definir, NULL, 0); return n; }
   for (i = 0; i < nSem; i++) {
     CatItem *d = &lote[nLote];
     int ja = 0;
     memset(d, 0, sizeof *d);
+    // A semente da conta tambem recua para o primeiro desmarcado.
+    recuarPelaDesmarcacao(sem[i].id, &sem[i].temporada, &sem[i].episodio, sem[i].vistoMs);
     snprintf(d->imdb, sizeof d->imdb, "%s:%d:%d", sem[i].id, sem[i].temporada,
              sem[i].episodio);
     for (j = 0; j < n && !ja; j++) ja = mesmaObra(&lista[j], d);
-    if (ja) continue;
+    if (ja) { fPausado++; continue; }
+    // Visto em QUALQUER fonte (conta, Trakt, Simkl, esta TV): nao e "a seguir".
+    if (vistoep_estado(sem[i].id, sem[i].temporada, sem[i].episodio) == 1) {
+      fVisto++;
+      continue;
+    }
+    // Com Trakt/Simkl vinculado, serie sem toque ha mais de 60 dias nao volta
+    // so porque a conta a conhece (mesmo corte que o web aplica ao a seguir do
+    // Trakt). Sozinha, a conta mantem o comportamento da #199: sem corte.
+    if (comOutraFonte && sem[i].vistoMs > 0 &&
+        (long long)time(NULL) * 1000LL - sem[i].vistoMs > CONTA_JANELA_MS) {
+      fVelho++;
+      continue;
+    }
     snprintf(d->tipo, sizeof d->tipo, "series");
     d->temporada = sem[i].temporada;
     d->episodio = sem[i].episodio;
@@ -2451,9 +3421,9 @@ static int contaASeguir(CatItem *lista, int n, int max) {
     nLote++;
   }
   // Publicado ANTES do enfeite: e por ele que trakt.c sabe que tem de conferir.
-  cwo_conta_definir(ids, nLote);
-  confirmados = nLote ? trakt_enfeitar_lote(lote, nLote) : 0;
-  // Junta pelo instante, mais recente primeiro; o lote ja vem assim. Com
+  descCwoDefinir(cwo_conta_definir, ids, nLote);
+  confirmados = nLote ? descEnfeitar(lote, nLote) : 0;
+  // Sugestoes so disputam lugares entre si; pausados ficam. Com
   // "Mostrar nao exibidos" desligado o futuro nem disputa lugar: o filtro mais
   // abaixo o tiraria, e o pausado que ele empurrou para fora nao voltaria.
   for (i = 0; i < confirmados; i++) {
@@ -2465,9 +3435,11 @@ static int contaASeguir(CatItem *lista, int n, int max) {
         cwo_futuro(&x, (long long)time(NULL) * 1000LL)) continue;
     if (n < max) alvo = n++;
     else {
-      int vel = 0;
-      for (j = 1; j < n; j++) if (lista[j].retomadoMs < lista[vel].retomadoMs) vel = j;
-      if (lista[vel].retomadoMs >= lote[i].retomadoMs) continue;
+      int vel = -1;
+      for (j = 0; j < n; j++)
+        if (lista[j].progresso == 0 &&
+            (vel < 0 || lista[j].retomadoMs < lista[vel].retomadoMs)) vel = j;
+      if (vel < 0 || lista[vel].retomadoMs >= lote[i].retomadoMs) continue;
       alvo = vel;
     }
     lista[alvo] = lote[i];
@@ -2479,14 +3451,19 @@ static int contaASeguir(CatItem *lista, int n, int max) {
       for (b = a - 1; b >= 0 && lista[b].retomadoMs < t.retomadoMs; b--) lista[b + 1] = lista[b];
       lista[b + 1] = t;
     } }
-  printf("[desc] continuar assistindo: a seguir da conta: %d semente(s), %d consultada(s), "
-         "%d confirmada(s), %d na lista\n", nSem, nLote, confirmados, entraram);
+  printf("[desc] continuar assistindo: a seguir da conta: %d da conta, %d ja pausada(s), "
+         "%d vista(s) em outra fonte, %d velha(s) (>60 dias), %d consultada(s), "
+         "%d confirmada(s), %d na lista\n", nSem, fPausado, fVisto, fVelho, nLote,
+         confirmados, entraram);
   free(lote);
   return n;
 }
 
+
 static int montarContinuar(CatItem *saida, int max) {
-  // static: dois lotes de 12 CatItem passam de 350 KB e montar() roda uma vez,
+  // Discovery also runs for tracker-only users, without Nuvio cloud sync.
+  if (contapend_reenviar) contapend_reenviar();
+  // static: dois lotes de 40 CatItem passam de 1,3 MB e montar() roda uma vez,
   // num fio so — a mesma razao do vetor de Decl mais abaixo.
   static CatItem doTrakt[CONT_MAX], daConta[CONT_MAX];
   // Tres fontes: conta, Trakt e Simkl, cada uma com ate CONT_MAX.
@@ -2510,14 +3487,23 @@ static int montarContinuar(CatItem *saida, int max) {
   // Simkl nesta TV disse que acompanha por ele; deixa-lo de fora do padrao
   // repetiria o defeito do #5 — uma fonte vinculada e ignorada em silencio.
   // Quem nao vinculou nao paga nada: sem token, nenhum pedido sai.
-  int fonte = ajustes_cw_fonte();
+  //
+  // "SO O TRAKT" NUM PERFIL SEM TRAKT: a escolha veio do perfil principal (a
+  // primeira visita parte dele; ajustes-p<N>.txt antigo nao tem cwFonteLocal).
+  // Na C9 do dono o perfil 2 ficava com a fileira vazia e o progresso da conta
+  // aceito no disco. Sem vinculo nao ha Trakt a escolher: vale "Todas".
+  int fonte = ajustes_cw_fonte() == AJ_CWF_TRAKT && !trakt_ativo() ? AJ_CWF_AMBAS
+                                                                    : ajustes_cw_fonte();
   int querConta = fonte == AJ_CWF_AMBAS || fonte == AJ_CWF_CONTA;
   int querTrakt = fonte == AJ_CWF_AMBAS || fonte == AJ_CWF_TRAKT;
   int querSimkl = (fonte == AJ_CWF_AMBAS || fonte == AJ_CWF_SIMKL) && simkl_ativo();
 
   if (max > CONT_MAX) max = CONT_MAX;
-  cwGer++;
-  nT = querTrakt ? trakt_continuar(doTrakt, CONT_MAX) : 0;
+  __atomic_add_fetch(&cwGer, 1u, __ATOMIC_RELAXED);
+  nAjustados = 0;
+  // O sync de vistos alimenta os cartazes mesmo quando outra fonte de CW foi escolhida.
+  nT = trakt_ativo() ? trakt_continuar(doTrakt, CONT_MAX) : 0;
+  if (!querTrakt) nT = 0;
   // Os limites AGORA valem para todas as fontes. Sem isto, o /sync/playback
   // devolve o que qualquer cliente pausou uma vez — inclusive titulos em 0% e
   // titulos praticamente terminados, que e o "nunca assisti isso" do relato.
@@ -2532,40 +3518,58 @@ static int montarContinuar(CatItem *saida, int max) {
   if (fonte == AJ_CWF_SIMKL && !simkl_ativo())
     printf("[desc] continuar assistindo: fonte Simkl sem vinculo; fileira vazia\n");
 
-  // TRAKT E SIMKL NA MESMA OBRA: fica o de instante mais novo. Os dois
+  // TRAKT E SIMKL NA MESMA OBRA: progresso vence sugestao sem prova. Os dois
   // costumam concordar (muita gente sincroniza um no outro), e dois cards da
   // mesma serie seriam o defeito que continuarLocal ja evita.
-  for (i = 0; i < nT; i++) remotos[nR++] = &doTrakt[i];
+  // A mesma obra DENTRO do Trakt tambem entra uma vez (#244: o mesmo episodio
+  // 5x). trakt_continuar ja guarda a gravacao mais nova por obra; esta e a rede
+  // de seguranca para a chave de episodio x chave de serie e para quem chegar
+  // por outro caminho.
+  for (i = 0; i < nT; i++) {
+    int k, achou = -1;
+    for (k = 0; k < nR && achou < 0; k++)
+      if (mesmaObra(remotos[k], &doTrakt[i])) achou = k;
+    if (achou < 0) { remotos[nR++] = &doTrakt[i]; continue; }
+    repetidos++;
+    if (candidatoVence(&doTrakt[i], remotos[achou])) remotos[achou] = &doTrakt[i];
+  }
   for (i = 0; i < nS; i++) {
     int k, achou = -1;
     for (k = 0; k < nR && achou < 0; k++)
       if (mesmaObra(remotos[k], &doSimkl[i])) achou = k;
     if (achou < 0) { remotos[nR++] = &doSimkl[i]; continue; }
     repetidos++;
-    if (instanteDaConta(&doSimkl[i]) > instanteDaConta(remotos[achou]))
+    if (candidatoVence(&doSimkl[i], remotos[achou]))
       remotos[achou] = &doSimkl[i];
   }
   nL = querConta ? continuarLocal(daConta, CONT_MAX) : 0;
-  if (querConta && !trakt_ativo() && !simkl_ativo())
-    nL = contaASeguir(daConta, nL, CONT_MAX);
+  // Fonte "Conta" escolhida: a conta da o "a seguir" mesmo com Trakt/Simkl
+  // vinculado (decisao do dono). Em "Ambas" ele continua sendo do vinculo.
+  if (querConta && (fonte == AJ_CWF_CONTA || (!trakt_ativo() && !simkl_ativo())))
+    nL = contaASeguir(daConta, nL, CONT_MAX, trakt_ativo() || simkl_ativo());
   else
-    cwo_conta_definir(NULL, 0);
+    descCwoDefinir(cwo_conta_definir, NULL, 0);
+
+  // Os "a seguir" que a desmarcacao moveu (Trakt/Simkl acima; a conta, que ja
+  // foi montada em contaASeguir, entra pelo seu proprio registro e pelo id novo).
+  { const char *aj[CONT_MAX * 3];
+    int k;
+    for (k = 0; k < nAjustados; k++) aj[k] = ajustadosIds[k];
+    descCwoDefinir(cwo_ajustados_definir, aj, nAjustados); }
 
   // A CONTA ENTRA PRIMEIRO porque ela e a fonte DATADA (lastWatchedMs, que o
   // syncprog ja reconciliou entre celular e TV). O item remoto que fala da
   // mesma obra sai: manter os dois poria a mesma serie duas vezes na fileira,
   // que e o defeito que continuarLocal ja evitava dentro da propria lista.
   //
-  // EXCETO QUANDO O REMOTO E MAIS NOVO NA MESMA OBRA (issue #66): a conta tinha
-  // S1E1 a 3% de 8/9 e o Trakt dizia "viu S1E1 inteiro em 19/9, a seguir
-  // S1E2"; manter a conta punha na fileira um episodio ja visto, com o selo
-  // "a seguir" do outro. O instante decide, como no resto desta funcao.
+  // Uma sugestao so substitui o pausado da conta com conclusao confirmada
+  // posterior daquele episodio. Recencia sozinha nao prova conclusao.
   { static int pularLocal[CONT_MAX];
     memset(pularLocal, 0, sizeof pularLocal);
     for (i = 0; i < nR; i++)
       for (j = 0; j < nL; j++)
         if (mesmaObra(remotos[i], &daConta[j]) &&
-            instanteDaConta(remotos[i]) > instanteDaConta(&daConta[j]))
+            candidatoVence(remotos[i], &daConta[j]))
           pularLocal[j] = 1;
   for (i = 0; i < nL && nJ < (int)(sizeof juntos / sizeof *juntos); i++) {
     if (pularLocal[i]) continue;
@@ -2603,13 +3607,33 @@ static int montarContinuar(CatItem *saida, int max) {
       printf("[desc] continuar assistindo: %d tirado(s) pela pessoa, remoto ainda nao refletiu\n",
              tirados); }
 
+  // OCULTO PELA PESSOA, EM DISCO (#203): o "Tirar de Continuar assistindo" num
+  // item "A seguir". Vale para as tres fontes e sobrevive ao reinicio; a obra
+  // VOLTA SOZINHA quando ha episodio novo (instante mais novo que o carimbo, ou
+  // registro local mais novo). Esta leitura so altera o espelho local; nao
+  // escreve no Trakt.
+  { int w = 0, ocultos = 0;
+    for (i = 0; i < nJ; i++) {
+      if (prog_oculto_vence(juntos[i].item->imdb, juntos[i].ms)) { ocultos++; continue; }
+      if (prog_oculto_soltar(juntos[i].item->imdb, juntos[i].ms)) {
+        printf("[desc] continuar assistindo: %s voltou (episodio novo)\n", juntos[i].item->imdb);
+      }
+      juntos[w++] = juntos[i];
+    }
+    nJ = w;
+    if (ocultos)
+      printf("[desc] continuar assistindo: %d oculto(s) pela pessoa\n", ocultos); }
+
   // Insercao: estavel, nJ <= 36, e roda uma vez por ciclo de descoberta.
   for (i = 1; i < nJ; i++) {
     int k = i;
     while (k > 0) {
       long long a = juntos[k].ms, b = juntos[k - 1].ms;
       int troca;
-      if (a != b) troca = !b ? 0 : (!a ? 1 : a > b);
+      int pa = emAndamento(juntos[k].item->progresso);
+      int pb = emAndamento(juntos[k - 1].item->progresso);
+      if (ajustes_cw_ordem() != CWO_PADRAO && pa != pb) troca = pa;
+      else if (a != b) troca = a > b;
       else        troca = juntos[k].ord < juntos[k - 1].ord;
       if (!troca) break;
       { Cand t = juntos[k - 1]; juntos[k - 1] = juntos[k]; juntos[k] = t; }
@@ -2618,7 +3642,7 @@ static int montarContinuar(CatItem *saida, int max) {
   }
 
   // A ORDENACAO ESCOLHIDA EM AJUSTES (issue #127) — ver cwordem.h. Ate aqui a
-  // lista esta pelo instante, que e o modo "Padrao". "Estilo streaming" e
+  // lista esta por grupo e recencia. "Estilo streaming" e
   // "Separar futuros" levam os "a seguir" que ainda nao foram ao ar para o fim,
   // pela estreia; no segundo a home ainda os tira desta fileira e monta
   // "Proximos episodios" com eles. `showUnairedNextUp` desligado os tira de vez
@@ -2630,13 +3654,20 @@ static int montarContinuar(CatItem *saida, int max) {
     static const char *futIds[CONT_MAX * 3];
     long long agora = (long long)time(NULL) * 1000LL;
     int modo = ajustes_cw_ordem(), naoExibidos = ajustes_cw_mostrar_nao_exibidos();
-    int escondidos = 0, semData = 0, principal, nFut = 0, mp, mf, w = 0;
+    int proxFora = 0, escondidos = 0, semData = 0, principal, nFut = 0, mp, mf, w = 0;
     for (i = 0; i < nJ; i++) {
       const CatItem *c = juntos[i].item;
       CwoItem x;
-      x.aSeguir = c->progresso == 0 &&
-                  (trakt_e_a_seguir(c->imdb) || simkl_e_a_seguir(c->imdb) ||
-                   cwo_conta_a_seguir(c->imdb));
+      x.aSeguir = !emAndamento(c->progresso);
+      // "PROXIMO EPISODIO NO CONTINUAR" desligado (#203): sai todo item que e o
+      // PROXIMO — o "a seguir" e o episodio terminado que o card trocaria pelo
+      // seguinte (continuar_desenhar). Fica so o que esta em andamento.
+      if (!ajustes_cw_proximo() &&
+          (x.aSeguir || (!strcmp(c->tipo, "series") && c->temporada >= 0 && c->episodio > 0 &&
+                         c->progresso >= ajustes_cw_concluido()))) {
+        proxFora++;
+        continue;
+      }
       x.estreiaMs = x.aSeguir ? cwo_estreia(c->imdb) : CWO_SEM_DATA;
       // POR ITEM, para o log de campo dizer POR QUE um "a seguir" nao virou
       // futuro: sem data ele conta como exibido (como o `hasAired !== false`
@@ -2656,13 +3687,21 @@ static int montarContinuar(CatItem *saida, int max) {
       cwo[w++] = x;
     }
     nJ = w;
+    if (proxFora)
+      printf("[desc] continuar assistindo: %d proximo(s) fora (Proximo episodio no Continuar desligado)\n", proxFora);
     principal = cwo_ordenar(cwo, nJ, modo, agora, perm);
     for (i = 0; i < nJ; i++) ordenados[i] = juntos[perm[i]];
     // O CORTE DE `max` COM RESERVA PARA OS FUTUROS (cwo_corte, cwordem.h).
     // Antes era um slice de [exibidos..., futuros...]: com a fileira cheia —
     // 22 candidatos para 12 lugares na C9 do dono — os futuros eram sempre os
     // cortados, e "Separar futuros"/"Estilo streaming" nao mudavam nada.
-    cwo_corte(principal, nJ - principal, max, &mp, &mf);
+    // Reserva para futuros apenas DEPOIS dos pausados, nunca contra eles.
+    { int pausados = 0;
+      while (pausados < principal && emAndamento(ordenados[pausados].item->progresso)) pausados++;
+      if (pausados > max) pausados = max;
+      cwo_corte(principal - pausados, nJ - principal, max - pausados, &mp, &mf);
+      mp += pausados;
+    }
     for (i = 0; i < mp; i++) juntos[i] = ordenados[i];
     for (i = 0; i < mf; i++) {
       juntos[mp + i] = ordenados[principal + i];
@@ -2677,7 +3716,7 @@ static int montarContinuar(CatItem *saida, int max) {
       nJ = mp + mf;
       // Publicado ANTES de cat_trocar_continuar (quem chama publica a fileira
       // depois deste retorno): a home nunca ve a lista nova com o conjunto velho.
-      cwo_publicar_futuros(futIds, nFut);
+      descCwoDefinir(cwo_publicar_futuros, futIds, nFut);
       if (modo != CWO_PADRAO || escondidos || semData)
         printf("[desc] continuar assistindo: ordem %s, %d futuro(s)%s, %d escondido(s), "
                "%d sem data, nao exibidos %s, corte: %d exibido(s) e %d futuro(s) fora\n",
@@ -2695,6 +3734,12 @@ static int montarContinuar(CatItem *saida, int max) {
   // o ciclo seguinte com o Trakt de volta refaz a fileira normalmente.
   if (nJ == 0 && querTrakt && trakt_continuar_falhou()) {
     int k = cat_copiar_fileira("continue_watching", saida, max, NULL);
+    if (!ajustes_cw_proximo()) {
+      int w = 0;
+      for (i = 0; i < k; i++)
+        if (emAndamento(saida[i].progresso)) saida[w++] = saida[i];
+      k = w;
+    }
     // A metade que falta provar: por que a conta veio 0. Registros no
     // progresso deste perfil, antes dos filtros de 1-90%.
     if (querConta) {
@@ -2749,30 +3794,94 @@ static int montarContinuar(CatItem *saida, int max) {
 // do player no meio de uma refazagem — ganha UMA rodada a mais no fim, nao
 // uma fila: so o estado final interessa.
 static volatile int cwVivo, cwDeNovo;
+static pthread_mutex_t cwFilaTrava = PTHREAD_MUTEX_INITIALIZER;
 void desc_refazer_continuar(void);
 
 static void *fioContinuar(void *u) {
-  CatItem lote[CONT_MAX];
+  // static: 40 CatItem sao ~680 KB; um fio de refazagem por vez (cwVivo).
+  static CatItem lote[CONT_MAX];
   int n;
-  (void)u;
+  unsigned minhaGer;
+  NvPerfilSessao sessao = u ? *(NvPerfilSessao *)u : nv_perfil_sessao_ler();
+  free(u);
+  if (!descSessaoVincular(sessao)) goto fim;
   pthread_mutex_lock(&contTrava);
+  if (!descSessaoAtual()) { pthread_mutex_unlock(&contTrava); goto fim; }
   n = montarContinuar(lote, CONT_MAX);
-  // Publica AINDA sob a trava: ver cwGer.
-  cat_trocar_continuar(lote, n);
-  cwGerNaTela = cwGer;
+  minhaGer = __atomic_load_n(&cwGer, __ATOMIC_RELAXED);
   pthread_mutex_unlock(&contTrava);
-  localizarContinuarPublicado();
-  cwVivo = 0;
-  if (cwDeNovo) { cwDeNovo = 0; desc_refazer_continuar(); }
+  if (nv_perfil_sessao_travar(sessao)) {
+    pthread_mutex_lock(&cwPubTrava);
+    if (minhaGer >= cwGerNaTela) {
+      cat_trocar_continuar(lote, n);
+      cwGerNaTela = minhaGer;
+    }
+    pthread_mutex_unlock(&cwPubTrava);
+    nv_perfil_sessao_destravar();
+    localizarContinuarPublicado();
+  }
+fim:
+  pthread_mutex_lock(&cwFilaTrava);
+  int repetir = cwDeNovo;
+  cwVivo = cwDeNovo = 0;
+  pthread_mutex_unlock(&cwFilaTrava);
+  if (repetir) desc_refazer_continuar();
   return NULL;
 }
 
 void desc_refazer_continuar(void) {
   pthread_t t;
-  if (cwVivo) { cwDeNovo = 1; return; }
+  NvPerfilSessao *sessao;
+  pthread_mutex_lock(&cwFilaTrava);
+  if (cwVivo) { cwDeNovo = 1; pthread_mutex_unlock(&cwFilaTrava); return; }
+  sessao = malloc(sizeof *sessao);
+  if (!sessao) { pthread_mutex_unlock(&cwFilaTrava); return; }
+  *sessao = nv_perfil_sessao_ler();
   cwVivo = 1;
-  if (pthread_create(&t, NULL, fioContinuar, NULL) != 0) cwVivo = 0;
-  else pthread_detach(t);
+  int erro = pthread_create(&t, NULL, fioContinuar, sessao);
+  if (erro) { cwVivo = 0; free(sessao); }
+  pthread_mutex_unlock(&cwFilaTrava);
+  if (!erro) pthread_detach(t);
+}
+
+// A SAIDA DO PLAYER, LOCAL E NO MESMO QUADRO (cwfrente.h). Substitui o
+// desc_repetir() que app.c pedia quando o titulo nao estava na fileira: o ciclo
+// inteiro (~20 s na TV) publicava a home de novo, o card entrava muito depois
+// do pouso na ilha e a carga dele tomava a pilula. A refacao so do Continuar
+// ja sai de fecharSessao e reconcilia com a conta/Trakt/Simkl.
+//
+// Chamada no fio de desenho, depois de o progresso ir para o item
+// (cat_salvar_progresso_ep): o card nasce com a barra e o episodio de agora.
+// contTrava so por TRYLOCK: um fioContinuar com ela esta na rede, e publica a
+// verdade por cima desta logo depois. Com ela, a geracao anda como numa
+// refacao — um montar() em curso reaplica esta janela em vez de devolver a
+// fileira velha (cwAntesDePublicar).
+int desc_continuar_otimista(int indice) {
+  static CatItem atual[CONT_MAX], saida[CONT_MAX];
+  CatItem novo;
+  const CatItem *ci = cat_item(indice);
+  int n, k, mudou, travou;
+  if (!ci || !ci->imdb[0]) return 0;
+  novo = *ci;
+  if (novo.progresso < ajustes_cw_minimo() || novo.progresso >= ajustes_cw_concluido()) return 0;
+  if (ajustes_cw_fonte() == AJ_CWF_SIMKL && !simkl_ativo()) return 0;
+  if (!strcmp(novo.tipo, "series") && novo.temporada >= 0 && novo.episodio > 0) {
+    char base[64];
+    idbase_copiar(ci->imdb, base, sizeof base);
+    snprintf(novo.imdb, sizeof novo.imdb, "%s:%d:%d", base, novo.temporada, novo.episodio);
+  }
+  travou = pthread_mutex_trylock(&cwPubTrava) == 0;
+  n = cat_copiar_fileira("continue_watching", atual, CONT_MAX, NULL);
+  k = cw_frente_compor(atual, n, &novo, saida, CONT_MAX, &mudou);
+  if (mudou) {
+    cat_trocar_continuar(saida, k);
+    if (travou) cwGerNaTela = __atomic_add_fetch(&cwGer, 1u, __ATOMIC_RELAXED);
+  }
+  if (travou) pthread_mutex_unlock(&cwPubTrava);
+  printf("[desc] continuar assistindo: %s %s ao sair do player (local; a refacao confirma)\n",
+         novo.imdb, mudou ? "na frente" : "ja estava na frente");
+  fflush(stdout);
+  return mudou;
 }
 
 // AS DUAS METADES DE UMA PUBLICACAO DE montar() (ver cwGer). A primeira toma
@@ -2783,8 +3892,9 @@ void desc_refazer_continuar(void) {
 static CatItem *cwAntesDePublicar(int *k) {
   CatItem *c = NULL;
   *k = 0;
-  pthread_mutex_lock(&contTrava);
-  if (cwGerNaTela > cwGerMontar && (c = malloc(sizeof(CatItem) * CONT_MAX)))
+  pthread_mutex_lock(&cwPubTrava);
+  if (cwGerNaTela > __atomic_load_n(&cwGerMontar, __ATOMIC_RELAXED) &&
+      (c = malloc(sizeof(CatItem) * CONT_MAX)))
     *k = cat_copiar_fileira("continue_watching", c, CONT_MAX, NULL);
   return c;
 }
@@ -2797,14 +3907,20 @@ static void cwDepoisDePublicar(CatItem *c, int k) {
     cat_trocar_continuar(c, k);
     free(c);
   }
-  pthread_mutex_unlock(&contTrava);
+  pthread_mutex_unlock(&cwPubTrava);
 }
 // Toda publicacao de montar() passa por aqui (em partes e a do fim).
 static void publicarMontagem(const CatItem *lote, int n, const CatFileira *fils, int nf) {
   int k;
-  CatItem *cw = cwAntesDePublicar(&k);
+  double t0 = cat_relogio_ms();
+  CatItem *cw;
+  if (!nv_perfil_sessao_travar(descSessao())) return;
+  cw = cwAntesDePublicar(&k);
   cat_definir_tudo(lote, n, fils, nf);
   cwDepoisDePublicar(cw, k);
+  nv_perfil_sessao_destravar();
+  printf("[perf] publicarMontagem: %d itens, %d fileiras, %.1f ms\n", n, nf, cat_relogio_ms() - t0);
+  fflush(stdout);
 }
 
 // A METADE LOCAL DE "TIRAR DE CONTINUAR ASSISTINDO", toda no fio de quem
@@ -2815,13 +3931,24 @@ static void publicarMontagem(const CatItem *lote, int n, const CatFileira *fils,
 // cat_trocar_continuar concorrente ou ja enxergar o carimbo (e podar) ou
 // publicar antes da remocao (e ser corrigida por ela). Os DELETE remotos sao
 // de quem chama. Devolve quantos cards sairam.
-// Leitura sem trava, como desc_repetir ja faz com `buscando`: um quadro de
-// atraso na resposta nao muda nada para quem pergunta (app.c, uma vez por
-// quadro, com teto de tempo).
+// Dispatcher state uses its short mutex; no network wait is held here.
 int desc_montando(void) {
-  return buscando || repetirAoFim || cwVivo || cwDeNovo;
+  int pendente;
+  pthread_mutex_lock(&listaTrava);
+  pendente = buscando || repetirAoFim || descDeb.adiado ||
+             (aberturaPendente && nv_perfil_sessao_atual(aberturaSessao));
+  pthread_mutex_unlock(&listaTrava);
+  pthread_mutex_lock(&cwFilaTrava);
+  pendente = pendente || cwVivo || cwDeNovo;
+  pthread_mutex_unlock(&cwFilaTrava);
+  return pendente;
 }
-
+// A CARGA DA HOME (o aviso "Carregando fileiras…" da ilha) e o ciclo de
+// descoberta, nao a refacao so do Continuar assistindo: essa nao consulta add-on
+// nenhum, roda a cada saida do player (fecharSessao) e, contada como carga,
+// trocava o cartao da pilula pelo aviso no meio do voo do player ate a ilha
+// (tests/ilha_voo_cw.sh). desc_montando continua com as duas: a troca de perfil
+// espera a fileira certa.
 int desc_tirar_continuar(const char *imdb, int temporada, int episodio) {
   char chave[192];
   if (!imdb || !imdb[0]) return 0;
@@ -2876,7 +4003,7 @@ static int ordenarCandidatos(Decl *decls, int nDecl, int *ordem, int nFixas,
         const char *b = addons_base(i2);
         if (!b || !b[0]) continue;
         for (j = 0; j < nDecl; j++)
-          if (!vistos[j] && decls[j].base && !strcmp(decls[j].base, b)) {
+          if (!vistos[j] && decls[j].base[0] && !strcmp(decls[j].base, b)) {
             ordem[nOrdem++] = j; vistos[j] = 1; pegou = 1; break;
           }
       }
@@ -2938,18 +4065,27 @@ static int ordenarCandidatos(Decl *decls, int nDecl, int *ordem, int nFixas,
     // conhecidos — a tela de Ajustes precisa deles para dizer de onde a
     // fileira vem. `-1` em itens porque nesta altura nenhum catalogo foi
     // pedido ainda; quem sabe a contagem e home.c.
-    for (k = 0; k < nOrdem && k < FIL_MAX; k++)
-      fil_registrar(decls[ordem[k]].chave, decls[ordem[k]].titulo,
-                    decls[ordem[k]].nomeAddon, decls[ordem[k]].tipo, -1);
-    fil_gravar_registro();
+    // #392: so com a lista de addons DESTE perfil. Logo depois de uma troca a
+    // lista ainda e a do perfil que saiu (a conta responde alguns segundos
+    // depois); registra-la despejava as fileiras do perfil novo e acrescentava
+    // as do outro ("a ordem da Home muda quando volto ao principal").
+    if (fil_passada_valida(&passadaVolta)) {
+      for (k = 0; k < nOrdem && k < FIL_MAX; k++)
+        fil_registrar_de(&passadaVolta, decls[ordem[k]].chave, decls[ordem[k]].titulo,
+                         decls[ordem[k]].nomeAddon, decls[ordem[k]].tipo, -1);
+      fil_gravar_registro();
+    } else {
+      printf("[fileiras] lista de addons ainda e de outro perfil: nada registrado\n");
+      fflush(stdout);
+    }
   }
 
   // TETO DE FILEIRAS: o numero escolhido em Ajustes (7 de fabrica),
   // limitado pelo CAT_FIL_MAX do vetor. Ele corta o que vai ser PEDIDO pela
   // rede, e nao o desenho: sete fileiras tem de custar sete GET, senao o
-  // ajuste economiza pixel e nao trabalho. `nFil` ja conta "Continuar
-  // assistindo" e "Amigos assistindo" — sao fileiras na tela como as outras.
-  int teto = fil_limite();
+  // ajuste economiza pixel e nao trabalho. As fixas nao fazem GET e nao
+  // consomem a cota de catalogos.
+  int teto = fil_limite() + nFixas;
   if (teto > CAT_FIL_MAX) teto = CAT_FIL_MAX;
   if (tetoSaida) *tetoSaida = teto;
 
@@ -2987,7 +4123,7 @@ static int ordenarCandidatos(Decl *decls, int nDecl, int *ordem, int nFixas,
       deslig[c] = (char)desligada(&decls[c]);
       for (q = 0; q < nAd3; q++) {
         const char *b = addons_base(q);
-        if (b && b[0] && decls[c].base && !strcmp(decls[c].base, b)) { addonDe[c] = q; break; }
+        if (b && b[0] && decls[c].base[0] && !strcmp(decls[c].base, b)) { addonDe[c] = q; break; }
       }
     }
     for (q = 0; q < nAd3; q++) {
@@ -3103,7 +4239,12 @@ static int salvarSnapshot(const CatFileira *fils, int n, unsigned geracao) {
       }
     if (i < n && m < CAT_FIL_MAX) todas[m++] = fils[i];
   }
-  return homeestado_salvar_se_geracao(todas, m, geracao);
+  { double t0 = cat_relogio_ms();
+    int r = 0;
+    DESC_PUBLICAR(r = homeestado_salvar_se_geracao(todas, m, geracao));
+    printf("[perf] snapshot da home: %d fileiras em %.1f ms\n", m, cat_relogio_ms() - t0);
+    fflush(stdout);
+    return r; }
 }
 
 // A FONTE (dono, perfil, idioma, addons) continua a mesma de quando a volta
@@ -3113,7 +4254,7 @@ static int fonteIntacta(const HomeContexto *ini) {
   HomeContexto c;
   (void)homeestado_geracao();
   homeestado_contexto(&c);
-  return !(homeestado_mudancas(ini, &c) & HOMEESTADO_MUDOU_FONTE);
+  return descSessaoAtual() && !(homeestado_mudancas(ini, &c) & HOMEESTADO_MUDOU_FONTE);
 }
 
 // COM A ESTRUTURA DE AGORA, UMA MONTAGEM NOVA PEDIRIA ALGO QUE ESTA NAO PEDIU?
@@ -3179,11 +4320,12 @@ static unsigned long long descAgoraMs(void) {
 //
 // O fio e DESTACADO e o pedido tem dono: montar() que desiste no meio (volta
 // condenada) larga o pedido e quem termina por ultimo libera.
-#define LISTA_TRAKT_MAX 400
+#define LISTA_TRAKT_MAX TRAKT_LISTA_MAX
 typedef struct {
   CatItem *wl, *col;
   int nWl, nCol;
   int pronto, largado;
+  NvPerfilSessao sessao;
 } ListasTrakt;
 static pthread_mutex_t listasTrava = PTHREAD_MUTEX_INITIALIZER;
 
@@ -3192,11 +4334,44 @@ static void listasLiberar(ListasTrakt *j) {
   free(j->wl); free(j->col); free(j);
 }
 
+static int listaGuardada(CatItem *v, int max, int fonte, int colecao) {
+  int n = 0;
+  for (int i = 0; v && i < cat_n() && n < max; i++) {
+    const CatItem *c = cat_item(i);
+    if (!c || (colecao ? !c->naColecao : !(c->listaFontes & (1u << fonte)))) continue;
+    int j;
+    for (j = 0; j < n; j++) if (!strcmp(v[j].imdb, c->imdb)) break;
+    if (j == n) v[n++] = *c;
+  }
+  return n;
+}
+
 static CatItem *listaBuscar(const char *qual, int *n) {
-  CatItem *v = malloc(sizeof(CatItem) * LISTA_TRAKT_MAX), *menor;
-  *n = 0;
-  if (!v) return NULL;
-  *n = trakt_lista(qual, v, LISTA_TRAKT_MAX);
+  CatItem *v = NULL, *menor;
+  *n = trakt_lista_cresc(qual, &v, LISTA_TRAKT_MAX);
+  int accepted = *n >= 0;
+  if (*n < 0 && descSessaoAtual()) {
+    free(v);
+    v = malloc(sizeof *v * (size_t)LISTA_TRAKT_MAX);
+    // Failed/partial remote reads retain this session's complete membership.
+    *n = listaGuardada(v, LISTA_TRAKT_MAX, AJ_SALVOS_TRAKT, strcmp(qual, "watchlist") != 0);
+  }
+  int before = 0, kept = 0;
+  for (int i = 0; i < cat_n(); i++) {
+    const CatItem *c = cat_item(i);
+    if (!c || (!strcmp(qual, "watchlist") ? !(c->listaFontes & (1u << AJ_SALVOS_TRAKT)) : !c->naColecao)) continue;
+    int j;
+    for (j = 0; j < i; j++) {
+      const CatItem *p = cat_item(j);
+      if (p && !strcmp(p->imdb, c->imdb) && (!strcmp(qual, "watchlist")
+          ? (p->listaFontes & (1u << AJ_SALVOS_TRAKT)) : p->naColecao)) break;
+    }
+    if (j < i) continue;
+    before++;
+    for (j = 0; j < *n; j++) if (!strcmp(v[j].imdb, c->imdb)) { kept++; break; }
+  }
+  printf("[library-sync] source=trakt-%s profile=%d added=%d removed=%d kept=%d accepted=%d\n",
+         qual, perfis_ativo(), *n - kept, before - kept, kept, accepted);
   if (*n <= 0) { free(v); *n = 0; return NULL; }
   menor = realloc(v, sizeof(CatItem) * (size_t)*n);
   return menor ? menor : v;
@@ -3205,8 +4380,11 @@ static CatItem *listaBuscar(const char *qual, int *n) {
 static void *fioListas(void *u) {
   ListasTrakt *j = u;
   int nw = 0, nc = 0;
-  CatItem *wl = listaBuscar("watchlist", &nw);
-  CatItem *col = listaBuscar("collection", &nc);
+  CatItem *wl = NULL, *col = NULL;
+  if (descSessaoVincular(j->sessao)) {
+    wl = listaBuscar("watchlist", &nw);
+    if (descSessaoAtual()) col = listaBuscar("collection", &nc);
+  }
   pthread_mutex_lock(&listasTrava);
   if (j->largado) {
     pthread_mutex_unlock(&listasTrava);
@@ -3224,6 +4402,7 @@ static ListasTrakt *listasLargar(void) {
   ListasTrakt *j = calloc(1, sizeof *j);
   pthread_t t;
   if (!j) return NULL;
+  j->sessao = descSessao();
   if (pthread_create(&t, NULL, fioListas, j) != 0) { free(j); return NULL; }
   pthread_detach(t);
   return j;
@@ -3277,6 +4456,67 @@ static void publicarParcial(CatItem **lote, int *cap, int n,
   parcialNaTela = 1;
 }
 
+typedef struct { int refs, pronto, semFio, n; CatItem itens[8]; NvPerfilSessao sessao; } SocialFio;
+static void socialSoltar(SocialFio *f) {
+  if (f && __atomic_sub_fetch(&f->refs, 1, __ATOMIC_ACQ_REL) == 0) free(f);
+}
+static void socialLer(SocialFio *f) {
+  if (!descSessaoVincular(f->sessao)) return;
+  // "Recursos sociais" desligado: sem feed do Trakt, sem amigos do Nuvio.
+  if (!ajustes_social()) { f->n = 0; return; }
+  f->n = trakt_social(f->itens, 8);
+  if (descSessaoAtual()) {
+    f->n = recomenda_social_mesclar_sessao
+         ? recomenda_social_mesclar_sessao(f->itens, f->n, 8, f->sessao)
+         : recomenda_social_mesclar(f->itens, f->n, 8);
+  } else f->n = 0;
+}
+static void *fioSocial(void *u) {
+  SocialFio *f = u;
+  socialLer(f);
+  __atomic_store_n(&f->pronto, 1, __ATOMIC_RELEASE);
+  socialSoltar(f);
+  return NULL;
+}
+static SocialFio *socialLargar(void) {
+  SocialFio *f = calloc(1, sizeof *f);
+  pthread_t fio;
+  if (!f) return NULL;
+  f->refs = 2; f->sessao = descSessao();
+  if (pthread_create(&fio, NULL, fioSocial, f) == 0) pthread_detach(fio);
+  else { f->refs = 1; f->semFio = 1; }
+  return f;
+}
+
+// Uma espera por execucao, MAIS uma por troca de perfil (desc_esperar_conta):
+// a troca zera o ciclo da conta (sync_perfil_pronto = 0) e a volta pedida logo
+// depois leria a lista de addons ainda vazia, publicando um catalogo ralo por
+// cima das fileiras e gravando-o como cache do perfil (#488).
+static int jaEsperou, esperaContaPendente;
+void desc_esperar_conta(void) { esperaContaPendente = 1; }
+static void esperarConta(unsigned minhaGeracao) {
+  static NvPerfilSessao sessaoEsperada;
+  int k, deTroca = esperaContaPendente;
+  if (deTroca) { esperaContaPendente = 0; jaEsperou = 0; }
+  if (sessaoEsperada != descSessao()) jaEsperou = 0;
+  if (jaEsperou || !esperaAddons || !esperaAddons()) return;
+  {
+    Uint32 desde = 0;
+    jaEsperou = 1;
+    sessaoEsperada = descSessao();
+    printf("[desc] esperando a conta (addons, colecoes, ordem) antes de montar a Home\n"); fflush(stdout);
+    while (minhaGeracao == montagemGeracao && (k = esperaAddons()) != 0) {
+      if (k == 2) {   // perfil ja escolhido: o prazo corre
+        if (!desde) desde = SDL_GetTicks();
+        else if (SDL_GetTicks() - desde > 10000u) break;
+      }
+      SDL_Delay(50);
+    }
+    printf("[desc] conta pronta: %d addon(s) (espera encerrada)\n", addons_n()); fflush(stdout);
+  }
+  // Condenada no meio: a volta que a substitui ainda precisa esperar a conta.
+  if (deTroca && minhaGeracao != montagemGeracao) esperaContaPendente = 1;
+}
 static void *montar(void *u) {
   // O lote tambem cresce: era dimensionado por CAT_MAX e por isso herdava o
   // mesmo teto arbitrario.
@@ -3284,7 +4524,13 @@ static void *montar(void *u) {
   CatItem *lote = malloc(sizeof(CatItem) * (size_t)cap);
   int n = 0, i;
   int nContinuar = 0, nSocial = 0;
+  unsigned socialGeracao;
   unsigned minhaGeracao = montagemGeracao;
+  if (!descSessaoVincular(montagemSessao)) {
+    printf("[desc] volta largada: a sessao do perfil mudou antes de ela comecar\n");
+    fflush(stdout);
+    free(lote); buscandoSoltar(); descTentarAbertura(); return NULL;
+  }
   // O CONTEXTO EM QUE ESTA VOLTA BUSCA, em partes (ver homeestado.h). A
   // identidade vale do inicio: o Trakt e lido logo abaixo. Os addons sao
   // recapturados no instante em que a lista e lida, e a estrutura no instante
@@ -3294,7 +4540,7 @@ static void *montar(void *u) {
   (void)homeestado_geracao();
   homeestado_contexto(&ctxIni);
   snprintf(donoIni, sizeof donoIni, "%s", sessao_usuario() ? sessao_usuario() : "");
-  // PUBLICAR EM PARTES SO COM A TELA VAZIA.
+  // PUBLICAR EM PARTES SO DURANTE O ARRANQUE DO CATALOGO.
   //
   // A publicacao fileira a fileira existe para a PRIMEIRA home aparecer cedo.
   // Numa volta seguinte (sync que trouxe addons, remontagem pedida, ciclo de
@@ -3303,9 +4549,13 @@ static void *montar(void *u) {
   // "[home] 13 fileiras na tela" seguido de "6", "8", "9", "11", "13", "14"...
   // Era o "ela fica recarregando" do dono. Com algo na tela, a volta monta em
   // silencio e publica UMA vez no fim — e so se mudou (ver a assinatura).
-  // Tela PARCIAL (o que uma volta condenada chegou a publicar em partes) conta
-  // como vazia: ver parcialNaTela.
-  int progressivo = (cat_n() == 0) || parcialNaTela;
+  // So CW/social na tela ainda nao e uma home completa. O fio de CW pode
+  // publica-los antes deste ciclo e, com cat_n()>0, segurava a primeira fileira
+  // pronta ate o ultimo catalogo terminar. Leitura coerente sob pubTrava evita
+  // tomar o n==0 transitorio de uma troca de bloco por uma tela vazia. Listas,
+  // colecoes e qualquer catalogo pronto continuam no modo silencioso.
+  // Tela PARCIAL (volta interrompida) continua crescendo: parcialNaTela.
+  int progressivo = cat_home_apenas_fixas() || parcialNaTela;
   // As listas do Trakt ja foram para a tela nesta volta (em partes ou mescladas).
   int listasNaTela = 0;
   // Tamanho do lote na ultima publicacao em partes DESTA volta; -1 = nenhuma.
@@ -3313,10 +4563,14 @@ static void *montar(void *u) {
   // Onde a volta estava quando foi condenada, para a linha do log.
   const char *ondeParou = "";
   ListasTrakt *listas = NULL;
+  SocialFio *social = NULL;
   // Versao da lista de addons que maniLargar viu. Ver o relargar na leitura.
   unsigned versaoLargada;
   (void)u;
-  if (!lote) { buscando = 0; return NULL; }
+  pthread_mutex_lock(&cargaTrava);
+  memset(&carga, 0, sizeof carga); cargaDesde = SDL_GetTicks();
+  pthread_mutex_unlock(&cargaTrava);
+  if (!lote) { buscandoSoltar(); return NULL; }
 
   // O "continue assistindo" vem PRIMEIRO e do Trakt. A home usa as primeiras
   // posicoes do catalogo nessa fileira, entao a ordem aqui e o que define o
@@ -3340,10 +4594,28 @@ static void *montar(void *u) {
         free(lig);
       }
     } }
+  // A janela local continua visivel enquanto a conta confirma o progresso.
+  // Capturar a geracao PUBLICADA junto da copia: uma refacao em voo ainda nao
+  // faz parte deste lote e precisa sobreviver a cada publicacao dos catalogos.
+  if (nv_perfil_sessao_travar(descSessao())) {
+    pthread_mutex_lock(&cwPubTrava);
+    nContinuar = cat_copiar_fileira("continue_watching", lote, CONT_MAX, NULL);
+    __atomic_store_n(&cwGerMontar, cwGerNaTela, __ATOMIC_RELAXED);
+    pthread_mutex_unlock(&cwPubTrava);
+    nv_perfil_sessao_destravar();
+  }
+  n = nContinuar;
+  // Prioridade e largar o Continuar primeiro, nao fazer o resto esperar por
+  // ele. O fio existente publica a fileira assim que fica pronta, na frente
+  // das fileiras de catalogo que ja chegaram.
+  desc_refazer_continuar();
+  socialGeracao = recomenda_geracao();
+  social = socialLargar();
   // OS MANIFESTOS COMECAM A CHEGAR AGORA, nao daqui a seis segundos. Ver o
   // cabecalho de maniLargar: eles nao dependem do Trakt, e eram o bloco de 7 s
   // logo depois dele.
   versaoLargada = addons_versao();
+  cargaFase(1);
   maniLargar();
   // E a watchlist/colecao do Trakt tambem: ver ListasTrakt.
   listas = listasLargar();
@@ -3353,7 +4625,7 @@ static void *montar(void *u) {
   // depois de pagar todos os manifestos e catalogos. MEDIDO na C9 do dono: 45 s
   // de uma volta que ninguem ia ver. Os pontos abaixo sao os seguros: fora de
   // trava, sem fio de catalogo esperando por quem sai.
-#define CONDENADA(onde) (minhaGeracao != montagemGeracao ? (ondeParou = (onde), 1) : 0)
+#define CONDENADA(onde) ((minhaGeracao != montagemGeracao || !descSessaoAtual()) ? (ondeParou = (onde), 1) : 0)
   // AS LISTAS DO TRAKT ASSIM QUE CHEGAREM, em qualquer ponto seguro. Com a
   // home inteira na tela (volta silenciosa) so marca e acrescenta; em partes,
   // entram de rabo na publicacao seguinte (ou nesta, se ja houve uma).
@@ -3362,8 +4634,8 @@ static void *montar(void *u) {
         minhaGeracao == montagemGeracao && fonteIntacta(&ctxIni)) { \
       if (!progressivo) { \
         listasNaTela = 1; \
-        if (listas->nWl) cat_mesclar_listas(listas->wl, listas->nWl); \
-        if (listas->nCol) cat_mesclar_listas(listas->col, listas->nCol); \
+        if (listas->nWl) descCatMesclar(listas->wl, listas->nWl); \
+        if (listas->nCol) descCatMesclar(listas->col, listas->nCol); \
         marco("listas do trakt na tela"); \
       } else if (n == nPublicado || n == 0) { \
         /* So com o lote igual ao que esta na tela: o rabo de rascunho nao \
@@ -3374,60 +4646,18 @@ static void *montar(void *u) {
                         listas, &listasNaTela); \
       } \
     } } while (0)
-  // AS DUAS FONTES, UNIDAS. Ver o cabecalho de montarContinuar: com Trakt
-  // vinculado esta fileira ignorava o progresso da conta Nuvio, que e o que
-  // chega do celular do dono.
-  pthread_mutex_lock(&contTrava);
-  nContinuar = montarContinuar(lote, CONT_MAX);
-  cwGerMontar = cwGer;
-  n += nContinuar;
-  marco("trakt continuar assistindo");
-  if (CONDENADA("depois do continuar assistindo")) {
-    pthread_mutex_unlock(&contTrava);
-    goto condenada;
-  }
-  // O feed social oficial e uma fileira propria, logo depois do retorno ao
-  // que estava sendo visto. Ele vem cedo para nao depender dos manifestos dos
-  // addons e usa a mesma credencial Trakt ja carregada.
-  // Sob a MESMA trava: trakt_social e montarContinuar compartilham os buffers
-  // de trakt_enfeitar_lote com o fio de desc_refazer_continuar.
-  nSocial = trakt_social(lote + n, 8);
-  // ... E OS AMIGOS DO NUVIO. 251 das 310 contas do servico social nao tem
-  // Trakt (docs/ANALISE-ADDONS-AMIGOS.md): para elas a fileira so existia vazia.
-  // A uniao vem do nosso servico (amigos MUTUOS que ligaram a atividade), um
-  // titulo uma vez so, e ainda sob a mesma trava: usa os mesmos buffers de
-  // enfeite que o Trakt acima.
-  nSocial = recomenda_social_mesclar(lote + n, nSocial, 8);
-  pthread_mutex_unlock(&contTrava);
-  n += nSocial;
-  marco("trakt atividade dos amigos");
-  if (CONDENADA("depois da atividade dos amigos")) goto condenada;
-  // O historico do Trakt e a PRIMEIRA fileira da home e chega ~1,6 s antes dos
-  // manifestos. Publicar aqui poe conteudo na tela nesse instante em vez de
-  // segurar tudo ate o fim.
-  // Monta direto em filsMontadas: o vetor local `fil` so existe mais abaixo, e
-  // criar um aqui so para copiar seria trabalho a toa.
-  if (n > 0 && progressivo) {
-    int nf = 0;
-    if (nContinuar > 0) {
-      CatFileira *f0 = &filsMontadas[nf++];
-      memset(f0, 0, sizeof *f0);
-      snprintf(f0->chave,  sizeof f0->chave,  "continue_watching");
-      snprintf(f0->titulo, sizeof f0->titulo, "Continuar assistindo");
-      snprintf(f0->tipo,   sizeof f0->tipo,   "movie");
-      f0->ini = 0; f0->n = nContinuar;
-    }
-    if (nSocial > 0) {
-      CatFileira *fs = &filsMontadas[nf++];
-      memset(fs, 0, sizeof *fs);
-      snprintf(fs->chave, sizeof fs->chave, "social_activity");
-      snprintf(fs->titulo, sizeof fs->titulo, "Amigos assistindo");
-      snprintf(fs->tipo, sizeof fs->tipo, "social");
-      fs->ini = nContinuar; fs->n = nSocial;
-    }
-    nFileirasMontadas = nf;
+  // Publicar o cache local nao espera nenhuma das fontes remotas.
+  if (nContinuar > 0 && progressivo && minhaGeracao == montagemGeracao &&
+      fonteIntacta(&ctxIni)) {
+    CatFileira *f0 = &filsMontadas[0];
+    memset(f0, 0, sizeof *f0);
+    snprintf(f0->chave, sizeof f0->chave, "continue_watching");
+    snprintf(f0->titulo, sizeof f0->titulo, "Continuar assistindo");
+    snprintf(f0->tipo, sizeof f0->tipo, "movie");
+    f0->ini = 0; f0->n = nContinuar;
+    nFileirasMontadas = 1;
     nPublicado = n;
-    publicarParcial(&lote, &cap, n, filsMontadas, nf, listas, &listasNaTela);
+    publicarParcial(&lote, &cap, n, filsMontadas, 1, listas, &listasNaTela);
     marco("continuar assistindo na tela");
   }
   LISTAS_SE_PRONTAS();
@@ -3464,14 +4694,7 @@ static void *montar(void *u) {
       snprintf(f0->tipo,   sizeof f0->tipo,   "movie");
       f0->ini = 0; f0->n = nContinuar;
     }
-    if (nSocial > 0) {
-      CatFileira *fs = &fil[nFil++];
-      memset(fs, 0, sizeof *fs);
-      snprintf(fs->chave, sizeof fs->chave, "social_activity");
-      snprintf(fs->titulo, sizeof fs->titulo, "Amigos assistindo");
-      snprintf(fs->tipo, sizeof fs->tipo, "social");
-      fs->ini = nContinuar; fs->n = nSocial;
-    }
+
 
     lerPrefs();
     // Zera ANTES de ler os manifestos: cada catalogo com busca se registra
@@ -3483,6 +4706,21 @@ static void *montar(void *u) {
     // seguinte nem era baixado, e AIOStreams e Akashi TV ficavam invisiveis
     // para o app inteiro so porque o Xperience, lido antes, declara 605
     // catalogos. lerManifesto ja para de GRAVAR sozinho quando enche.
+    // ESPERA OS ADDONS DA CONTA antes de ler a lista. Esta volta larga no
+    // arranque, e o sync so entrega os addons do perfil depois que a pessoa o
+    // escolhe: lida vazia, a volta pedia 0 catalogos e PUBLICAVA 2 fileiras por
+    // cima das 7 do cache (e gravava o cache menor), e a Home refazia mais duas
+    // vezes — 2, 4, 9, 15 fileiras chegando de uma vez, sem aviso na ilha
+    // (todo arranque da TCL do dono desde 05/10/2026 a tarde; nos bons os
+    // addons chegavam antes: "7 ad13 A 15"). Enquanto o perfil nao foi
+    // escolhido espera sem prazo (a tela e a de perfis); depois, ate 10 s.
+    // Sem conta, sync falho ou remontagem pedida: segue como antes.
+    // Uma espera por execucao: conta sem addon nenhum paga os 10 s uma vez.
+    // Quem encerra antes e a chegada dos addons ou qualquer remontagem pedida
+    // (o sync pede uma ao aplicar a conta: montagemGeracao muda).
+    // Quem sabe de conta e de perfil e o app (desc_espera_addons_definir): os
+    // testes que compilam este arquivo sozinho nao tem sessao nem perfis.
+    esperarConta(minhaGeracao);
     // A LISTA DE ADDONS E LIDA AQUI. Marcar o instante e o que permite dizer,
     // no fim, se um pedido de remontagem que chegou no meio do caminho ja foi
     // atendido por esta volta. Ver geracaoPedida.
@@ -3549,6 +4787,7 @@ static void *montar(void *u) {
     // passa a cota inteira dele adiante. Uma volta so, sem reler manifesto:
     // reler custaria um pedido de rede por addon.
     versaoManifestos = addons_versao();
+    passadaVolta = fil_passada_ler();
     { int nAd = addons_n();
       int cota = nAd > 0 ? DECL_MAX / nAd : DECL_MAX;
       int folga = 0;
@@ -3560,7 +4799,7 @@ static void *montar(void *u) {
         if (CONDENADA("lendo os manifestos")) goto condenada;
         if (teto > DECL_MAX - nDecl) teto = DECL_MAX - nDecl;
         lidos = lerManifesto(i, addons_base(i), decls + nDecl, teto,
-                             addons_ativo(i), &real, &promovidos);
+                             addons_ativo(i), &real, &promovidos, versaoManifestos);
         nDecl += lidos;
         folga = lidos < cota + folga ? cota + folga - lidos : 0;
         // ISSUE #42(a): a linha de sempre ("N catalogo(s) declarado(s)") nao
@@ -3622,19 +4861,57 @@ static void *montar(void *u) {
     //     meio, os ids dela ainda estao vazios e nada casaria;
     //   - todo addon tem o id do manifesto: um que nao respondeu nesta volta
     //     teria as fileiras dele tomadas por fantasma.
-    { const char *ids[16], *bases[16];
-      int na = addons_n(), q, semId = 0;
-      if (na > 16) na = 16;
-      for (q = 0; q < na; q++) {
-        ids[q] = addons_id_manifesto(q); bases[q] = addons_base(q);
-        if (!ids[q] || !ids[q][0]) semId++;
+    // #319: ADDON DESLIGADO NAO TEM MANIFESTO LIDO (nao entra na volta), e
+    // contava como "sem manifesto": com UM addon desligado na conta a poda
+    // ficava adiada para sempre ("poda adiada: 1 addon(s) sem manifesto" no log
+    // S3R7Q0, Pluto TV desligado) e nenhum fantasma saia. So o addon LIGADO sem
+    // id e uma volta incompleta; o desligado casa pela base (doAddon) e as
+    // linhas dele nao valem nada para a home de qualquer jeito.
+    // ADDONS_MAX covers all 128 owners; a 16-entry snapshot falsely pruned
+    // catalogs belonging to addons beyond the first 16 (B4).
+    { const char *ids[ADDONS_MAX], *bases[ADDONS_MAX];
+      int ativos[ADDONS_MAX], q, semId = 0;
+      int perfilLista = addons_perfil_da_lista();
+      AddonIdentidade *lista = calloc(ADDONS_MAX, sizeof *lista);
+      int na = lista && addons_copiar_identidades
+        ? addons_copiar_identidades(lista, ADDONS_MAX, versaoManifestos, perfilLista) : -1;
+      if (na < 0)
+        printf("[fileiras] poda adiada: sem retrato completo da lista desta volta\n");
+      else {
+        for (q = 0; q < na; q++) {
+          ids[q] = lista[q].id; bases[q] = lista[q].base; ativos[q] = lista[q].ativo;
+          if (ativos[q] && !ids[q][0]) semId++;
+        }
+        if (addons_versao() != versaoManifestos || addons_perfil_da_lista() != perfilLista)
+          printf("[fileiras] poda adiada: lista ou perfil mudou durante a copia\n");
+        else if (semId)
+          printf("[fileiras] poda adiada: %d addon(s) sem manifesto lido nesta volta\n", semId);
+        else if (nv_perfil_sessao_travar(descSessao())) {
+          if (addons_travar_lista && addons_destravar_lista && fil_podar_catalogos_de &&
+              addons_travar_lista(versaoManifestos, perfilLista)) {
+        if (fil_podar_catalogos_de(ids, bases, na, perfilLista, versaoManifestos)) fil_gravar_registro();
+        // As que ficaram (com escolha da pessoa) deixam de ocupar vaga.
+        { int m = fil_marcar_sem_addon(ids, bases, ativos, na, perfilLista);
+          if (m) printf("[fileiras] %d fileira(s) de addon removido/desligado fora da conta de vagas\n", m); }
+        // #204: quais catalogos os manifestos declaram AGORA, ANTES do registro
+        // abaixo. Com o vetor de candidatos cheio (DECL_MAX) a lista pode estar
+        // truncada, e dai "nao declarado" nao quer dizer nada: nao marca.
+        if (nDecl > 0 && nDecl < DECL_MAX) {
+          const char **dk = malloc(sizeof *dk * (size_t)nDecl);
+          if (dk) {
+            int q2;
+            for (q2 = 0; q2 < nDecl; q2++) dk[q2] = decls[q2].chave;
+            fil_marcar_declaradas(dk, nDecl, perfilLista);
+            free(dk);
+          }
+        }
+            addons_destravar_lista();
+          }
+          nv_perfil_sessao_destravar();
+        }
       }
-      if (addons_versao() != versaoManifestos)
-        printf("[fileiras] poda adiada: a lista de addons mudou durante a volta\n");
-      else if (semId)
-        printf("[fileiras] poda adiada: %d addon(s) sem manifesto lido nesta volta\n", semId);
-      else if (fil_podar_catalogos(ids, bases, na, addons_perfil_da_lista()))
-        fil_gravar_registro(); }
+      free(lista);
+    }
 
     // ALVOS DE BUSCA. Independem da ordem/filtro das FILEIRAS da home: um
     // catalogo pode estar desativado na home e ainda assim ser bom para
@@ -3656,6 +4933,10 @@ static void *montar(void *u) {
         ctxIni.ajustes = c.ajustes; ctxIni.fileiras = c.fileiras;
         ctxIni.ordemConta = c.ordemConta; ctxIni.colecoes = c.colecoes; }
       nOrdem = ordenarCandidatos(decls, nDecl, ordem, nFil, 1, &teto);
+      // O Continuar remoto e Amigos ainda podem chegar. Reservar suas vagas
+      // no teto fisico sem cobrar nenhuma delas do limite de catalogos.
+      { int reserva = (nContinuar ? 0 : 1) + 1;
+        if (teto > CAT_FIL_MAX - reserva) teto = CAT_FIL_MAX - reserva; }
       // OS QUE A COTA NAO LEU TAMBEM PODEM SER ESCOLHIDOS (#126). Entram na
       // lista de Fileiras da Home DEPOIS dos candidatos e sem despejar
       // ninguem; escolher um la (ligar/mover para a home) e o que faz a cota da
@@ -3664,7 +4945,7 @@ static void *montar(void *u) {
       if (nForaCota > 0) {
         int q;
         for (q = 0; q < nForaCota; q++)
-          fil_registrar_se_couber(foraCota[q].chave, foraCota[q].titulo,
+          fil_registrar_se_couber_de(&passadaVolta, foraCota[q].chave, foraCota[q].titulo,
                                   foraCota[q].addon, foraCota[q].tipo);
         fil_gravar_registro();
         printf("[desc] %d catalogo(s) fora da cota listados em Fileiras da Home "
@@ -3672,6 +4953,7 @@ static void *montar(void *u) {
       }
       foraCotaSoltar();
 
+      cargaFase(2);
       int marcouPrimeira = 0;
       // Instrumentacao do arranque. Antes dava para ver o TOTAL de fileiras e
       // nada mais: catalogo que nao respondeu, catalogo vazio e catalogo
@@ -3689,7 +4971,7 @@ static void *montar(void *u) {
       // seguinte pede exatamente o que faltou. O caso comum — todos respondendo
       // — continua sendo UMA rodada, com o mesmo custo de antes.
       while (nFil < teto && cursor < nOrdem) {
-        int alvo = teto - nFil;
+        int alvo = catRodadaTamanho(teto - nFil);
         RodadaCat *rod;
         TarefaCat *tarefas;
         int nTarefas = 0;
@@ -3709,13 +4991,8 @@ static void *montar(void *u) {
             if (dentroDeColecaoVisivel(d)) engolidasNaDeclaracao++;
             continue;
           }
-          // MESMA CHAVE DUAS VEZES = MESMA FILEIRA DUAS VEZES. Acontece quando
-          // o mesmo addon entra duas vezes na lista (`addons.txt` mais a conta)
-          // ou quando um manifesto declara o catalogo repetido: a chave e
-          // <addonId>_<tipo>_<catalogoId> e fica identica, e a home mostrava a
-          // fileira em duplicata com os MESMOS titulos. Dois addons DIFERENTES
-          // declarando o mesmo id nao caem aqui de proposito — sao catalogos
-          // distintos, com conteudo possivelmente distinto.
+          // Deduplicate repeated declarations within one installed instance.
+          // Shared manifest IDs on different transports remain separate rows.
           for (t = 0; t < nFil; t++)
             if (!strcmp(fil[t].chave, d->chave)) { repetida = 1; break; }
           for (t = 0; !repetida && t < nTarefas; t++)
@@ -3724,9 +5001,10 @@ static void *montar(void *u) {
           tarefas[nTarefas].d = d;
           // COPIAS para o fio: um fio largado por lento sobrevive a esta volta,
           // e `decls` (estatico) e a lista de addons ja podem ser de outra.
-          snprintf(tarefas[nTarefas].base, sizeof tarefas[nTarefas].base, "%s", d->base ? d->base : "");
+          snprintf(tarefas[nTarefas].base, sizeof tarefas[nTarefas].base, "%s", d->base);
           snprintf(tarefas[nTarefas].tipo, sizeof tarefas[nTarefas].tipo, "%s", d->tipo);
           snprintf(tarefas[nTarefas].id, sizeof tarefas[nTarefas].id, "%s", d->id);
+          tarefas[nTarefas].paginavel = d->paginavel;
           nTarefas++;
           declPedida[ordem[cursor]] = 1;
         }
@@ -3763,7 +5041,7 @@ static void *montar(void *u) {
             // Rascunho de quem monta para a linha anterior de um catalogo
             // LARGADO: o balde dele ainda e do fio, que pode escrever nele.
             // static: MAX_POR_FILEIRA CatItem passam de 370 KB, e montar() roda num fio so.
-            static CatItem daLinhaAnterior[MAX_POR_FILEIRA];
+            static CatItem daLinhaAnterior[HOME_VISTOS_MAX];
             for (;;) {
               int pr;
               unsigned long long agora = descAgoraMs();
@@ -3788,20 +5066,24 @@ static void *montar(void *u) {
               SDL_Delay(10);
             }
             if (largado) {
-              got = 0; respondeu = 0;
-              printf("[desc] catalogo lento: %s (%s); segue sem ele depois de %llu ms\n",
-                     d->titulo, d->nomeAddon,
+              got = tarefas[k].nPrimeira;
+              respondeu = got > 0;
+              if (got) origem = tarefas[k].primeira;
+              printf("[desc] catalogo lento: %s (%s); primeira pagina: %d titulos depois de %llu ms\n",
+                     d->titulo, d->nomeAddon, got,
                      (unsigned long long)(descAgoraMs() - tarefas[k].inicioMs));
             } else {
               got = tarefas[k].n;
               respondeu = tarefas[k].respondeu;
             }
             if (respondeu) responderam++;
+            else { pthread_mutex_lock(&cargaTrava); carga.falhas++; pthread_mutex_unlock(&cargaTrava); }
             if (respondeu && !got) {
               // Respondeu SEM `metas`: o catalogo existe e esta vazio hoje. Nao e
               // erro e nao pode virar titulo pendurado na home — a rodada seguinte
               // pede outro no lugar dele.
               vazios++;
+              fil_registrar_de(&passadaVolta, d->chave, d->titulo, d->nomeAddon, d->tipo, 0);
               printf("[desc] catalogo vazio: %s\n", d->titulo);
               // Vazio valido: a chave continua na ESTRUTURA (snapshot, via
               // pendSnap), mas nao ocupa vaga na tela (#195). Desde 9b17d38
@@ -3825,27 +5107,38 @@ static void *montar(void *u) {
                        d->titulo, d->nomeAddon);
               // Timeout preserva o ultimo lote bom desta chave. No primeiro
               // arranque, sem snapshot, segue omitida de forma segura.
-              got = linhaAnterior(d->chave, daLinhaAnterior, MAX_POR_FILEIRA, NULL);
+              got = linhaAnterior(d->chave, daLinhaAnterior, HOME_VISTOS_MAX, NULL);
               origem = daLinhaAnterior;
               // Sem lote anterior a vaga vai para o seguinte, mas a chave fica
               // no snapshot: a proxima volta pede este de novo (#195).
               if (!got) { pendSnapGuardar(d->chave, nFil); continue; }
             }
-            GARANTE(MAX_POR_FILEIRA + 2);
+            { int restam = teto - nFil - 1;
+              int candidatos = nTarefas - k - 1 + nOrdem - cursor;
+              if (candidatos < restam) restam = candidatos;
+              got = homeVistosLimitar(got, n, restam, homeVistosReserva()); }
+            GARANTE(got + 2);
             if (got > cap - n) got = cap - n;
-            if (got > 0)
-              memcpy(lote + n, origem, sizeof(CatItem) * (size_t)got);
+            if (got > 0) {
+              int primeiros = origem == tarefas[k].itens && got > MAX_POR_FILEIRA
+                             ? MAX_POR_FILEIRA : got;
+              memcpy(lote + n, origem, sizeof(CatItem) * (size_t)primeiros);
+              if (primeiros < got)
+                memcpy(lote + n + primeiros, tarefas[k].extras,
+                       sizeof(CatItem) * (size_t)(got - primeiros));
+            }
           {
             CatFileira *f = &fil[nFil++];
             memset(f, 0, sizeof *f);
             snprintf(f->chave,  sizeof f->chave,  "%s", d->chave);
             snprintf(f->titulo, sizeof f->titulo, "%s", d->titulo);
             snprintf(f->tipo,   sizeof f->tipo,   "%s", d->tipo);
-            snprintf(f->base,   sizeof f->base,   "%s", d->base ? d->base : "");
+            snprintf(f->base,   sizeof f->base,   "%s", d->base);
             snprintf(f->catId,  sizeof f->catId,  "%s", d->id);
             f->ini = n; f->n = got; f->estado = estadoLinha;
           }
           n += got;
+          pthread_mutex_lock(&cargaTrava); carga.fileiras++; pthread_mutex_unlock(&cargaTrava);
           printf("[desc] fileira %d: %s (%d)\n", nFil - 1, d->titulo, got);
           // PUBLICA A CADA FILEIRA, em vez de so no fim.
           //
@@ -3874,7 +5167,8 @@ static void *montar(void *u) {
           // Bandeira propria: `nFil == 1` nunca acontece aqui porque a fileira
           // "Continuar assistindo" ja ocupou a posicao 0 antes do laco.
           if (!marcouPrimeira) { marcouPrimeira = 1;
-                                 marco("primeira fileira da rede na tela"); }
+                                 marco(progressivo ? "primeira fileira da rede na tela"
+                                                  : "primeira fileira da rede pronta (publicacao pendente)"); }
           }
           rodadaSoltar(rod);
         }
@@ -3901,6 +5195,55 @@ static void *montar(void *u) {
         // certo para o convite da home, inutil para saber se houve catalogo que
         // o teto impediu de PEDIR. Quem precisa disso e desc_remontar_fileiras.
         catalogosNaoPedidos = sobraram; }
+      // #327: O DESTAQUE NAO PODE DEPENDER DE UMA FILEIRA DESENHADA. Com todos
+      // os catalogos dentro de pastas de colecao (ou fora da Home) nenhuma
+      // fileira de catalogo era pedida, o catalogo ficava vazio e o destaque
+      // abria sem imagem. Aqui se baixa UM catalogo so para alimentar o
+      // destaque: a escolhida em "Catalogos do destaque", ou, sem fileira de
+      // catalogo nenhuma, o primeiro da ordem. A fileira entra marcada como
+      // fora da Home (ela esta engolida/oculta/na fila), entao a home nao a
+      // desenha — so o destaque usa os titulos.
+      heroAlimChave[0] = 0;
+      if (nFil < CAT_FIL_MAX - (nContinuar ? 0 : 1) - 1) {
+        const char *hf = fil_hero_fonte();
+        const Decl *dh = NULL;
+        int temCat = 0, q, ja = 0;
+        for (q = 0; q < nFil; q++) if (fil[q].base[0]) { temCat = 1; break; }
+        if (hf[0] && !(hf[0] == '*' && !hf[1])) {
+          for (q = 0; q < nFil && !ja; q++) ja = !strcmp(fil[q].chave, hf);
+          if (!ja) for (q = 0; q < nDecl; q++)
+            if (!strcmp(decls[q].chave, hf)) { dh = &decls[q]; break; }
+        } else if (!temCat) {
+          for (q = 0; q < nOrdem && !dh; q++) if (!fil_oculta(decls[ordem[q]].chave)) dh = &decls[ordem[q]];
+          for (q = 0; q < nOrdem && !dh; q++) dh = &decls[ordem[q]];
+        }
+        if (dh && dh->base[0] && (fil_estado_chave(dh->chave) == FIL_FORA ||
+                                              fil_estado_chave(dh->chave) == FIL_NA_FILA)) {
+          static CatItem hItens[HOME_VISTOS_MAX];
+          int resp = 0, qtd = ajustes_itens_fileira(), got;
+          if (qtd > MAX_POR_FILEIRA) qtd = MAX_POR_FILEIRA;
+          got = lerCatalogoHome(dh->base, dh->tipo, dh->id, hItens,
+                                HOME_VISTOS_MAX, qtd, dh->paginavel, &resp);
+          got = homeVistosLimitar(got, n, 0, homeVistosReserva());
+          printf("[desc] destaque: catalogo %s so para o destaque (%d titulo(s))\n", dh->titulo, got);
+          if (got > 0) {
+            GARANTE(got);
+            if (got <= cap - n) {
+              CatFileira *f = &fil[nFil++];
+              memset(f, 0, sizeof *f);
+              snprintf(f->chave,  sizeof f->chave,  "%s", dh->chave);
+              snprintf(f->titulo, sizeof f->titulo, "%s", dh->titulo);
+              snprintf(f->tipo,   sizeof f->tipo,   "%s", dh->tipo);
+              snprintf(f->base,   sizeof f->base,   "%s", dh->base);
+              snprintf(f->catId,  sizeof f->catId,  "%s", dh->id);
+              memcpy(lote + n, hItens, sizeof(CatItem) * (size_t)got);
+              f->ini = n; f->n = got;
+              n += got;
+              snprintf(heroAlimChave, sizeof heroAlimChave, "%s", dh->chave);
+            }
+          }
+        }
+      }
       nFilsLote = nFil;
       memcpy(filsLote, fil, sizeof(CatFileira) * (size_t)nFil);
       // UMA LINHA QUE RESPONDE "o que falhou no arranque". As quatro contagens
@@ -3919,6 +5262,39 @@ static void *montar(void *u) {
       fflush(stdout);
       if (CONDENADA("depois dos catalogos")) goto condenada;
     }
+  }
+
+  // As fileiras e seus posters ja puderam chegar enquanto o feed social
+  // trabalhava. Seu resultado entra na mesma posicao de antes, sem segurar
+  // a primeira publicacao de catalogos. O buffer e do pedido: uma troca de
+  // perfil abandona-o sem esperar a rede do perfil que saiu.
+  if (social) {
+    if (social->semFio) socialLer(social);
+    else while (!__atomic_load_n(&social->pronto, __ATOMIC_ACQUIRE)) {
+      if (CONDENADA("waiting for friends activity")) goto condenada;
+      LISTAS_SE_PRONTAS();
+      SDL_Delay(10);
+    }
+    if (CONDENADA("after friends activity")) goto condenada;
+    nSocial = social->n;
+    if (nSocial > 0 && nFilsLote < CAT_FIL_MAX - (nContinuar ? 0 : 1)) {
+      GARANTE(nSocial);
+      if (nSocial <= cap - n) {
+        CatFileira *fs;
+        memcpy(lote + n, social->itens, sizeof(CatItem) * (size_t)nSocial);
+        int pos = nContinuar > 0 ? 1 : 0;
+        memmove(filsLote + pos + 1, filsLote + pos,
+                sizeof(CatFileira) * (size_t)(nFilsLote - pos));
+        fs = &filsLote[pos]; memset(fs, 0, sizeof *fs);
+        snprintf(fs->chave, sizeof fs->chave, "social_activity");
+        snprintf(fs->titulo, sizeof fs->titulo, "Amigos assistindo");
+        snprintf(fs->tipo, sizeof fs->tipo, "social");
+        fs->ini = n; fs->n = nSocial; fs->socialGeracao = socialGeracao;
+        n += nSocial; nFilsLote++;
+      }
+    }
+    socialSoltar(social); social = NULL;
+    marco("trakt atividade dos amigos");
   }
 
   // Watchlist e colecao entram DEPOIS das recomendacoes, e nao antes.
@@ -3950,10 +5326,17 @@ static void *montar(void *u) {
     listasLiberar(listas);
     listas = NULL;
   } else {
-    GARANTE(400);
-    n += trakt_lista("watchlist",  lote + n, cap - n);
-    GARANTE(400);
-    n += trakt_lista("collection", lote + n, cap - n);
+    GARANTE(TRAKT_LISTA_MAX);
+    for (int t = 0; t < 2; t++) {
+      int count = 0;
+      CatItem *saved = listaBuscar(t ? "collection" : "watchlist", &count);
+      GARANTE(count);
+      if (count <= cap - n && count > 0) {
+        memcpy(lote + n, saved, sizeof *saved * (size_t)count);
+        n += count;
+      }
+      free(saved);
+    }
   }
   // PLAN TO WATCH DO SIMKL (issue #110), SO QUANDO O "+" SALVA LA. E a mesma
   // marca naLista da watchlist do Trakt, entao o painel de Salvos e a aba
@@ -3964,17 +5347,38 @@ static void *montar(void *u) {
   // TITULO QUE JA ESTA NO LOTE (na watchlist do Trakt, ou numa fileira) SO
   // GANHA A MARCA, nao entra de novo: dois CatItem com o mesmo imdb poriam o
   // titulo duas vezes na Biblioteca.
-  if (ajustes_salvos_no_simkl() && simkl_ativo()) {
+  if (ajustes_fonte_biblioteca() == AJ_SALVOS_SIMKL) {
     // DIRETO NO LOTE, e nao num vetor a parte: 300 CatItem sao 4,7 MB, e a
     // Samsung roda com teto de 128 MiB. O lote ja cresce por GARANTE; os
     // repetidos saem na compactacao logo abaixo.
     int k, w, np, novos;
     GARANTE(300);
     np = simkl_plantowatch(lote + n, cap - n < 300 ? cap - n : 300);
+    int accepted = np >= 0;
+    if (np < 0 && descSessaoAtual())
+      np = listaGuardada(lote + n, cap - n < 300 ? cap - n : 300, AJ_SALVOS_SIMKL, 0);
+    if (np < 0) np = 0;
+    int before = 0, kept = 0;
+    for (int i = 0; i < cat_n(); i++) {
+      const CatItem *c = cat_item(i);
+      if (!c || !(c->listaFontes & (1u << AJ_SALVOS_SIMKL))) continue;
+      int j;
+      for (j = 0; j < i; j++) {
+        const CatItem *p = cat_item(j);
+        if (p && (p->listaFontes & (1u << AJ_SALVOS_SIMKL)) && !strcmp(p->imdb, c->imdb)) break;
+      }
+      if (j < i) continue;
+      before++;
+      for (j = 0; j < np; j++) if (!strcmp(lote[n + j].imdb, c->imdb)) { kept++; break; }
+    }
+    printf("[library-sync] source=simkl profile=%d added=%d removed=%d kept=%d accepted=%d\n",
+           perfis_ativo(), np - kept, before - kept, kept, accepted);
     for (k = n, w = n; k < n + np; k++) {
       int jj, ja = 0;
       for (jj = 0; jj < n; jj++)
-        if (!strcmp(lote[jj].imdb, lote[k].imdb)) { lote[jj].naLista = 1; ja = 1; break; }
+        if (!strcmp(lote[jj].imdb, lote[k].imdb)) {
+          lote[jj].naLista = 1; lote[jj].listaFontes |= lote[k].listaFontes; ja = 1; break;
+        }
       if (ja) continue;
       if (w != k) lote[w] = lote[k];
       w++;
@@ -3984,10 +5388,43 @@ static void *montar(void *u) {
     if (np) printf("[desc] plantowatch do Simkl: %d, %d novo(s) no catalogo\n", np, novos);
   }
   preservarFileirasAusentes(&lote, &n, &cap, filsLote, &nFilsLote);
+  // Preservar uma linha antiga tambem respeita a vaga do Continuar em voo.
+  if (!nContinuar && nFilsLote == CAT_FIL_MAX) nFilsLote--;
   // Reanexar linhas sem resposta acontece depois das chamadas de rede; aplicar
   // a ordem salva ao conjunto inteiro impede que uma resposta parcial desloque
   // essas linhas para o fim da Home.
   ordenarPorSnapshot(filsLote, nFilsLote);
+  // PERSONAL SERVER ROWS (jellyfin.h). Copied from the module's snapshot, no
+  // network here; the module fetched them on its own worker. Fixed rows
+  // (empty base) so they never take an addon row's place in the limit, placed
+  // right after the leading fixed rows (Continue watching, social).
+  if (ajustes_jellyfin_ligado() && servidores_conectado()) {
+    int cabe = SRV_ITENS_MAX, jn = 0, jnf, k, pos = 0;
+    CatItem *jfItens = malloc(sizeof(CatItem) * (size_t)cabe);
+    CatFileira jfFils[SRV_FIL_MAX];
+    jnf = jfItens ? servidores_fileiras_copiar(jfItens, cabe, jfFils, SRV_FIL_MAX, &jn) : 0;
+    for (k = 0; k < nFilsLote; k++)
+      if (servidores_chave_fileira(filsLote[k].chave)) { jnf = 0; break; }
+    // Over the row cap: keep the first rows that fit instead of dropping all.
+    if (jnf > CAT_FIL_MAX - (nContinuar ? 0 : 1) - nFilsLote) {
+      jnf = CAT_FIL_MAX - (nContinuar ? 0 : 1) - nFilsLote;
+      jn = jnf > 0 ? jfFils[jnf - 1].ini + jfFils[jnf - 1].n : 0;
+    }
+    if (jnf > 0) {
+      GARANTE(jn);
+      if (jn <= cap - n) {
+        memcpy(lote + n, jfItens, sizeof(CatItem) * (size_t)jn);
+        for (k = 0; k < jnf; k++) jfFils[k].ini += n;
+        n += jn;
+        while (pos < nFilsLote && !filsLote[pos].base[0]) pos++;
+        memmove(filsLote + pos + jnf, filsLote + pos, sizeof(CatFileira) * (size_t)(nFilsLote - pos));
+        memcpy(filsLote + pos, jfFils, sizeof(CatFileira) * (size_t)jnf);
+        nFilsLote += jnf;
+        printf("[desc] %d personal-server row(s)\n", jnf);
+      }
+    }
+    free(jfItens);
+  }
 #undef GARANTE
 
   if (n || nFilsLote > 0) {
@@ -4004,7 +5441,7 @@ static void *montar(void *u) {
     int mudou;
     homeestado_contexto(&ctxFim);
     mudou = homeestado_mudancas(&ctxIni, &ctxFim);
-    if (minhaGeracao != montagemGeracao || (mudou & HOMEESTADO_MUDOU_FONTE)) {
+    if (!descSessaoAtual() || minhaGeracao != montagemGeracao || (mudou & HOMEESTADO_MUDOU_FONTE)) {
       // DESCARTADA SEM PUBLICAR, e por isso RECOMECA. A geracao muda sozinha
       // no arranque (perfil escolhido, catordem/colecoes/addons da conta
       // chegando — tudo entra na assinatura do homeestado), e no log da LG as
@@ -4027,7 +5464,11 @@ static void *montar(void *u) {
                  homeestado_mudancas_texto(mudou & HOMEESTADO_MUDOU_FONTE,
                                            txt, sizeof txt)); }
       fflush(stdout);
-      free(lote); repetirAoFim = 0; buscando = 0;
+      free(lote); repetirAoFim = 0; buscandoSoltar();
+      // Recomeca JA, sem o minimo entre voltas: a fonte (conta/perfil/addons)
+      // mudou ou a pessoa pediu, e a volta so e condenada quando o minimo ja
+      // passou (repetirInterno). Esperar 10 s aqui deixava a Home com o pacote
+      // ou com o perfil que saiu.
       desc_iniciar();
       return NULL;
     }
@@ -4045,7 +5486,7 @@ static void *montar(void *u) {
       marco("catalogo da rede igual ao da tela: nao republicado");
       printf("[desc] catalogo montado com %d titulos, igual ao que esta na tela; mantido\n", n);
     }
-    cat_cache_substituido();
+    DESC_PUBLICAR(cat_cache_substituido());
     localizarContinuarPublicado();
     if (!(mudou & HOMEESTADO_MUDOU_ESTRUTURA))
       salvarSnapshot(filsMontadas, nFileirasMontadas, estadoFim);
@@ -4100,7 +5541,7 @@ static void *montar(void *u) {
         printf("[desc] a estrutura nova pede catalogo que esta volta nao "
                "buscou (%s): ciclo de rede depois deste\n", qual);
         fflush(stdout);
-        desc_repetir();
+        desc_repetir_silencioso();
       }
       // Com ciclo de rede pedido (aqui ou pela propria remontagem, quando a
       // colecao engoliu fileiras e sobrou catalogo fora do teto) o snapshot
@@ -4133,7 +5574,7 @@ static void *montar(void *u) {
     { HomeContexto ctxCache;
       homeestado_contexto(&ctxCache);
       if (!(homeestado_mudancas(&ctxIni, &ctxCache) & HOMEESTADO_MUDOU_FONTE))
-        cat_gravar_cache_se_identidade(dirArteDesc, donoIni, ctxIni.perfil);
+        cat_gravar_cache_se_sessao(dirArteDesc, donoIni, ctxIni.perfil, descSessao());
       else
         printf("[desc] cache descartado: conta/perfil/addons mudou durante a montagem\n");
     }
@@ -4143,7 +5584,7 @@ static void *montar(void *u) {
   fflush(stdout);
   free(lote);
   listasAbandonar(listas);   // so sobra se o lote veio vazio antes de usa-las
-  buscando = 0;
+  buscandoSoltar();
   // Um pedido que chegou COM o ciclo no ar roda agora, com as credenciais que
   // entraram no meio do caminho. Zerar a marca antes de disparar evita que uma
   // falha de pthread_create deixe o pedido preso para sempre.
@@ -4154,7 +5595,7 @@ static void *montar(void *u) {
     if (geracaoLida == geracaoPedida)
       printf("[desc] remontagem dispensada: a lista nova entrou nesta volta\n");
     else
-      desc_iniciar();
+      descIniciarAdiado();
   }
   return NULL;
 
@@ -4166,33 +5607,123 @@ condenada:
   printf("[desc] montagem interrompida (%s): remontagem pedida "
          "(credencial/addons/idioma); recomecando ja\n", ondeParou);
   fflush(stdout);
+  socialSoltar(social);
   listasAbandonar(listas);
   free(lote);
   repetirAoFim = 0;
-  buscando = 0;
-  desc_iniciar();
+  buscandoSoltar();
+  desc_iniciar();   // condenada so passa do minimo entre voltas (ver acima)
   return NULL;
 #undef CONDENADA
 #undef LISTAS_SE_PRONTAS
 }
 
-void desc_iniciar(void) {
-  if (buscando) { printf("[desc] ja montando; pedido ignorado\n"); fflush(stdout); return; }
+// INICIO DE VOLTA ATOMICO. O teste de `buscando` e a marca ficam sob
+// listaTrava, na mesma secao: antes o teste vinha SEM trava e a marca so
+// depois, e dois chamadores (o fio adiado acordando, a volta condenada
+// recomecando e o quadro) passavam juntos e largavam dois montar(). Nada de rede
+// sob a trava; pthread_create fica fora dela (montar toma listaTrava logo).
+// `conferirVoltas`: so inicia se nenhuma volta comecou desde `voltasAoAgendar`
+// (o fio adiado). `repetirSeOcupado`: com volta no ar, ela repete ao fim em vez
+// de o pedido ser ignorado. tests/desc_iniciar_corrida.sh.
+enum { DESC_INICIOU, DESC_OCUPADO, DESC_ATENDIDO };
+static int descIniciarTravado(int conferirVoltas, unsigned voltasAoAgendar,
+                              int repetirSeOcupado, int apenasAbertura) {
+  pthread_t th;
+  NvPerfilSessao sessao;
+  unsigned long long agora = descAgoraMs();
   pthread_mutex_lock(&listaTrava);
+  sessao = nv_perfil_sessao_ler();
+  if (apenasAbertura && (!descobertaInicializada || !aberturaPendente ||
+      aberturaSessao != sessao || !aberturaFontesProntas || agora < aberturaRetentarEm)) {
+    pthread_mutex_unlock(&listaTrava);
+    return DESC_ATENDIDO;
+  }
+  // An old condemned worker cannot restart under the target identity before
+  // its addon/configuration cache has been installed on the drawing thread.
+  if (descobertaInicializada && (aberturaSessao != sessao ||
+      (aberturaPendente && !aberturaFontesProntas))) {
+    int semAbertura = aberturaSessao != sessao;
+    aberturaPendente = 1;  // The drawing thread opens/prepares before retrying.
+    pthread_mutex_unlock(&listaTrava);
+    printf("[desc] volta recusada: %s\n", semAbertura
+           ? "sessao do perfil ainda nao aberta (desc_abrir_sessao)"
+           : "abertura do perfil esperando os addons da conta");
+    fflush(stdout);
+    return DESC_ATENDIDO;
+  }
+  if (conferirVoltas && descVoltas != voltasAoAgendar) {
+    pthread_mutex_unlock(&listaTrava);
+    printf("[desc] volta adiada dispensada: outra volta ja comecou depois do pedido\n");
+    fflush(stdout);
+    return DESC_ATENDIDO;
+  }
+  if (buscando) {
+    if (apenasAbertura && montagemSessao == sessao) aberturaPendente = 0;
+    else if (repetirSeOcupado) { descDeb.adiado = 0; repetirAoFim = 1; }   // a volta no ar repete ao fim
+    pthread_mutex_unlock(&listaTrava);
+    if (!repetirSeOcupado) { printf("[desc] ja montando; pedido ignorado\n"); fflush(stdout); }
+    return DESC_OCUPADO;
+  }
+  if (aberturaPendente) {
+    printf("[desc] retry discovery: profile session opened and sources ready\n");
+    fflush(stdout);
+  }
   buscando = 1;
   listaLidaNaVolta = 0;
-  pthread_mutex_unlock(&listaTrava);
+  nv_desc_iniciou(&descDeb, agora);
+  descVoltas++;
+  descPedidoPessoa = 0;   // esta volta atende o pedido da pessoa
   montagemGeracao++;
-  if (pthread_create(&fio, NULL, montar, NULL) != 0) {
+  montagemSessao = sessao;
+  descobertaInicializada = 1;
+  if (!aberturaPendente) aberturaSessao = sessao;
+  if (aberturaSessao == sessao) aberturaPendente = 0;
+  pthread_mutex_unlock(&listaTrava);
+  if (pthread_create(&th, NULL, montar, NULL) != 0) {
     // NAO FALHAR CALADO. No webOS um pthread_create nunca falhou e o caminho de
     // erro era so uma bandeira; no alvo WASM o fio e um Worker do navegador,
     // que E um recurso limitado e PODE acabar. Quando acaba, a home fica com o
     // catalogo do pacote para sempre e nao ha uma linha no log dizendo por que.
+    pthread_mutex_lock(&listaTrava);
     buscando = 0;
-    printf("[desc] pthread_create FALHOU: o catalogo nao vai remontar\n");
+    if (aberturaSessao == sessao && nv_perfil_sessao_atual(sessao)) {
+      aberturaPendente = 1;
+      aberturaRetentarEm = agora + 1000;
+    }
+    pthread_mutex_unlock(&listaTrava);
+    printf("[desc] discovery refused: pthread_create failed; retry pending in 1000 ms\n");
     fflush(stdout);
   }
-  else pthread_detach(fio);
+  else pthread_detach(th);
+  return DESC_INICIOU;
+}
+void desc_iniciar(void) { (void)descIniciarTravado(0, 0, 0, 0); }
+
+static void descTentarAbertura(void) {
+  (void)descIniciarTravado(0, 0, 1, 1);
+}
+
+int desc_sessao_aberta(void) {
+  int aberta;
+  pthread_mutex_lock(&listaTrava);
+  aberta = aberturaSessao == nv_perfil_sessao_ler();
+  pthread_mutex_unlock(&listaTrava);
+  return aberta;
+}
+
+void desc_sessao_passo(void) { descTentarAbertura(); }
+
+void desc_sessao_preparada(void) {
+  NvPerfilSessao sessao = nv_perfil_sessao_ler();
+  pthread_mutex_lock(&listaTrava);
+  if (aberturaPendente && aberturaSessao == sessao) {
+    aberturaFontesProntas = 1;
+    montSilenciosa = 0;
+    descPedidoPessoa = 1;
+  }
+  pthread_mutex_unlock(&listaTrava);
+  descTentarAbertura();
 }
 
 // Remontar depois de uma mudanca de credencial (vincular o Trakt, receber a
@@ -4222,6 +5753,7 @@ int desc_catalogos_fora(void) { return catalogosFora; }
 // assistindo" nao tem `base` — elas nao sao catalogo de addon e nao participam
 // da ordem, senao a uniao as jogaria para o fim como chaves desconhecidas.
 void desc_remontar_fileiras(void) {
+  if (!nv_perfil_sessao_atual(montagemSessao)) return;
   static CatFileira saidaFil[CAT_FIL_MAX];
   const char *chaves[CAT_FIL_MAX];
   int idxCat[CAT_FIL_MAX], ordem[CAT_FIL_MAX], antes[CAT_FIL_MAX];
@@ -4236,8 +5768,11 @@ void desc_remontar_fileiras(void) {
   for (i = 0; i < nFileirasMontadas; i++) {
     const CatFileira *f = &filsMontadas[i];
     if (!f->base[0]) continue;
-    if (fil_oculta(f->chave) || catordem_oculta(f->chave, f->chave)) continue;
-    if (dentroDeColecaoVisivelBase(f->base, f->tipo, f->catId)) { engolidas++; continue; }
+    if (heroAlimChave[0] && !strcmp(f->chave, heroAlimChave) &&
+        fil_estado_chave(f->chave) != FIL_NA_HOME) continue;   // #327: volta no fim
+    if (fil_oculta(f->chave) || (catordem_oculta(f->chave, f->chave) && !fil_adicionada_na_tv(f->chave))) continue;
+    if (dentroDeColecaoVisivelBase(f->base, f->tipo, f->catId) &&
+        !fil_adicionada_na_tv(f->chave)) { engolidas++; continue; }
     if (nCat < CAT_FIL_MAX) { chaves[nCat] = f->chave; idxCat[nCat] = i; nCat++; }
   }
   // SEMPRE, e nao so quando engoliu: a linha existe para o caso em que ela
@@ -4312,18 +5847,25 @@ void desc_remontar_fileiras(void) {
     nCat = q;
   }
 
-  teto = fil_limite();
+  teto = fil_limite() + nOut;
   if (teto < 1 || teto > CAT_FIL_MAX) teto = CAT_FIL_MAX;
   for (k = 0; k < nCat && nOut < teto && nOut < CAT_FIL_MAX; k++)
     saidaFil[nOut++] = filsMontadas[idxCat[ordem[k]]];
 
+  // #327: a fileira so do destaque fica, fora da conta do limite.
+  if (heroAlimChave[0] && nOut < CAT_FIL_MAX) {
+    int ja = 0;
+    for (i = 0; i < nOut && !ja; i++) ja = !strcmp(saidaFil[i].chave, heroAlimChave);
+    for (i = 0; !ja && i < nFileirasMontadas; i++)
+      if (!strcmp(filsMontadas[i].chave, heroAlimChave)) { saidaFil[nOut++] = filsMontadas[i]; break; }
+  }
   printf("[desc] fileiras remontadas sem rede: %d de %d%s\n",
          nOut, nFileirasMontadas,
          engolidas ? " (algumas engolidas por colecao)" : "");
   fflush(stdout);
   nFileirasMontadas = nOut;
   memcpy(filsMontadas, saidaFil, sizeof(CatFileira) * (size_t)nOut);
-  cat_republicar_fileiras(saidaFil, nOut);
+  DESC_PUBLICAR(cat_republicar_fileiras(saidaFil, nOut));
 
   // A VAGA QUE A COLECAO LIBEROU TEM DE SER PREENCHIDA, e so a rede tem com que.
   //
@@ -4348,30 +5890,148 @@ void desc_remontar_fileiras(void) {
            engolidas, catalogosNaoPedidos);
     fflush(stdout);
     catalogosNaoPedidos = 0;
-    desc_repetir();
+    desc_repetir_silencioso();
   }
 }
 
+static void repetirInterno(void);
 void desc_repetir(void) {
-  montagemGeracao++;
+  montSilenciosa = 0;
+  descPedidoPessoa = 1;
+  repetirInterno();
+}
+// Mesmo pedido, sem acender o alerta da ilha: sync, remontagem que a propria
+// descoberta pede, lista de addons que mudou sozinha.
+void desc_repetir_silencioso(void) {
+  if (!buscando) montSilenciosa = 1;
+  repetirInterno();
+}
+// O fio adiado leva no argumento o que precisa (quanto dormir e a marca de
+// voltas do AGENDAMENTO): ler descVoltasAoAgendar global depois de dormir lia a
+// marca de um agendamento POSTERIOR e largava volta antes do minimo.
+typedef struct { unsigned ms, voltas; } DescAdiado;
+static void *adiadoFio(void *arg) {
+  DescAdiado a = *(DescAdiado *)arg;
+  struct timespec t = { a.ms / 1000u, (long)(a.ms % 1000u) * 1000000L };
+  free(arg);
+  nanosleep(&t, NULL);
+  (void)descIniciarTravado(1, a.voltas, 1, 0);
+  return NULL;
+}
+// Inicia uma volta respeitando o minimo entre voltas; pedidos no intervalo
+// viram UM agendamento. Nunca bloqueia o chamador.
+static void descIniciarAdiado(void) {
+  long w;
+  pthread_t th;
+  DescAdiado *a;
+  unsigned voltas;
+  if (descPedidoPessoa) { descPedidoPessoa = 0; desc_iniciar(); return; }
+  pthread_mutex_lock(&listaTrava);
+  w = nv_desc_pedido(&descDeb, descAgoraMs());
+  voltas = descVoltas;
+  pthread_mutex_unlock(&listaTrava);
+  if (w == 0) { desc_iniciar(); return; }
+  if (w < 0) {
+    printf("[desc] remontagem coalescida: ja ha uma agendada (minimo %llu s entre voltas)\n",
+           NV_DESC_MIN_MS / 1000ull);
+    fflush(stdout); return;
+  }
+  printf("[desc] remontagem adiada %ld ms (minimo %llu s entre voltas)\n", w, NV_DESC_MIN_MS / 1000ull);
+  fflush(stdout);
+  a = malloc(sizeof *a);
+  if (a) { a->ms = (unsigned)w; a->voltas = voltas; }
+  if (!a || pthread_create(&th, NULL, adiadoFio, a) != 0) {
+    free(a);
+    pthread_mutex_lock(&listaTrava); descDeb.adiado = 0; pthread_mutex_unlock(&listaTrava);
+    desc_iniciar(); return;
+  }
+  pthread_detach(th);
+}
+static void repetirInterno(void) {
   geracaoPedida++;
-  if (!buscando) { desc_iniciar(); return; }
+  if (!buscando) { montagemGeracao++; descIniciarAdiado(); return; }
   repetirAoFim = 1;
+  // So condena a volta no ar se ela ja rodou o minimo: antes disso o pedido
+  // espera o fim dela (que publica o que ja tem) e vira UMA volta nova. O
+  // pedido da pessoa condena sempre (descPedidoPessoa).
+  if (!descPedidoPessoa && !nv_desc_pode_condenar(&descDeb, descAgoraMs())) {
+    printf("[desc] remontagem pedida; volta em curso e recente: termina e repete uma vez\n");
+    fflush(stdout);
+    return;
+  }
+  montagemGeracao++;
   printf("[desc] remontagem pedida; a volta em curso para no proximo ponto seguro e recomeca\n");
   fflush(stdout);
+}
+
+// #319: A LISTA DE ADDONS MUDOU (removido na conta, desligado na TV): AS FILEIRAS
+// DELES SAEM DA TELA NA HORA, sem esperar o ciclo de rede (~20 s na TV, e a
+// Home de uma abertura vinda do cache — catalogo-rede.bin — tem as fileiras do
+// conjunto antigo ate la). So fileira de catalogo de addon (base != "") e
+// candidata; as fixas (continuar, social, servidores pessoais) nao tem base.
+// Casa pela base, a mesma que a montagem gravou em CatFileira.base. Sem lista
+// (nenhum addon conhecido) nada sai: lista vazia e "ainda nao sei", nao "tirei
+// todos". O ciclo que vem depois publica o conjunto certo por cima.
+static int baseDeAddonLigado(const char *base) {
+  int i, n = addons_n();
+  for (i = 0; i < n; i++)
+    if (addons_ativo(i) && !strcmp(addons_base(i), base)) return 1;
+  return 0;
+}
+int desc_tirar_fileiras_de_addons_ausentes(void) {
+  static CatFileira publicadas[CAT_FIL_MAX], restam[CAT_FIL_MAX];
+  int i, np = 0, nr = 0, tirou = 0;
+  if (addons_n() < 1) return 0;
+  { int n = cat_n_fileiras();
+    for (i = 0; i < n && np < CAT_FIL_MAX; i++) {
+      const CatFileira *f = cat_fileira(i);
+      if (f) publicadas[np++] = *f;
+    } }
+  for (i = 0; i < np; i++) {
+    if (publicadas[i].base[0] && !baseDeAddonLigado(publicadas[i].base)) { tirou++; continue; }
+    restam[nr++] = publicadas[i];
+  }
+  if (!tirou) return 0;
+  // A volta em curso e dona de filsMontadas: mexer nele aqui corre contra ela, e
+  // ela termina publicando o conjunto novo de qualquer jeito.
+  if (!buscando) {
+    int w = 0;
+    for (i = 0; i < nFileirasMontadas; i++)
+      if (!filsMontadas[i].base[0] || baseDeAddonLigado(filsMontadas[i].base))
+        filsMontadas[w++] = filsMontadas[i];
+    nFileirasMontadas = w;
+  }
+  DESC_PUBLICAR(cat_republicar_fileiras(restam, nr));
+  printf("[desc] %d fileira(s) de addon removido/desligado sairam da tela na hora\n", tirou);
+  fflush(stdout);
+  return tirou;
 }
 
 // Ver descoberta.h e listaLidaNaVolta. So a LISTA mudou: a volta que ainda nao
 // a leu vai ler a nova, e o Trakt que ela ja buscou continua valendo.
 void desc_repetir_addons(void) {
   int atendido;
+  desc_tirar_fileiras_de_addons_ausentes();
   pthread_mutex_lock(&listaTrava);
   atendido = buscando && !listaLidaNaVolta;
   if (atendido) { geracaoPedida++; repetirAoFim = 1; }
   pthread_mutex_unlock(&listaTrava);
-  if (!atendido) { desc_repetir(); return; }
+  if (!atendido) { desc_repetir_silencioso(); return; }
   printf("[desc] addons novos: a volta em curso ainda nao leu a lista; atendido por ela\n");
   fflush(stdout);
+}
+
+// #294: TROCA DE PERFIL. O bloco publicado e as janelas montadas (filsMontadas)
+// sao do perfil que saiu: ate a descoberta do novo terminar, a Home mostrava as
+// fileiras do outro perfil (logs 2KGKSE/DSWQTX: "19 fileiras na tela, 40 no
+// catalogo" logo apos "perfil ativo: 1") e a tela registrava essas chaves no
+// arquivo de fileiras do perfil novo. Esvazia os dois; a volta que roda a
+// seguir publica o catalogo certo. catalogo-rede.bin ja e por usuario+perfil
+// (CacheCab) e recusado quando nao bate.
+void desc_esquecer_catalogo_perfil(void) {
+  // Com volta em curso ela e dona de filsMontadas e publica o conjunto novo.
+  if (!buscando) nFileirasMontadas = 0;
+  cat_definir_tudo(NULL, 0, NULL, 0);
 }
 
 // Logout: solta a cache de manifestos (e da conta que saiu) e zera o estado da
@@ -4379,6 +6039,17 @@ void desc_repetir_addons(void) {
 // unica alocacao persistente entre ciclos que pertence a este modulo.
 void desc_esquecer(void) {
   maniCacheLimpar();
+}
+
+void desc_ocultar_vistos_atualizar(void) {
+  static int anterior = -1;
+  int ocultar = ajustes_ocultar_filmes_vistos();
+  if (anterior == ocultar) return;
+  // O arranque ja monta com o valor salvo. So a transicao pedida na tela
+  // precisa de uma volta extra; revisao de progresso nao dispara nada aqui.
+  int preencher = anterior == 0 && ocultar;
+  anterior = ocultar;
+  if (preencher) desc_repetir_silencioso();
 }
 
 // --- episodios sob demanda ---------------------------------------------------
@@ -4401,37 +6072,117 @@ void desc_esquecer(void) {
 // 96 porque "xperience:<id longo>" passava dos 40 e dois ids com o mesmo comeco
 // dividiriam a chave.
 #define META_CACHE_N 12
-static struct { char id[96]; char *corpo; unsigned uso; } metaCache[META_CACHE_N];   // "series/tt..."
+static struct { char id[256]; char *corpo; unsigned uso; time_t quando; } metaCache[META_CACHE_N];
 static unsigned metaRelogio;
 static pthread_mutex_t metaTrava = PTHREAD_MUTEX_INITIALIZER;
-
+#define META_TTL_S (6 * 60 * 60)
+#ifdef __EMSCRIPTEN__
+#include "dados.h"
+#define META_FS_TRAVAR() dados_fs_travar()
+#define META_FS_LIBERAR() dados_fs_liberar()
+#else
+#define META_FS_TRAVAR() ((void)0)
+#define META_FS_LIBERAR() ((void)0)
+#endif
+const char *dados_dir(void);
+static void metaChaveContexto(const char *id, char *dst, size_t n) {
+  const char *usuario = sessao_usuario();
+  snprintf(dst, n, "%s/%d/%s/%s", usuario ? usuario : "", perfis_ativo(), desc_tmdb_idioma(), id);
+}
+static int metaDiscoNome(const char *chave, char *dst, size_t n) {
+  char nome[32];
+  snprintf(nome, sizeof nome, "meta-%02u.txt", hashBaseAddon(chave) % 64);
+  if (!dados_caminho(dst, (unsigned)n, nome)) return 0;
+  return 1;
+}
+// ponytail: 64 slots (colisao vira miss), ate 256 KiB/corpo e validade 6 h.
+// Sem indice novo: ampliar slots apenas se a taxa de miss justificar.
+static char *metaDiscoLer(const char *chave) {
+  char nome[700], linha[300]; long quando;
+  char *corpo = NULL;
+  if (!metaDiscoNome(chave, nome, sizeof nome)) return NULL;
+  META_FS_TRAVAR();
+  FILE *f = fopen(nome, "rb");
+  if (!f) { META_FS_LIBERAR(); return NULL; }
+  if (fgets(linha, sizeof linha, f) && sscanf(linha, "%ld", &quando) == 1 &&
+      quando <= (long)time(NULL) && time(NULL) - quando < META_TTL_S &&
+      fgets(linha, sizeof linha, f)) {
+    linha[strcspn(linha, "\n")] = 0;
+    if (!strcmp(linha, chave)) {
+      long ini = ftell(f), fim;
+      if (!fseek(f, 0, SEEK_END) && (fim = ftell(f)) > ini && fim - ini <= 256 * 1024 &&
+          !fseek(f, ini, SEEK_SET)) {
+        corpo = malloc((size_t)(fim - ini) + 1);
+        if (corpo) {
+          if (fread(corpo, 1, (size_t)(fim - ini), f) == (size_t)(fim - ini)) corpo[fim - ini] = 0;
+          else { free(corpo); corpo = NULL; }
+        }
+      }
+    }
+  }
+  fclose(f);
+  META_FS_LIBERAR();
+  return corpo;
+}
+static void metaDiscoGravar(const char *chave, const char *corpo) {
+  char nome[700], tmp[720];
+  if (!corpo || strlen(corpo) > 256 * 1024 || !metaDiscoNome(chave, nome, sizeof nome)) return;
+  snprintf(tmp, sizeof tmp, "%s.tmp", nome);
+  META_FS_TRAVAR();
+  FILE *f = fopen(tmp, "wb");
+  if (!f) { META_FS_LIBERAR(); return; }
+  int ok = fprintf(f, "%ld\n%s\n%s", (long)time(NULL), chave, corpo) > 0;
+  if (fclose(f)) ok = 0;
+  if (ok) ok = rename(tmp, nome) == 0;
+  if (!ok) remove(tmp);
+  META_FS_LIBERAR();
+#ifdef __EMSCRIPTEN__
+  if (ok) dados_marcar_sujo(1);
+#endif
+}
 static char *metaCacheObter(const char *id) {
+  char chave[256], msg[220];
+  metaChaveContexto(id, chave, sizeof chave);
   char *r = NULL;
   pthread_mutex_lock(&metaTrava);
   for (int i = 0; i < META_CACHE_N; i++)
-    if (metaCache[i].corpo && !strcmp(metaCache[i].id, id)) {
+    if (metaCache[i].corpo && !strcmp(metaCache[i].id, chave) &&
+        metaCache[i].quando <= time(NULL) && time(NULL) - metaCache[i].quando < META_TTL_S) {
       metaCache[i].uso = ++metaRelogio;
-      r = strdup(metaCache[i].corpo); /* o fio trabalha em copia estavel */
+      r = strdup(metaCache[i].corpo);
       break;
     }
+  const char *fonte = r ? "memoria" : "disco";
+  if (!r) r = metaDiscoLer(chave);
   pthread_mutex_unlock(&metaTrava);
+  if (r) {
+    snprintf(msg, sizeof msg, "meta: origem chave=%s fonte=%s", id, fonte);
+    marco(msg);
+  }
   return r;
 }
 
 static void metaCacheGuardar(const char *id, const char *corpo) {
+  char chave[256];
+  metaChaveContexto(id, chave, sizeof chave);
   int vaga = 0;
   char *copia = strdup(corpo);
   if (!copia) return;
   pthread_mutex_lock(&metaTrava);
   for (int i = 0; i < META_CACHE_N; i++) {
-    if (metaCache[i].corpo && !strcmp(metaCache[i].id, id)) { vaga = i; break; }
+    if (metaCache[i].corpo && !strcmp(metaCache[i].id, chave)) { vaga = i; break; }
     if (!metaCache[i].corpo || metaCache[i].uso < metaCache[vaga].uso) vaga = i;
   }
   free(metaCache[vaga].corpo);
   metaCache[vaga].corpo = copia;
   metaCache[vaga].uso = ++metaRelogio;
-  snprintf(metaCache[vaga].id, sizeof metaCache[vaga].id, "%s", id);
+  metaCache[vaga].quando = time(NULL);
+  snprintf(metaCache[vaga].id, sizeof metaCache[vaga].id, "%s", chave);
+  metaDiscoGravar(chave, corpo);
   pthread_mutex_unlock(&metaTrava);
+  char msg[220];
+  snprintf(msg, sizeof msg, "meta: recebida chave=%s fonte=rede", id);
+  marco(msg);
 }
 
 // --- TEXTO LOCALIZADO (#176) ---------------------------------------------------
@@ -4485,10 +6236,11 @@ static void metaNegLimpar(void) {
 // `prazo` em segundos: o texto localizado espera 15; a ficha do catalogo 8, para
 // um addon lento nao segurar a pagina.
 static char *metaDoAddonT(int i, const char *tipo, const char *id, int prazo) {
-  char url[700], chave[96], *c;
+  char url[NV_ADDON_PEDIDO_MAX], chave[96], idUrl[768], *c;
   const char *base;
   unsigned h;
   if (!addons_ativo(i) || !addons_sondado(i) || !addons_fornece(i, ADD_META)) return NULL;
+  if (!nv_addon_id(idUrl, sizeof idUrl, id) || !idUrl[0]) return NULL;
   base = addons_base(i);
   if (!base || !base[0] || strstr(base, "cinemeta")) return NULL;
   h = hashBaseAddon(base);
@@ -4496,8 +6248,9 @@ static char *metaDoAddonT(int i, const char *tipo, const char *id, int prazo) {
   c = metaCacheObter(chave);
   if (c) return c;
   if (metaNegAtiva(chave)) return NULL;
-  snprintf(url, sizeof url, "%s/meta/%s/%s.json", base, tipo, id);
-  c = rede_baixar(url, prazo);
+  if (!descPedidoCoube(base, nv_addon_url(url, sizeof url, base, "/meta/%s/%s.json", tipo, idUrl),
+                       sizeof url)) return NULL;
+  c = metaprov_get_rede(url, prazo, NULL, NULL);
   if (c) metaCacheGuardar(chave, c);
   else metaNegGuardar(chave);
   return c;
@@ -4537,13 +6290,18 @@ static int textoDoAddon(const char *tipo, const char *id, char *tit, size_t nt,
 }
 
 // Titulo e sinopse do TMDB no idioma configurado: /find + /tv|movie/<id>.
+// `logo` (pode ser NULL): com "Arte localizada" ligada, o logo do TMDB NO
+// IDIOMA dos metadados, no mesmo pedido (append_to_response=images). So o do
+// idioma: o sem idioma e o ingles sao o que o Continuar ja tem (metahub).
 static int textoDoTmdb(const char *tipo, const char *id, char *tit, size_t nt,
-                       char *sin, size_t ns) {
+                       char *sin, size_t ns, char *logo, size_t nl) {
   const char *chave = desc_chave_tmdb();
   int serie = !strcmp(tipo, "series");
-  char url[400], *c;
+  int querLogo = logo && nl && ajustes_tmdb_arte();
+  char url[460], *c;
   long idT = 0;
-  if (!chave[0] || !ajustes_tmdb_basico()) return 0;
+  if (logo && nl) logo[0] = 0;
+  if (!chave[0] || (!ajustes_tmdb_basico() && !querLogo)) return 0;
   snprintf(url, sizeof url, "%s/find/%s?api_key=%s&external_source=imdb_id",
            TMDB, id, chave);
   c = rede_baixar(url, 8);
@@ -4552,22 +6310,84 @@ static int textoDoTmdb(const char *tipo, const char *id, char *tit, size_t nt,
     if (p) idT = (long)js_num(p, js_fim(p), "id", 0.0); }
   free(c);
   if (idT <= 0) return 0;
-  snprintf(url, sizeof url, "%s/%s/%ld?api_key=%s&language=%s",
-           TMDB, serie ? "tv" : "movie", idT, chave, desc_tmdb_idioma());
+  { char incImg[80] = "";
+    if (querLogo)
+      snprintf(incImg, sizeof incImg,
+               "&append_to_response=images&include_image_language=%.2s",
+               desc_tmdb_idioma());
+    snprintf(url, sizeof url, "%s/%s/%ld?api_key=%s&language=%s%s",
+             TMDB, serie ? "tv" : "movie", idT, chave, desc_tmdb_idioma(), incImg); }
   c = rede_baixar(url, 8);
   if (!c) return 0;
   tit[0] = sin[0] = 0;
-  js_texto_raiz(c, serie ? "name" : "title", tit, nt);
-  js_texto_raiz(c, "overview", sin, ns);
+  if (ajustes_tmdb_basico()) {
+    js_texto_raiz(c, serie ? "name" : "title", tit, nt);
+    js_texto_raiz(c, "overview", sin, ns);
+  }
+  if (querLogo) {
+    const char *im = strstr(c, "\"images\"");
+    const char *imObj = im ? strchr(im, '{') : NULL;
+    const char *imFim = imObj ? js_fim(imObj) : NULL;
+    const char *p = (imObj && imFim) ? js_array(imObj, imFim, "logos") : NULL;
+    char base[3];
+    snprintf(base, sizeof base, "%.2s", desc_tmdb_idioma());
+    while (p && !logo[0]) {
+      const char *f = js_fim(p);
+      char iso[8] = "", fp[160] = "";
+      js_texto(p, f, "iso_639_1", iso, sizeof iso);
+      js_texto(p, f, "file_path", fp, sizeof fp);
+      if (fp[0] == '/' && !ehSvg(fp) && !strcmp(iso, base))
+        snprintf(logo, nl, "https://image.tmdb.org/t/p/w500%s", fp);
+      p = js_prox(f);
+    }
+  }
   free(c);
-  return tit[0] || sin[0];
+  return tit[0] || sin[0] || (logo && nl && logo[0]);
+}
+
+// Logo e fundo da RAIZ do meta do primeiro addon de metadados que conhece `id`
+// (#213). E o addon que a pessoa escolheu com idioma (AIOMetadata com ru, por
+// exemplo): o logo dele vem no idioma dela. O Continuar assistindo nasce do
+// Trakt com arte do metahub/Cinemeta — o logo em ingles do destaque no
+// arranque. Raiz e nao primeira chave: o _providerArt do AIOMetadata vem antes
+// (#200). SVG nao decodifica e fica fora.
+static int arteDoAddon(const char *tipo, const char *id, char *logo, size_t nl,
+                       char *fundo, size_t nf) {
+  int i, n = addons_n();
+  logo[0] = fundo[0] = 0;
+  for (i = 0; i < n; i++) {
+    char *c = metaDoAddon(i, tipo, id);
+    const char *m = c ? strstr(c, "\"meta\"") : NULL;
+    if (m) {
+      m += 6;
+      while (*m == ' ' || *m == ':' || *m == '\n' || *m == '\t' || *m == '\r') m++;
+      if (*m == '{') {
+        urlArteInteira(m, NULL, "logo", 1, logo, nl, id);
+        urlArteInteira(m, NULL, "background", 1, fundo, nf, id);
+        if (ehSvg(logo) || strncmp(logo, "http", 4)) logo[0] = 0;
+        if (ehSvg(fundo) || strncmp(fundo, "http", 4)) fundo[0] = 0;
+      }
+    }
+    free(c);
+    if (logo[0] || fundo[0]) return 1;
+  }
+  return 0;
 }
 
 // Cache do texto localizado: um pedido por titulo e por idioma, nao um por
 // refazagem da fileira. Resposta negativa vale 10 min (falha de rede nao vira
 // "sem traducao" para a sessao inteira).
+//
+// GUARDADO EM DISCO (#213). So na memoria, ele nascia vazio a cada abertura: o
+// Continuar do Trakt saia com o texto do Cinemeta (ingles) e o destaque, que le
+// o primeiro item, mostrava a sinopse em ingles ate a volta da rede trocar 1-2 s
+// depois — medido no registro da G5 (ru): "[t] 2110 trakt continuar assistindo"
+// com aplicarLocCache sem nada, e o texto russo so depois de fioLocalizar. Com o
+// arquivo, o primeiro quadro ja e o do idioma; a entrada do disco serve para
+// pintar, e a rede ainda refaz uma vez por sessao (`doDisco`) para nao congelar.
 #define LOC_N 64
-static struct { char chave[64]; char titulo[160]; char sinopse[900]; int ok; long quando; }
+static struct { char chave[64]; char titulo[160]; char sinopse[900];
+                char logo[512]; char fundo[512]; int ok, doDisco; long quando; }
   locCache[LOC_N];
 static int locProx;
 static pthread_mutex_t locTrava = PTHREAD_MUTEX_INITIALIZER;
@@ -4577,16 +6397,21 @@ static void locChave(char *dst, size_t n, const char *tipo, const char *id) {
 }
 
 // 1 = achou entrada valida; *ok diz se ha texto. Entrada negativa vencida = 0.
-static int locLer(const char *chave, char *tit, size_t nt, char *sin, size_t ns, int *ok) {
+// `disco` 0 recusa a entrada que so veio do arquivo (quem pergunta e a rede).
+static int locLerEx(const char *chave, char *tit, size_t nt, char *sin, size_t ns,
+                    char *logo, size_t nl, char *fundo, size_t nf, int *ok, int disco) {
   int i, achou = 0;
   pthread_mutex_lock(&locTrava);
   for (i = 0; i < LOC_N; i++) {
     if (!locCache[i].chave[0] || strcmp(locCache[i].chave, chave)) continue;
     if (!locCache[i].ok && time(NULL) - locCache[i].quando > 600) break;
+    if (locCache[i].doDisco && !disco) break;
     *ok = locCache[i].ok;
     if (*ok) {
       snprintf(tit, nt, "%s", locCache[i].titulo);
       snprintf(sin, ns, "%s", locCache[i].sinopse);
+      if (logo && nl) snprintf(logo, nl, "%s", locCache[i].logo);
+      if (fundo && nf) snprintf(fundo, nf, "%s", locCache[i].fundo);
     }
     achou = 1;
     break;
@@ -4595,7 +6420,8 @@ static int locLer(const char *chave, char *tit, size_t nt, char *sin, size_t ns,
   return achou;
 }
 
-static void locGuardar(const char *chave, const char *tit, const char *sin, int ok) {
+static void locGuardar(const char *chave, const char *tit, const char *sin,
+                       const char *logo, const char *fundo, int ok) {
   int i, vaga = -1;
   pthread_mutex_lock(&locTrava);
   for (i = 0; i < LOC_N; i++)
@@ -4604,9 +6430,151 @@ static void locGuardar(const char *chave, const char *tit, const char *sin, int 
   snprintf(locCache[vaga].chave, sizeof locCache[vaga].chave, "%s", chave);
   snprintf(locCache[vaga].titulo, sizeof locCache[vaga].titulo, "%s", ok ? tit : "");
   snprintf(locCache[vaga].sinopse, sizeof locCache[vaga].sinopse, "%s", ok ? sin : "");
+  snprintf(locCache[vaga].logo, sizeof locCache[vaga].logo, "%s", ok && logo ? logo : "");
+  snprintf(locCache[vaga].fundo, sizeof locCache[vaga].fundo, "%s", ok && fundo ? fundo : "");
   locCache[vaga].ok = ok;
+  locCache[vaga].doDisco = 0;
   locCache[vaga].quando = (long)time(NULL);
   pthread_mutex_unlock(&locTrava);
+}
+
+// --- O ARQUIVO (loc-texto.txt na pasta de dados) ----------------------------
+// Uma linha por entrada com texto: chave, titulo, sinopse, logo, fundo, por
+// TAB; TAB, quebra e barra escapados. A primeira linha e a identidade (conta e
+// perfil), como no cache do catalogo: a url de arte de addon pode carregar
+// configuracao, e arquivo de outra conta e descartado. Sem pasta gravavel
+// (dados_dir vazio, os testes) nao ha arquivo e tudo segue so na memoria.
+#ifdef __EMSCRIPTEN__
+#include "dados.h"
+#define LOC_FS_TRAVAR()   dados_fs_travar()
+#define LOC_FS_LIBERAR()  dados_fs_liberar()
+#define LOC_MARCAR_SUJO() dados_marcar_sujo(1)
+#else
+#define LOC_FS_TRAVAR()   ((void)0)
+#define LOC_FS_LIBERAR()  ((void)0)
+#define LOC_MARCAR_SUJO() ((void)0)
+#endif
+const char *dados_dir(void);
+static int locDiscoLido;
+
+static int locCaminho(char *dst, size_t n) {
+  if (!dados_caminho(dst, (unsigned)n, "loc-texto.txt")) return 0;
+  return 1;
+}
+
+static void locEscapar(FILE *f, const char *s) {
+  for (; *s; s++) {
+    if (*s == '\t') fputs("\\t", f);
+    else if (*s == '\n') fputs("\\n", f);
+    else if (*s == '\r') continue;
+    else if (*s == '\\') fputs("\\\\", f);
+    else fputc(*s, f);
+  }
+}
+
+// Corta o campo em `p` ate o proximo TAB, desescapando. Devolve o resto.
+static char *locCampo(char *p, char *dst, size_t n) {
+  size_t k = 0;
+  while (*p && *p != '\t' && *p != '\n') {
+    char c = *p++;
+    if (c == '\\' && *p) { c = *p++; c = c == 't' ? '\t' : c == 'n' ? '\n' : c; }
+    if (k + 1 < n) dst[k++] = c;
+  }
+  if (n) dst[k] = 0;
+  return *p == '\t' ? p + 1 : p;
+}
+
+static void locIdentidade(char *dst, size_t n) {
+  const char *u = sessao_usuario();
+  snprintf(dst, n, "loc1 %s %d", u ? u : "", perfis_ativo());
+}
+
+static void locSalvarDisco(void) {
+  char caminho[600], tmp[620], ident[128];
+  FILE *f;
+  int i, n = 0;
+  if (!locCaminho(caminho, sizeof caminho)) return;
+  snprintf(tmp, sizeof tmp, "%s.tmp", caminho);
+  locIdentidade(ident, sizeof ident);
+  LOC_FS_TRAVAR();
+  f = fopen(tmp, "w");
+  if (!f) { LOC_FS_LIBERAR(); return; }
+  fprintf(f, "%s\n", ident);
+  pthread_mutex_lock(&locTrava);
+  for (i = 0; i < LOC_N; i++) {
+    if (!locCache[i].chave[0] || !locCache[i].ok) continue;
+    locEscapar(f, locCache[i].chave);   fputc('\t', f);
+    locEscapar(f, locCache[i].titulo);  fputc('\t', f);
+    locEscapar(f, locCache[i].sinopse); fputc('\t', f);
+    locEscapar(f, locCache[i].logo);    fputc('\t', f);
+    locEscapar(f, locCache[i].fundo);   fputc('\n', f);
+    n++;
+  }
+  pthread_mutex_unlock(&locTrava);
+  if (fclose(f) != 0 || rename(tmp, caminho) != 0) remove(tmp);
+  LOC_FS_LIBERAR();
+  LOC_MARCAR_SUJO();
+  printf("[desc] texto localizado gravado: %d titulo(s)\n", n);
+  fflush(stdout);
+}
+
+// Uma vez por processo, no primeiro uso. Nao pisa entrada que a rede ja deu.
+static void locLerDisco(void) {
+  char caminho[600], ident[128], linha[2400];
+  FILE *f;
+  int n = 0;
+  if (__atomic_exchange_n(&locDiscoLido, 1, __ATOMIC_ACQ_REL)) return;
+  if (!locCaminho(caminho, sizeof caminho)) return;
+  LOC_FS_TRAVAR();
+  f = fopen(caminho, "r");
+  if (!f) { LOC_FS_LIBERAR(); return; }
+  locIdentidade(ident, sizeof ident);
+  if (!fgets(linha, sizeof linha, f) || strncmp(linha, ident, strlen(ident)) ||
+      (linha[strlen(ident)] != '\n' && linha[strlen(ident)] != 0)) {
+    fclose(f);
+    remove(caminho);
+    LOC_FS_LIBERAR();
+    printf("[desc] texto localizado do disco descartado (outra conta/perfil)\n");
+    fflush(stdout);
+    return;
+  }
+  pthread_mutex_lock(&locTrava);
+  while (fgets(linha, sizeof linha, f) && n < LOC_N) {
+    char chave[64], *p = linha;
+    int i, vaga = -1;
+    p = locCampo(p, chave, sizeof chave);
+    if (!chave[0]) continue;
+    for (i = 0; i < LOC_N; i++)
+      if (!strcmp(locCache[i].chave, chave)) { vaga = -2; break; }
+    if (vaga == -2) continue;
+    vaga = locProx; locProx = (locProx + 1) % LOC_N;
+    snprintf(locCache[vaga].chave, sizeof locCache[vaga].chave, "%s", chave);
+    p = locCampo(p, locCache[vaga].titulo, sizeof locCache[vaga].titulo);
+    p = locCampo(p, locCache[vaga].sinopse, sizeof locCache[vaga].sinopse);
+    p = locCampo(p, locCache[vaga].logo, sizeof locCache[vaga].logo);
+    locCampo(p, locCache[vaga].fundo, sizeof locCache[vaga].fundo);
+    locCache[vaga].ok = 1;
+    locCache[vaga].doDisco = 1;
+    locCache[vaga].quando = (long)time(NULL);
+    n++;
+  }
+  pthread_mutex_unlock(&locTrava);
+  fclose(f);
+  LOC_FS_LIBERAR();
+  printf("[desc] texto localizado do disco: %d titulo(s)\n", n);
+  fflush(stdout);
+}
+
+void desc_loc_apagar(void) {
+  char caminho[600];
+  pthread_mutex_lock(&locTrava);
+  memset(locCache, 0, sizeof locCache);
+  locProx = 0;
+  pthread_mutex_unlock(&locTrava);
+  if (!locCaminho(caminho, sizeof caminho)) return;
+  LOC_FS_TRAVAR();
+  if (remove(caminho) == 0) LOC_MARCAR_SUJO();
+  LOC_FS_LIBERAR();
 }
 
 // Id do titulo ("tt123" de "tt123:1:2") e tipo do meta ("movie"/"series") de um
@@ -4627,40 +6595,68 @@ static int locChaveDoItem(const CatItem *c, char *id, size_t nid, const char **t
 // com "Prefere a ficha do addon de metadados" o addon vem primeiro; sem ele, o
 // TMDB no idioma configurado, e o addon so quando o TMDB nao tem (ou esta
 // desligado). Em ingles e sem a preferencia nao ha nada a localizar.
+//
+// A ARTE (#213) e outra regra: o addon de metadados PRIMEIRO (logo e fundo da
+// raiz do meta dele), o logo do TMDB no idioma so na falta. O texto fica com a
+// ordem do #209 porque ali o addon em ingles (Ultra MAX, Bingecat) e medido;
+// um logo do addon em ingles nao piora nada — o do Continuar ja e o ingles do
+// metahub.
 static int localizarTexto(const char *tipo, const char *id, char *tit, size_t nt,
-                          char *sin, size_t ns) {
-  char chave[64];
+                          char *sin, size_t ns, char *logo, size_t nl,
+                          char *fundo, size_t nf) {
+  char chave[64], logoTmdb[512] = "";
   int ok = 0, externo = ajustes_meta_externo(), naoIng = idiomaNaoIngles(), lido;
+  logo[0] = fundo[0] = 0;
   if (!externo && !naoIng) return 0;
+  locLerDisco();
   locChave(chave, sizeof chave, tipo, id);
-  if (locLer(chave, tit, nt, sin, ns, &lido)) return lido;
+  if (locLerEx(chave, tit, nt, sin, ns, logo, nl, fundo, nf, &lido, 0)) return lido;
   tit[0] = sin[0] = 0;
   // Com a preferencia o addon vem primeiro SO em ingles (#209): num idioma
   // que nao e o ingles o TMDB traduz antes, como na ficha do titulo.
   if (externo && !naoIng) {
     ok = textoDoAddon(tipo, id, tit, nt, sin, ns, NULL);
   } else {
-    ok = textoDoTmdb(tipo, id, tit, nt, sin, ns);
-    if (!ok) ok = textoDoAddon(tipo, id, tit, nt, sin, ns, NULL);
+    ok = textoDoTmdb(tipo, id, tit, nt, sin, ns,
+                     naoIng ? logoTmdb : NULL, sizeof logoTmdb);
+    if (!tit[0] && !sin[0]) ok = textoDoAddon(tipo, id, tit, nt, sin, ns, NULL);
   }
-  locGuardar(chave, tit, sin, ok);
+  if (arteDoAddon(tipo, id, logo, nl, fundo, nf)) ok = 1;
+  if (!logo[0] && logoTmdb[0]) { snprintf(logo, nl, "%s", logoTmdb); ok = 1; }
+  DESC_PUBLICAR(locGuardar(chave, tit, sin, logo, fundo, ok));
   return ok;
 }
 
 // Aplica ao item o que o cache ja sabe (sem rede). Campo vazio nao apaga.
-static int aplicarLocItem(CatItem *c) {
-  char id[24], tit[160], sin[900];
+// A arte so troca a do proprio item: logo e fundo vao para `logo`/`backdrop`
+// (o card deitado e o destaque leem dali); o fundo do addon tambem fica como
+// backdropCatalogo, que e a "arte do catalogo" para a fonte escolhida.
+// O que o cache sabe do item (sem rede); 0 = nada.
+static int locValoresDoItem(const CatItem *c, char *tit, size_t nt, char *sin, size_t ns,
+                            char *logo, size_t nl, char *fundo, size_t nf) {
+  char id[24], chave[64];
   const char *tipo;
   int ok = 0;
   if (!locChaveDoItem(c, id, sizeof id, &tipo)) return 0;
-  { char chave[64];
-    locChave(chave, sizeof chave, tipo, id);
-    if (!locLer(chave, tit, sizeof tit, sin, sizeof sin, &ok) || !ok) return 0; }
+  locLerDisco();
+  locChave(chave, sizeof chave, tipo, id);
+  return locLerEx(chave, tit, nt, sin, ns, logo, nl, fundo, nf, &ok, 1) && ok;
+}
+static int aplicarLocItem(CatItem *c) {
+  char tit[160], sin[900], logo[512], fundo[512];
+  int ok = 0;
+  if (!locValoresDoItem(c, tit, sizeof tit, sin, sizeof sin, logo, sizeof logo,
+                        fundo, sizeof fundo)) return 0;
   if (tit[0] && strcmp(tit, c->titulo)) { snprintf(c->titulo, sizeof c->titulo, "%s", tit); ok = 2; }
   if (sin[0] && strcmp(sin, c->sinopse)) { snprintf(c->sinopse, sizeof c->sinopse, "%s", sin); ok = 2; }
+  if (logo[0] && strcmp(logo, c->logo)) { snprintf(c->logo, sizeof c->logo, "%s", logo); ok = 2; }
+  if (fundo[0] && strcmp(fundo, c->backdrop)) {
+    snprintf(c->backdrop, sizeof c->backdrop, "%s", fundo);
+    snprintf(c->backdropCatalogo, sizeof c->backdropCatalogo, "%s", fundo);
+    ok = 2;
+  }
   return ok == 2;
 }
-
 static int aplicarLocCache(CatItem *v, int n) {
   int i, mudou = 0;
   if (!ajustes_meta_externo() && !idiomaNaoIngles()) return 0;
@@ -4668,43 +6664,80 @@ static int aplicarLocCache(CatItem *v, int n) {
   return mudou;
 }
 
+// O CATALOGO LIDO DO CACHE NO ARRANQUE (#213) passa pelo mesmo texto
+// localizado do disco antes do primeiro quadro: o Continuar gravado la pode
+// ter saido antes de a traducao chegar. Sem rede; so o fio principal, na
+// abertura (home_iniciar), antes de a descoberta comecar a publicar.
+int desc_localizar_catalogo_cache(void) {
+  int i, n = cat_n(), mudou = 0;
+  CatItem *e;
+  if (!ajustes_meta_externo() && !idiomaNaoIngles()) return 0;
+  e = malloc(sizeof *e);
+  if (!e) return 0;
+  for (i = 0; i < n; i++) {
+    const CatItem *o = cat_item(i);
+    if (!o) continue;
+    *e = *o;
+    if (aplicarLocItem(e)) { descCatAtualizar(cat_atualizar_item, i, e); mudou++; }
+  }
+  free(e);
+  if (mudou) {
+    printf("[desc] cache do catalogo: %d titulo(s) no idioma ja no primeiro quadro\n", mudou);
+    fflush(stdout);
+  }
+  return mudou;
+}
+
 // Um fio por vez; pedido que chega com o fio no ar troca a lista pendente e
 // ganha uma volta a mais (so o ultimo estado interessa, como no refazer do CW).
 #define LOC_LOTE 32
 static int locIdx[LOC_LOTE], locNIdx;
+static NvPerfilSessao locSessao;
 static volatile int locVivo, locDeNovo;
 static pthread_mutex_t locFilaTrava = PTHREAD_MUTEX_INITIALIZER;
 
 static void *fioLocalizar(void *u) {
+  int novos = 0;
   (void)u;
   for (;;) {
     int lista[LOC_LOTE], n, k;
     pthread_mutex_lock(&locFilaTrava);
     n = locNIdx;
+    NvPerfilSessao sessao = locSessao;
     memcpy(lista, locIdx, sizeof(int) * (size_t)n);
     locDeNovo = 0;
     pthread_mutex_unlock(&locFilaTrava);
+    if (!descSessaoVincular(sessao)) n = 0;
     for (k = 0; k < n; k++) {
-      const CatItem *o = lista[k] < cat_n() ? cat_item(lista[k]) : NULL;
-      char id[24], imdb[64], tit[160], sin[900];
+      // Copia sob a trava do catalogo: este fio nao vira quadro, entao um
+      // ponteiro de cat_item() aqui pode apontar para bloco ja liberado
+      // (revisao 2.0.3, como fioSinopseHero; tests/localizar_corrida.sh).
+      CatItem *e = malloc(sizeof *e);
+      char id[24], imdb[64], tit[160], sin[900], logo[512], fundo[512];
       const char *tipo;
-      if (!o || !locChaveDoItem(o, id, sizeof id, &tipo)) continue;
-      snprintf(imdb, sizeof imdb, "%s", o->imdb);
-      if (!localizarTexto(tipo, id, tit, sizeof tit, sin, sizeof sin)) continue;
-      // Reler: o item pode ter mudado de lugar ou de texto enquanto a rede
-      // respondia. So o titulo e a sinopse sao tocados.
-      o = lista[k] < cat_n() ? cat_item(lista[k]) : NULL;
-      if (o && !strcmp(o->imdb, imdb)) {
-        CatItem *e = malloc(sizeof *e);
-        if (e) {
-          *e = *o;
-          if (aplicarLocItem(e)) cat_atualizar_item(lista[k], e);
-          free(e);
-        }
-      }
+      if (!e) continue;
+      if (!cat_copiar_item(lista[k], e) || !locChaveDoItem(e, id, sizeof id, &tipo)) {
+        free(e); continue; }
+      snprintf(imdb, sizeof imdb, "%s", e->imdb);
+      if (!localizarTexto(tipo, id, tit, sizeof tit, sin, sizeof sin,
+                          logo, sizeof logo, fundo, sizeof fundo)) { free(e); continue; }
+      novos++;
+      // O item pode ter mudado de lugar ou de texto enquanto a rede respondia:
+      // so titulo, sinopse, logo e fundo entram, e so se o indice ainda e este
+      // titulo. Nada mais do item e reescrito.
+      if (locValoresDoItem(e, tit, sizeof tit, sin, sizeof sin, logo, sizeof logo,
+                           fundo, sizeof fundo))
+        descCatLocalizado(lista[k], imdb, tit, sin, logo, fundo);
+      free(e);
     }
     pthread_mutex_lock(&locFilaTrava);
     if (locDeNovo) { pthread_mutex_unlock(&locFilaTrava); continue; }
+    pthread_mutex_unlock(&locFilaTrava);
+    // Uma gravacao por lote, FORA da trava da fila e antes de soltar locVivo
+    // (quem espera o fio — o teste — ve o arquivo pronto).
+    if (novos && descSessaoAtual()) locSalvarDisco();
+    pthread_mutex_lock(&locFilaTrava);
+    if (locDeNovo) { pthread_mutex_unlock(&locFilaTrava); novos = 0; continue; }
     locVivo = 0;
     pthread_mutex_unlock(&locFilaTrava);
     return NULL;
@@ -4719,6 +6752,7 @@ void desc_localizar_indices(const int *idx, int n) {
   pthread_mutex_lock(&locFilaTrava);
   memcpy(locIdx, idx, sizeof(int) * (size_t)n);
   locNIdx = n;
+  locSessao = nv_perfil_sessao_ler();
   if (locVivo) { locDeNovo = 1; pthread_mutex_unlock(&locFilaTrava); return; }
   locVivo = 1;
   pthread_mutex_unlock(&locFilaTrava);
@@ -4741,6 +6775,156 @@ static void localizarContinuarPublicado(void) {
   desc_localizar_indices(idx, n);
 }
 
+// SINOPSE DOS CANDIDATOS DO DESTAQUE (08/10, LG C9 2.0.3). Com "hero *" o
+// destaque sorteia ate 10 titulos de TODO o catalogo, e uns 28% dele sao itens
+// RASOS (lista do Trakt: so nome e a arte sintetica do metahub, ver
+// completarRaso). Eles entravam no destaque sem sinopse, porque o /meta so era
+// pedido ao ABRIR o detalhe. Aqui o texto vem do MESMO /meta do detalhe
+// (metaprov_meta: catalogo do Nuvio, Cinemeta so como reserva), em fio proprio,
+// UM pedido por vez e com pausa entre eles — nunca uma rajada de 10.
+//
+// Sinopse, logo, ano e nota so preenchem lacunas: fundo/arte existente ficam.
+// O corpo e compartilhado com o detalhe, em memoria e em disco.
+// O resultado vai para o CATALOGO (cat_atualizar_item), entao o detalhe, que
+// le o mesmo item, reaproveita sem pedir de novo. Titulo que nao conseguiu
+// sinopse (rede, ficha sem descricao) NAO sai do destaque: aparece sem ela, e
+// a falha vai para o log, com o id, para nao ser silencio.
+static void completarRaso(CatItem *dst, const char *corpo, const char *tipo);
+#define HSIN_LOTE 10
+#define HSIN_PAUSA_MS 150
+#define HSIN_NEG_N 32
+#define HSIN_NEG_S 600
+static int hsIdx[HSIN_LOTE], hsNIdx;
+static NvPerfilSessao hsSessao;
+static volatile int hsVivo, hsDeNovo;
+static pthread_mutex_t hsTrava = PTHREAD_MUTEX_INITIALIZER;
+// Falhas recentes: o conjunto do destaque e refeito a cada mudanca do catalogo,
+// e sem esta memoria um titulo sem descricao viraria um pedido por refeita.
+static struct { char imdb[24]; long ate; } hsNeg[HSIN_NEG_N];
+
+static int hsNegativo(const char *imdb) {
+  int i, r = 0;
+  pthread_mutex_lock(&hsTrava);
+  for (i = 0; i < HSIN_NEG_N; i++)
+    if (hsNeg[i].imdb[0] && !strcmp(hsNeg[i].imdb, imdb) && hsNeg[i].ate > (long)time(NULL)) { r = 1; break; }
+  pthread_mutex_unlock(&hsTrava);
+  return r;
+}
+static void hsNegGuardar(const char *imdb) {
+  static int prox;
+  int i, vaga = -1;
+  pthread_mutex_lock(&hsTrava);
+  for (i = 0; i < HSIN_NEG_N; i++) if (!strcmp(hsNeg[i].imdb, imdb)) { vaga = i; break; }
+  if (vaga < 0) { vaga = prox; prox = (prox + 1) % HSIN_NEG_N; }
+  snprintf(hsNeg[vaga].imdb, sizeof hsNeg[vaga].imdb, "%s", imdb);
+  hsNeg[vaga].ate = (long)time(NULL) + HSIN_NEG_S;
+  pthread_mutex_unlock(&hsTrava);
+}
+
+// Completa texto e logo de UM item raso. -1 = nada a fazer (ja tem ambos, canal,
+// id que nao e do IMDb); 1 = preencheu; 0 = tentou e faltou texto/logo.
+// `get` e o provedor de rede (NULL = o de sempre); o teste passa o dele.
+int desc_sinopse_completar_item(CatItem *c, MetaprovGet get, void *ctx) {
+  char id[24], tit[160], sin[900];
+  const char *tipo;
+  char *corpo;
+  int prov = -1;
+  if (!c || (c->sinopse[0] && c->logo[0]) || !locChaveDoItem(c, id, sizeof id, &tipo)) return -1;
+  int tinhaSinopse = c->sinopse[0] != 0;
+  char chave[96];
+  desc_meta_chave(chave, sizeof chave, tipo, id);
+  corpo = metaCacheObter(chave);
+  if (!corpo) {
+    corpo = get ? metaprov_meta_com(tipo, id, 10, get, ctx, &prov)
+                : metaprov_meta(tipo, id, 10, &prov);
+    if (corpo) metaCacheGuardar(chave, corpo);
+  }
+  tit[0] = sin[0] = 0;
+  if (!corpo || !metaTextos(corpo, tit, sizeof tit, sin, sizeof sin)) {
+    const char *porque = corpo ? "a ficha nao tem descricao" : "sem resposta da rede";
+    free(corpo);
+    printf("[hero] sinopse NAO preenchida %s (%s)\n", id, porque);
+    fflush(stdout);
+    return 0;
+  }
+  if (!c->sinopse[0] && sin[0]) snprintf(c->sinopse, sizeof c->sinopse, "%s", sin);
+  completarRaso(c, corpo, tipo);
+  free(corpo);
+  if (!c->logo[0] && (tinhaSinopse || !c->sinopse[0])) return 0;
+  if (!c->titulo[0] && tit[0]) snprintf(c->titulo, sizeof c->titulo, "%s", tit);
+  printf("[hero] sinopse preenchida %s (%d caracteres, %s)\n", id, (int)strlen(c->sinopse),
+         prov == METAPROV_CINEMETA ? "Cinemeta" : "catalogo do Nuvio/cache");
+  fflush(stdout);
+  return 1;
+}
+
+static void *fioSinopseHero(void *u) {
+  (void)u;
+  for (;;) {
+    int lista[HSIN_LOTE], n, k;
+    pthread_mutex_lock(&hsTrava);
+    n = hsNIdx;
+    NvPerfilSessao sessao = hsSessao;
+    memcpy(lista, hsIdx, sizeof(int) * (size_t)n);
+    hsDeNovo = 0;
+    pthread_mutex_unlock(&hsTrava);
+    if (!descSessaoVincular(sessao)) n = 0;
+    for (k = 0; k < n; k++) {
+      // Copia sob a trava do catalogo: este fio nao vira quadro, entao um
+      // ponteiro de cat_item() aqui pode apontar para bloco ja liberado
+      // (revisao 2.0.3, achado 2; tests/herosinopse_corrida.sh).
+      CatItem *e = malloc(sizeof *e);
+      char imdb[64];
+      int r;
+      if (!e) continue;
+      if (!cat_copiar_item(lista[k], e) || (e->sinopse[0] && e->logo[0])) { free(e); continue; }
+      snprintf(imdb, sizeof imdb, "%s", e->imdb);
+      if (hsNegativo(imdb)) { free(e); continue; }
+      r = desc_sinopse_completar_item(e, NULL, NULL);
+      if (r == 0) DESC_PUBLICAR(hsNegGuardar(imdb));
+      // Publica somente lacunas, revalidando identidade; preserva outros escritores.
+      if (r == 1) {
+        descCatSinopse(lista[k], imdb, e->sinopse, e->titulo);
+        descCatBasico(lista[k], e);
+      }
+      free(e);
+      SDL_Delay(HSIN_PAUSA_MS);   // um pedido por vez, com folga entre eles
+      pthread_mutex_lock(&hsTrava);
+      int mudouFoco = hsDeNovo;
+      pthread_mutex_unlock(&hsTrava);
+      if (mudouFoco) break;       // foco novo nao espera todo o lote antigo
+    }
+    pthread_mutex_lock(&hsTrava);
+    if (hsDeNovo) { pthread_mutex_unlock(&hsTrava); continue; }
+    hsVivo = 0;
+    pthread_mutex_unlock(&hsTrava);
+    return NULL;
+  }
+}
+
+// Pede a sinopse dos indices `idx` (o conjunto do destaque). Barata e
+// repetivel: quem ja tem sinopse, ou falhou ha pouco, e pulado no fio.
+void desc_sinopse_hero(const int *idx, int n) {
+  pthread_t t;
+  int i, falta = 0;
+  if (!idx || n < 1) return;
+  if (n > HSIN_LOTE) n = HSIN_LOTE;
+  for (i = 0; i < n; i++) {
+    const CatItem *o = idx[i] >= 0 && idx[i] < cat_n() ? cat_item(idx[i]) : NULL;
+    if (o && (!o->sinopse[0] || !o->logo[0])) { falta = 1; break; }
+  }
+  if (!falta) return;
+  pthread_mutex_lock(&hsTrava);
+  memcpy(hsIdx, idx, sizeof(int) * (size_t)n);
+  hsNIdx = n;
+  hsSessao = nv_perfil_sessao_ler();
+  if (hsVivo) { hsDeNovo = 1; pthread_mutex_unlock(&hsTrava); return; }
+  hsVivo = 1;
+  pthread_mutex_unlock(&hsTrava);
+  if (pthread_create(&t, NULL, fioSinopseHero, NULL) != 0) hsVivo = 0;
+  else pthread_detach(t);
+}
+
 // Publica a parte critica antes de qualquer enriquecimento opcional. Assim a
 // fileira de episodios aparece depois da primeira resposta, sem esperar pelas
 // duas viagens ao TMDB usadas para foto e personagem do elenco.
@@ -4758,7 +6942,8 @@ static void localizarContinuarPublicado(void) {
 //
 // A comparacao e so de letras e digitos, em minuscula e sem acento latino
 // (normElenco): "Zoë", "Zoe" e "ZOE" casam; "J. K. Simmons" e "JK Simmons"
-// tambem. Nome que nao casa com ninguem fica SEM foto e sem papel — melhor
+// tambem. Outros caracteres UTF-8 ficam: "李明 Lee" nao e "王强 Lee".
+// Nome que nao casa com ninguem fica SEM foto e sem papel — melhor
 // que o de outra pessoa. As entradas do TMDB que nao casaram entram no fim,
 // na ordem do TMDB, ate o teto (o #94: o Cinemeta para em 3-5 nomes), sem
 // repetir quem ja esta na lista. Pura; devolve quantos nomes ganharam foto
@@ -4784,28 +6969,207 @@ static void normElenco(const char *s, char *dst, size_t tam) {
     char o = 0;
     if (c >= 'A' && c <= 'Z') o = (char)(c + 32);
     else if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) o = (char)c;
-    else if (c == 0xC3 && *p) o = normDobra(*p++);
-    else if (c >= 0x80) { while ((*p & 0xC0) == 0x80) p++; }
+    else if (c == 0xC3 && *p && (o = normDobra(*p))) p++;
+    else if ((c == 0xCC && *p >= 0x80 && *p <= 0xBF) ||
+             (c == 0xCD && *p >= 0x80 && *p <= 0xAF)) { p++; continue; }
+    else if (c >= 0x80) { dst[k++] = (char)c; continue; }
     if (o) dst[k++] = o;
   }
   dst[k] = 0;
 }
 
-int desc_tmdb_elenco(const char *json, CatItem *d) {
-  enum { MAX_TMDB = 48 };
+// Le so membros diretos: "cast" de videos/app_extras nao e o cast da raiz.
+// Devolve um ponteiro emprestado, sem copiar nem limitar o tamanho da ficha.
+static const char *elencoCampo(const char *obj, const char *chave) {
+  const char *p, *f;
+  size_t n = strlen(chave);
+  if (!obj || *obj != '{') return NULL;
+  f = js_fim(obj);
+  for (p = obj + 1; p < f && *p;) {
+    const char *q, *v;
+    while (p < f && (*p == ',' || (unsigned char)*p <= ' ')) p++;
+    if (p >= f || *p != '"') break;
+    q = p + 1;
+    while (q < f && *q && *q != '"') { if (*q == '\\' && q + 1 < f) q++; q++; }
+    if (q >= f || !*q) break;
+    v = q + 1;
+    while (v < f && (unsigned char)*v <= ' ') v++;
+    if (v >= f || *v++ != ':') break;
+    while (v < f && (unsigned char)*v <= ' ') v++;
+    if ((size_t)(q - p - 1) == n && !memcmp(p + 1, chave, n)) return v;
+    if (v >= f) break;
+    if (*v == '{' || *v == '[') p = js_fim(v);
+    else if (*v == '"') {
+      p = v + 1;
+      while (p < f && *p && *p != '"') { if (*p == '\\' && p + 1 < f) p++; p++; }
+      if (p < f && *p) p++;
+    } else { p = v; while (p < f && *p && *p != ',' && *p != '}') p++; }
+    if (p <= v) break;
+  }
+  return NULL;
+}
+
+static int elencoMesmoNome(const char *a, const char *b) {
+  char na[64], nb[64];
+  if (!a[0] || !b[0]) return 0;
+  if (!strcmp(a, b)) return 1;  // nomes nao latinos tambem tem identidade
+  normElenco(a, na, sizeof na);
+  normElenco(b, nb, sizeof nb);
+  return na[0] && !strcmp(na, nb);
+}
+
+typedef struct { char nome[64], papel[64], foto[512]; } ElencoMeta;
+
+static int elencoIndice(const CatItem *d, const char *nome) {
+  int i;
+  for (i = 0; i < d->nElenco; i++)
+    if (elencoMesmoNome(d->elenco[i].nome, nome)) return i;
+  return -1;
+}
+static int elencoLerPessoa(const char *p, ElencoMeta *e) {
+  const char *f;
+  char foto[513] = "";
+  memset(e, 0, sizeof *e);
+  if (*p == '"') return js_cadeia(p, e->nome, sizeof e->nome);
+  if (*p != '{') return 0;
+  f = js_fim(p);
+  js_texto_raiz_em(p, f, "name", e->nome, sizeof e->nome);
+  js_texto_raiz_em(p, f, "character", e->papel, sizeof e->papel);
+  js_texto_raiz_em(p, f, "photo", foto, sizeof foto);
+  // URL incompleta, null ou outro esquema deixa o fallback de iniciais.
+  if (strlen(foto) < sizeof e->foto &&
+      ((!strncmp(foto, "https://", 8) && foto[8]) || (!strncmp(foto, "http://", 7) && foto[7])) &&
+      !strpbrk(foto, " \t\r\n"))
+    memcpy(e->foto, foto, strlen(foto) + 1);
+  return e->nome[0] != 0;
+}
+static const char *elencoProximo(const char *p, const char *fim) {
+  const char *q = p;
+  if (*p == '{' || *p == '[') q = js_fim(p);
+  else if (*p == '"') {
+    q = p + 1;
+    while (q < fim && *q && *q != '"') { if (*q == '\\' && q + 1 < fim) q++; q++; }
+    if (q >= fim || *q != '"') return NULL;
+    q++;
+  } else while (q < fim && *q && *q != ',' && *q != ']') q++;
+  if (!q || q <= p || q >= fim) return NULL;
+  while (q < fim && (unsigned char)*q <= ' ') q++;
+  if (q >= fim || *q++ != ',') return NULL;
+  while (q < fim && (unsigned char)*q <= ' ') q++;
+  return q < fim && *q && *q != ']' ? q : NULL;
+}
+
+// Cast Stremio (nomes) + app_extras.cast do Nuvio/AIOMetadata (nome, papel,
+// foto). Sem rede. A raiz define a ordem; o extra casa POR NOME, nunca indice.
+// Complementos so preenchem lacunas. A base nova preserva dados conhecidos da
+// MESMA pessoa, inclusive seu id TMDB, sem transferir ids de outro provedor.
+int desc_meta_elenco(const char *json, CatItem *d, int soVazios) {
+  const char *m = json, *extra, *raiz, *rico, *p;
+  struct { char nome[64], papel[64], foto[512]; long tmdb; } antigos[CAT_ELENCO_MAX];
+  int nAntigos, i;
+  if (!json || !d) return 0;
+  while (*m && (unsigned char)*m <= ' ') m++;
+  p = elencoCampo(m, "meta");
+  if (p) { if (*p != '{') return 0; m = p; }
+  raiz = elencoCampo(m, "cast");
+  extra = elencoCampo(m, "app_extras");
+  rico = elencoCampo(extra, "cast");
+  nAntigos = d->nElenco;
+  if (nAntigos < 0 || nAntigos > CAT_ELENCO_MAX) return 0;
+  for (i = 0; i < nAntigos; i++) {
+    memcpy(antigos[i].nome, d->elenco[i].nome, sizeof antigos[i].nome);
+    memcpy(antigos[i].papel, d->elenco[i].papel, sizeof antigos[i].papel);
+    memcpy(antigos[i].foto, d->elenco[i].foto, sizeof antigos[i].foto);
+    antigos[i].tmdb = d->elenco[i].tmdb;
+  }
+  if (!soVazios) d->nElenco = 0;
+  for (i = 0; i < 4; i++) {
+    // Sem cast novo, conserva a lista ANTES de completar fotos da equipe.
+    if (i == 2 && !d->nElenco && nAntigos) {
+      d->nElenco = nAntigos;
+      for (int j = 0; j < nAntigos; j++) {
+        memcpy(d->elenco[j].nome, antigos[j].nome, sizeof antigos[j].nome);
+        memcpy(d->elenco[j].papel, antigos[j].papel, sizeof antigos[j].papel);
+        memcpy(d->elenco[j].foto, antigos[j].foto, sizeof antigos[j].foto);
+        d->elenco[j].tmdb = antigos[j].tmdb;
+      }
+    }
+    const char *a = i == 0 ? raiz : i == 1 ? rico :
+                    elencoCampo(extra, i == 2 ? "directors" : "writers");
+    if (!a || *a != '[') continue;
+    const char *fim = js_fim(a);
+    if (fim <= a || fim[-1] != ']') continue;
+    p = a + 1;
+    while (*p && (unsigned char)*p <= ' ') p++;
+    while (p && p < fim && *p && *p != ']') {
+      ElencoMeta e;
+      if ((*p == '"' || *p == '{') && elencoLerPessoa(p, &e)) {
+        int k = elencoIndice(d, e.nome);
+        // Equipe so completa a foto de quem JA esta na fileira. Nao muda
+        // o teto/ordem de atores; character da equipe costuma ser o nome.
+        if (i >= 2) e.papel[0] = 0;
+        if (k < 0 && i < 2 && d->nElenco < CAT_ELENCO_MAX) {
+          int j;
+          k = d->nElenco++;
+          memset(&d->elenco[k], 0, sizeof d->elenco[k]);
+          snprintf(d->elenco[k].nome, sizeof d->elenco[k].nome, "%s", e.nome);
+          for (j = 0; j < nAntigos; j++) if (elencoMesmoNome(e.nome, antigos[j].nome)) {
+            snprintf(d->elenco[k].papel, sizeof d->elenco[k].papel, "%s", antigos[j].papel);
+            snprintf(d->elenco[k].foto, sizeof d->elenco[k].foto, "%s", antigos[j].foto);
+            d->elenco[k].tmdb = antigos[j].tmdb;
+            break;
+          }
+        }
+        if (k >= 0) {
+          if (e.papel[0] && (!soVazios || !d->elenco[k].papel[0]))
+            snprintf(d->elenco[k].papel, sizeof d->elenco[k].papel, "%s", e.papel);
+          if (e.foto[0] && ((!soVazios && i < 2) || !d->elenco[k].foto[0]))
+            snprintf(d->elenco[k].foto, sizeof d->elenco[k].foto, "%s", e.foto);
+        }
+      }
+      p = elencoProximo(p, fim);
+      if (!p) break;
+    }
+  }
+  if (!soVazios || !d->direcao[0]) {
+    const char *a = elencoCampo(m, "director");
+    char nome[128] = "";
+    if (a && *a == '[') {
+      a++; while (*a && (unsigned char)*a <= ' ') a++;
+      if (*a == '"') js_cadeia(a, nome, sizeof nome);
+    }
+    if (!nome[0]) {
+      a = elencoCampo(extra, "directors");
+      if (a && *a == '[') {
+        a++; while (*a && (unsigned char)*a <= ' ') a++;
+        if (*a == '{') js_texto_raiz_em(a, js_fim(a), "name", nome, sizeof nome);
+      }
+    }
+    if (nome[0]) snprintf(d->direcao, sizeof d->direcao, "%s", nome);
+  }
+  return d->nElenco;
+}
+
+static int tmdbElenco(const char *json, CatItem *d, int soVazios) {
   struct { char nome[64], papel[64], foto[512]; long id; int usado; } *t;
-  char alvo[64], outro[64];
   const char *p;
   int n = 0, i, k, casados = 0;
   if (!json || !d) return 0;
-  t = calloc(MAX_TMDB, sizeof *t);
+  for (p = js_array(json, NULL, "cast"); p; p = js_prox(js_fim(p))) n++;
+  if (!n) return 0;
+  t = calloc((size_t)n, sizeof *t);
   if (!t) return 0;
-  for (p = js_array(json, NULL, "cast"); p && n < MAX_TMDB; p = js_prox(js_fim(p))) {
+  n = 0;
+  for (p = js_array(json, NULL, "cast"); p; p = js_prox(js_fim(p))) {
     const char *f = js_fim(p);
     char caminhoFoto[128] = "";
     js_texto(p, f, "name", t[n].nome, sizeof t[n].nome);
     if (!t[n].nome[0]) continue;   // sem nome nao vira pessoa na fileira
-    js_texto(p, f, "character", t[n].papel, sizeof t[n].papel);
+    js_texto_raiz_em(p, f, "character", t[n].papel, sizeof t[n].papel);
+    if (!t[n].papel[0]) {
+      const char *papel = js_array(p, f, "roles");
+      if (papel) js_texto_raiz_em(papel, js_fim(papel), "character", t[n].papel, sizeof t[n].papel);
+    }
     t[n].id = (long)js_num(p, f, "id", 0.0);
     if (js_texto(p, f, "profile_path", caminhoFoto, sizeof caminhoFoto) &&
         caminhoFoto[0] == '/')
@@ -4814,16 +7178,14 @@ int desc_tmdb_elenco(const char *json, CatItem *d) {
   }
   // Os nomes que ja estao na lista (do Cinemeta, ou de uma passada anterior).
   for (k = 0; k < d->nElenco; k++) {
-    normElenco(d->elenco[k].nome, alvo, sizeof alvo);
-    if (!alvo[0]) continue;
     for (i = 0; i < n; i++) {
       if (t[i].usado) continue;
-      normElenco(t[i].nome, outro, sizeof outro);
-      if (strcmp(alvo, outro)) continue;
+      if (!elencoMesmoNome(d->elenco[k].nome, t[i].nome)) continue;
+      if (d->elenco[k].tmdb > 0 && t[i].id > 0 && d->elenco[k].tmdb != t[i].id) continue;
       t[i].usado = 1;
-      if (t[i].papel[0])
+      if (t[i].papel[0] && (!soVazios || !d->elenco[k].papel[0]))
         snprintf(d->elenco[k].papel, sizeof d->elenco[k].papel, "%s", t[i].papel);
-      if (t[i].foto[0])
+      if (t[i].foto[0] && (!soVazios || !d->elenco[k].foto[0]))
         snprintf(d->elenco[k].foto, sizeof d->elenco[k].foto, "%s", t[i].foto);
       if (t[i].id > 0) d->elenco[k].tmdb = t[i].id;
       casados++;
@@ -4842,6 +7204,54 @@ int desc_tmdb_elenco(const char *json, CatItem *d) {
   }
   free(t);
   return casados;
+}
+
+// Blocking lookup for the detail worker. Never confuse transport errors with absence.
+long desc_buscar_pessoa(const char *nome, long titulo, const char *tipo) {
+  char termo[193], url[600];
+  const char *chave = desc_chave_tmdb(), *p, *resultados;
+  long melhor = 0;
+  int melhorTitulo = 0;
+  double popularidade = -1;
+  if (!nome || !nome[0] || !chave || !chave[0]) return -1;
+  urlEscapar(nome, termo, sizeof termo);
+  snprintf(url, sizeof url, "%s/search/person?api_key=%s&language=%s&query=%s",
+           TMDB, chave, desc_tmdb_idioma(), termo);
+  char *corpo = rede_baixar(url, 20);
+  if (!corpo) return -1;
+  resultados = elencoCampo(corpo, "results");
+  if (!resultados || *resultados != '[' || js_fim(resultados)[-1] != ']') {
+    free(corpo); return -1;
+  }
+  for (p = js_array(corpo, NULL, "results"); p; p = js_prox(js_fim(p))) {
+    const char *f = js_fim(p), *v = elencoCampo(p, "id");
+    long id = v ? strtol(v, NULL, 10) : 0;
+    char n[80] = "";
+    int mesmoTitulo = 0;
+    js_texto_raiz_em(p, f, "name", n, sizeof n);
+    const char *a = elencoCampo(p, "known_for");
+    for (const char *k = a && *a == '[' ? js_array(p, f, "known_for") : NULL;
+         k; k = js_prox(js_fim(k))) {
+      char media[16] = "";
+      const char *tid = elencoCampo(k, "id");
+      js_texto_raiz_em(k, js_fim(k), "media_type", media, sizeof media);
+      if (titulo > 0 && tid && strtol(tid, NULL, 10) == titulo && !strcmp(media, tipo))
+        mesmoTitulo = 1;
+    }
+    if (id <= 0 || (!mesmoTitulo && !elencoMesmoNome(nome, n))) continue;
+    v = elencoCampo(p, "popularity");
+    double pop = v ? strtod(v, NULL) : 0;
+    if (!melhor || mesmoTitulo > melhorTitulo ||
+        (mesmoTitulo == melhorTitulo && pop > popularidade)) {
+      melhor = id; melhorTitulo = mesmoTitulo; popularidade = pop;
+    }
+  }
+  free(corpo);
+  return melhor;
+}
+
+int desc_tmdb_elenco(const char *json, CatItem *d) {
+  return tmdbElenco(json, d, 0);
 }
 
 // O nome que o TMDB devolve quando NAO tem traducao e "Episodio 3" (ou o
@@ -4896,6 +7306,14 @@ int desc_tmdb_notas_temporada_ex(const char *json, CatEp *eps, int n,
           double v = js_num(p, f, "vote_average", 0.0);
           char sin[sizeof eps[i].sinopse], nome[sizeof eps[i].nome];
           int mudou = 0, soVazio = (textos & DESC_EPT_SO_VAZIO) != 0;
+          int runtime = (int)js_num(p, f, "runtime", 0);
+          // O TMDB TEM ESTE PAR: e o numero que o TheIntroDB entende sem
+          // remapear (2.0.3). Nao conta em `feitos` (nao e texto novo).
+          eps[i].tmdbT = temporada; eps[i].tmdbE = num;
+          if (!eps[i].duracao[0] && runtime > 0 && runtime < 1440) {
+            snprintf(eps[i].duracao, sizeof eps[i].duracao, "%d min", runtime);
+            mudou = 1;
+          }
           if (v > 0.0) { eps[i].nota = (int)(v * 10.0 + 0.5); mudou = 1; }
           // SINOPSE NO IDIOMA ESCOLHIDO (#150). O pedido ja vai com
           // language=desc_tmdb_idioma(), e o `overview` vinha sendo jogado
@@ -4942,60 +7360,200 @@ int desc_meta_tipos(const char *tipo, const char *saida[2]) {
 
 // Chave do cache de /meta: tipo + id, nunca so o id.
 void desc_meta_chave(char *dst, size_t n, const char *tipo, const char *id) {
-  snprintf(dst, n, "%s/%s", tipo ? tipo : "", id ? id : "");
+  // provedor + idioma + tipo + id: trocar o idioma dos metadados refaz o pedido.
+  metaprov_chave(dst, n, tipo, id);
 }
 
 // Temporada de um video. Addon de anime as vezes manda "episode" sem "season"
 // (o entry do Kitsu ja e a temporada); sem o campo o video era descartado e a
 // serie ficava sem episodio nenhum. Ausente com episodio > 0 conta como 1.
-// "season":0 (especiais) continua fora, como sempre foi.
+// Temporada 0 e uma temporada real (especiais), com o seu proprio episodio.
+// Sem numero de episodio, zero nao prova que isto seja uma lista de serie.
 static int videoTemporada(const char *p, const char *f) {
   int t = (int)js_num(p, f, "season", -1);
   if (t < 0 && js_num(p, f, "episode", -1) > 0) t = 1;
+  if (t == 0 && js_num(p, f, "episode", 0) <= 0) return -1;
   return t;
 }
 
-// A resposta do /meta tem ao menos um video com temporada > 0?
+// A resposta do /meta tem ao menos um video de uma temporada, inclusive 0?
 int desc_meta_tem_temporadas(const char *corpo) {
   const char *v = corpo ? js_array(corpo, NULL, "videos") : NULL;
   while (v) {
     const char *f = js_fim(v);
-    if (videoTemporada(v, f) > 0) return 1;
+    if (videoTemporada(v, f) >= 0) return 1;
     v = js_prox(f);
   }
   return 0;
 }
 
-// Quantos videos com temporada > 0 a resposta do /meta traz.
-int desc_meta_n_episodios(const char *corpo) {
+// CONJUNTO DE (temporada, episodio) JA VISTOS num videos[]. Um addon de FONTES
+// pode responder o /meta com um video por ARQUIVO de torrent (relato de TV LG,
+// Breaking Bad: 18529 entradas para 62 episodios), entao contar e deduplicar
+// tem de ser sobre episodios DISTINTOS. Enderecamento aberto, dobra ao passar de meia
+// carga: O(n) no corpo inteiro. Memoria pelos pares DISTINTOS, nao pelas
+// entradas: 8 KiB (1024 casas) ate 511 pares, o caso do relato (62); 18 mil
+// pares distintos chegam a 512 KiB, com 768 KiB no instante da copia.
+typedef struct { unsigned long long *v; unsigned cap, n; } EpSet;
+
+static unsigned epSetCasa(const EpSet *s, unsigned long long k) {
+  unsigned i = (unsigned)((k * 0x9E3779B97F4A7C15ull) >> 40) & (s->cap - 1);
+  while (s->v[i] && s->v[i] != k) i = (i + 1) & (s->cap - 1);
+  return i;
+}
+
+// 1 = par novo (entrou); 0 = repetido. A chave e procurada ANTES de crescer:
+// faltar memoria para a tabela maior nao pode transformar em "novo" um par que
+// ja esta nela. Sem crescer, os pares novos seguem entrando ate sobrar uma casa
+// vazia (a que encerra a sondagem); so dai em diante o par que nao coube
+// responde "novo" sem ser guardado — o pior caso e o de antes do conjunto.
+static int epSetNovo(EpSet *s, int t, int e) {
+  // Reserva zero para a casa vazia, inclusive no conjunto de temporadas (0,0).
+  unsigned long long k = ((unsigned long long)((unsigned)t + 1u) << 32) | (unsigned)e;
+  unsigned i;
+  if (!s->v) {
+    s->cap = 1024; s->n = 0;
+    s->v = calloc(s->cap, sizeof *s->v);
+    if (!s->v) return 1;
+  }
+  i = epSetCasa(s, k);
+  if (s->v[i]) return 0;
+  if (s->n * 2 >= s->cap) {
+    EpSet g = { calloc((size_t)s->cap * 2, sizeof *s->v), s->cap * 2, s->n };
+    if (g.v) {
+      unsigned j;
+      for (j = 0; j < s->cap; j++)
+        if (s->v[j]) g.v[epSetCasa(&g, s->v[j])] = s->v[j];
+      free(s->v);
+      *s = g;
+      i = epSetCasa(s, k);
+    } else if (s->n + 2 > s->cap) return 1;   // cheia: fica a casa vazia
+  }
+  s->v[i] = k; s->n++;
+  return 1;
+}
+
+// Quantos episodios DISTINTOS (temporada >= 0) a resposta do /meta traz; em
+// `brutos` (opcional), quantos videos com temporada >= 0, repeticoes incluidas.
+// Video sem numero de episodio nao e repeticao de outro (regra do #328): cada
+// um conta.
+//
+// VIDEOS[] COM TEMPORADA FALSA: um addon que numera a temporada pelo indice do
+// episodio ("season":N,"episode":1 em cada video, "released" so com o ano) cria
+// uma aba por episodio (The Blacklist: Season 20+, cada uma com 1 episodio).
+// Reject only the episode-1/year-only pattern shared by all videos[] readers.
+// Sparse catalogs and missing dates alone do not prove malformed numbering.
+static int metaContarEpisodios(const char *corpo, int *brutos) {
   const char *v = corpo ? js_array(corpo, NULL, "videos") : NULL;
-  int n = 0;
+  EpSet set = { 0 };
+  int n = 0, b = 0;
+  if (js_videos_temporadas_falsas(corpo)) { if (brutos) *brutos = 0; return 0; }
   while (v) {
     const char *f = js_fim(v);
-    if (videoTemporada(v, f) > 0) n++;
+    int t = videoTemporada(v, f);
+    if (t >= 0) {
+      int e = (int)js_num(v, f, "episode", 0);
+      b++;
+      if (e <= 0 || epSetNovo(&set, t, e)) n++;
+    }
     v = js_prox(f);
   }
+  free(set.v);
+  if (brutos) *brutos = b;
   return n;
+}
+
+int desc_meta_n_episodios(const char *corpo) { return metaContarEpisodios(corpo, NULL); }
+
+// O videos[] e uma lista de ARQUIVOS, nao de episodios? Em media mais de tres
+// entradas por episodio so acontece em addon de fontes (o agregador de anime
+// do #328 repete uma ou duas vezes). Lista pequena nunca e.
+// Ser lista de arquivos NAO descarta o corpo por si so: ele perde o empate e a
+// preferencia pela ficha do addon, e so e recusado quando nao conhece MAIS
+// episodios distintos que a lista com que disputa, preservando suas temporadas
+// e ao menos 90% dos pares (temporada, episodio).
+static int metaListaDeArquivos(int distintos, int brutos) {
+  return brutos >= 60 && brutos > distintos * 3;
 }
 
 // Em par com CAT_EP_MAX (catalogo.c): um titulo que caiba no store nao pode
 // truncar no parse, e um que nao caiba trunca aqui em vez de zerar os outros.
-#define VIDEOS_MAX 1200
+#define VIDEOS_MAX 2400
+
+// Lista de arquivos so pode ampliar a numeracao do catalogo, nunca refaze-la
+// (One Piece anime vs live-action). Compara o corpo inteiro, antes do corte.
+static int metaArquivosCompativeis(const char *arquivos, const char *catalogo) {
+  const char *corpos[2] = { arquivos, catalogo };
+  EpSet pares[2] = {{0}}, temps[2] = {{0}};
+  int i, ok = 1;
+  unsigned j, contidos = 0;
+  for (i = 0; i < 2; i++) {
+    const char *v = js_array(corpos[i], NULL, "videos");
+    while (v) {
+      const char *f = js_fim(v);
+      int t = videoTemporada(v, f), e = (int)js_num(v, f, "episode", 0);
+      if (t >= 0) {
+        unsigned antes = temps[i].n;
+        if (epSetNovo(&temps[i], t, 0) && temps[i].n == antes) ok = 0;
+        if (e > 0) {
+          antes = pares[i].n;
+          if (epSetNovo(&pares[i], t, e) && pares[i].n == antes) ok = 0;
+        }
+      }
+      v = js_prox(f);
+    }
+  }
+  // Full-body coverage is meaningless if publication will truncate the list.
+  if (pares[0].n > VIDEOS_MAX) ok = 0;
+  if (temps[1].n > 1 && temps[0].n < temps[1].n) ok = 0;
+  for (j = 0; j < pares[1].cap && pares[1].v; j++) {
+    unsigned long long k = pares[1].v[j];
+    if (k && pares[0].v && pares[0].v[epSetCasa(&pares[0], k)]) contidos++;
+  }
+  if ((unsigned long long)contidos * 10 < (unsigned long long)pares[1].n * 9) ok = 0;
+  for (i = 0; i < 2; i++) { free(pares[i].v); free(temps[i].v); }
+  return ok;                             // sem memoria, conserva o catalogo
+}
 
 // videos[] de um /meta -> lista de CatEp ORDENADA por (temporada, episodio).
-// So entram videos com temporada > 0. Devolve quantos.
+// Inclui especiais (temporada 0) sem renumerar o par nem o id do video.
 static int parsearEpisodios(const char *corpo, CatEp *eps, int max) {
   int n = 0;
-  const char *p = js_array(corpo, NULL, "videos");
-  while (p && n < max) {
+  unsigned char parAmbiguo[VIDEOS_MAX] = {0};
+  const char *p = metaContarEpisodios(corpo, NULL) ? js_array(corpo, NULL, "videos") : NULL;
+  EpSet set = { 0 };
+  while (p) {
     const char *f = js_fim(p);
     int t = videoTemporada(p, f);
-    if (t > 0) {
+    int ne = t >= 0 ? (int)js_num(p, f, "episode", 0) : 0;
+    int tvdb = metaep_tvdb_video(p, f);
+    int novo = t >= 0 && (ne <= 0 || epSetNovo(&set, t, ne));
+    // Duplicate files for one displayed episode can disagree about identity.
+    // Keep the first source URL, but do not let either ID become a Trakt proof.
+    if (t >= 0 && !novo)
+      for (int i = 0; i < n; i++)
+        if (eps[i].temporada == t && eps[i].episodio == ne) {
+          if (!parAmbiguo[i] && eps[i].tvdbEp > 0 && tvdb > 0 && eps[i].tvdbEp != tvdb) {
+            eps[i].tvdbEp = 0; parAmbiguo[i] = 1;
+          } else if (!parAmbiguo[i] && eps[i].tvdbEp <= 0 && tvdb > 0)
+            eps[i].tvdbEp = tvdb;
+        }
+    // Repeticao sai JA AQUI, antes do corte de `max`: descartada so depois de
+    // ordenar, as vagas iam para copias dos primeiros episodios e o resto
+    // da serie nem era lido. Fica o primeiro da resposta; sem numero de
+    // episodio nao e repeticao.
+    if (novo && n < max) {
       CatEp *e = &eps[n];
       char d[24] = "";
       memset(e, 0, sizeof *e);
       e->temporada = t;
-      e->episodio = (int)js_num(p, f, "episode", 0);
+      e->episodio = ne;
+      e->tvdbEp = tvdb;
+      { double rating = js_num(p, f, "imdbRating", 0.0);
+        // Cinemeta videos use `rating`; other metadata providers use `imdbRating`.
+        if (rating<=0) rating=js_num(p,f,"rating",0.0);
+        if (rating > 0.0 && rating <= 10.0)
+          e->notaImdb = (int)(rating * 10.0 + 0.5); }
       js_texto(p, f, "name", e->nome, sizeof e->nome);
       // O id do video (cat_id_stream): e ele que se manda aos addons de fonte
       // quando o titulo nao e do IMDb. Addon que usa "title" no lugar de "name"
@@ -5005,11 +7563,30 @@ static int parsearEpisodios(const char *corpo, CatEp *eps, int max) {
       js_texto(p, f, "overview", e->sinopse, sizeof e->sinopse);
       if (!e->sinopse[0]) js_texto(p, f, "description", e->sinopse, sizeof e->sinopse);
       js_texto(p, f, "thumbnail", e->thumb, sizeof e->thumb);
+      js_texto(p, f, "runtime", e->duracao, sizeof e->duracao);
+      metaprov_duracao(e->duracao, sizeof e->duracao);   // "25min" -> "25 min"
+      if (!e->duracao[0]) {
+        int runtime = (int)js_num(p, f, "runtime", 0);
+        if (runtime > 0 && runtime < 1440)
+          snprintf(e->duracao, sizeof e->duracao, "%d min", runtime);
+      }
+      js_texto(p, f, "released", e->dataIso, sizeof e->dataIso);
       js_texto(p, f, "released", d, sizeof d);
       desc_data_extenso(d, e->data, sizeof e->data);
       n++;
     }
     p = js_prox(f);
+  }
+  free(set.v);
+  // The same exact ID assigned to different source pairs is ambiguous. Keep
+  // both playable cards, but never translate or scrobble either by that ID.
+  { unsigned char ambiguo[VIDEOS_MAX] = {0};
+    for (int i = 0; i < n; i++) if (eps[i].tvdbEp > 0)
+      for (int j = i + 1; j < n; j++)
+        if (eps[j].tvdbEp == eps[i].tvdbEp &&
+            (eps[j].temporada != eps[i].temporada || eps[j].episodio != eps[i].episodio))
+          ambiguo[i] = ambiguo[j] = 1;
+    for (int i = 0; i < n; i++) if (ambiguo[i]) eps[i].tvdbEp = 0;
   }
   for (int i = 1; i < n; i++) {
     CatEp k = eps[i];
@@ -5019,6 +7596,23 @@ static int parsearEpisodios(const char *corpo, CatEp *eps, int max) {
           (eps[j].temporada == k.temporada && eps[j].episodio > k.episodio)); j--)
       eps[j + 1] = eps[j];
     eps[j + 1] = k;
+  }
+  // Um /meta pode trazer o mesmo (temporada, episodio) mais de uma vez (agregador
+  // de anime com varias entradas, #328): cada repeticao virava um cartao
+  // identico. A ordenacao acima e estavel, entao ficar com o primeiro da
+  // vizinhanca e ficar com o primeiro da resposta.
+  if (n > 1) {
+    int w = 1;
+    for (int i = 1; i < n; i++) {
+      // Sem numero de episodio (0) nao e repeticao: todos os videos sem
+      // "episode" cairiam num cartao so.
+      if (eps[i].episodio > 0 &&
+          eps[i].temporada == eps[w - 1].temporada &&
+          eps[i].episodio == eps[w - 1].episodio) continue;
+      if (w != i) eps[w] = eps[i];
+      w++;
+    }
+    n = w;
   }
   return n;
 }
@@ -5044,6 +7638,8 @@ void desc_mesclar_episodios(CatEp *base, int nb, const CatEp *outro, int no, int
     if (!base[i].thumb[0])   snprintf(base[i].thumb, sizeof base[i].thumb, "%s", outro[j].thumb);
     if (!base[i].duracao[0]) snprintf(base[i].duracao, sizeof base[i].duracao, "%s", outro[j].duracao);
     if (!base[i].data[0])    snprintf(base[i].data, sizeof base[i].data, "%s", outro[j].data);
+    if (!base[i].dataIso[0]) snprintf(base[i].dataIso, sizeof base[i].dataIso, "%s", outro[j].dataIso);
+    if (!base[i].notaImdb) base[i].notaImdb = outro[j].notaImdb;
     i++; j++;
   }
 }
@@ -5055,24 +7651,93 @@ void desc_mesclar_episodios(CatEp *base, int nb, const CatEp *outro, int no, int
 // "Continuar assistindo" roda com o player aberto), cat_definir_episodios e
 // cat_atualizar_item escreviam na posicao velha — a lista e a ficha de um
 // titulo iam parar em outro. epAlvo re-resolve pelo id antes de cada escrita;
-// -1 = o titulo saiu do catalogo e nada e escrito. Um fio por vez (fioEpVivo).
-static char epAlvoId[64];
-static int epAlvo(int alvoItem) {
-  int i = cat_indice_vivo(alvoItem, epAlvoId);
+// -1 = o titulo saiu do catalogo ou o pedido foi substituido.
+static char epAlvoId[64], epPedidoId[64];
+typedef struct { int item; unsigned geracao; char id[64]; CatItem base; NvPerfilSessao sessao; } EpPedido;
+static pthread_key_t epPedidoKey;
+static pthread_once_t epPedidoOnce = PTHREAD_ONCE_INIT;
+static pthread_mutex_t epPedidoTrava = PTHREAD_MUTEX_INITIALIZER;
+static unsigned epGeracao;
+static void epPedidoKeyCriar(void) { pthread_key_create(&epPedidoKey, NULL); }
+static EpPedido *epPedidoAtual(void) {
+  pthread_once(&epPedidoOnce, epPedidoKeyCriar);
+  return pthread_getspecific(epPedidoKey);
+}
+static int epPedidoSaiu(void) {
+  EpPedido *p = epPedidoAtual();
+  int saiu;
+  pthread_mutex_lock(&epPedidoTrava);
+  saiu = p && p->geracao != epGeracao;
+  pthread_mutex_unlock(&epPedidoTrava);
+  return saiu;
+}
+static void epConcluir(void) {
+  pthread_mutex_lock(&epPedidoTrava);
+  EpPedido *p = epPedidoAtual();
+  if (!p || p->geracao == epGeracao) fioEpVivo = 0;
+  pthread_mutex_unlock(&epPedidoTrava);
+}
+// Com o id do PROPRIO fio: a cauda do buscarEps (notas por temporada do TMDB,
+// dezenas de pedidos em serie longa) roda depois de fioEpVivo ser solto, e o
+// proximo titulo ja reescreveu epAlvoId (sem _Thread_local no Tizen 4/5).
+static int epAlvoDe(int alvoItem, const char *id) {
+  if (!descSessaoAtual()) return -1;
+  int i = cat_indice_vivo(alvoItem, id);
   if (i != alvoItem) {
     printf("[desc] episodios de %s: catalogo remontou no meio do pedido (%d -> %d)\n",
-           epAlvoId, alvoItem, i);
+           id, alvoItem, i);
     fflush(stdout);
   }
   return i;
 }
+static int epAlvo(int alvoItem) {
+  EpPedido *p = epPedidoAtual();
+  if (epPedidoSaiu()) return -1;
+  return epAlvoDe(alvoItem, p ? p->id : epAlvoId);
+}
 
-static int publicarEpisodios(const char *corpo, int alvoItem, const char *titulo,
-                             const char *sobre, int modo) {
+// A geracao e as escritas usam a mesma trava; rede e parse ficam fora.
+// Devolve com epPedidoTrava adquirida, inclusive quando o alvo saiu.
+static int epPublicacaoIniciar(int alvoItem) {
+  EpPedido *p = epPedidoAtual();
+  pthread_mutex_lock(&epPedidoTrava);
+  if (p && p->geracao != epGeracao) return -1;
+  return epAlvoDe(alvoItem, p ? p->id : epAlvoId);
+}
+
+// AS ABAS DE TEMPORADA SAO AS DA LISTA QUE FOI PUBLICADA (#372). Eram lidas do
+// corpo da ficha (o do Nuvio) mesmo quando a lista que entrou era a de um
+// addon: Apothecary Diaries publicava 72 episodios do AIOMetadata nas
+// temporadas 1-3 com UMA aba (o Nuvio junta tudo na 1), e detail.c so mostra
+// episodio de temporada que tem aba. Cada publicacao regrava estas abas; quem
+// publica por ultimo e quem as define.
+typedef struct { int n, t[CAT_TEMP_MAX]; } TempsPub;
+
+static void temporadasDosEps(const CatEp *eps, int n, TempsPub *tp) {
+  int i, j, k;
+  tp->n = 0;
+  for (i = 0; i < n; i++) {
+    int t = eps[i].temporada;
+    if (t < 0) continue;
+    // Temporadas regulares primeiro; especiais continuam sendo a temporada 0.
+    for (j = 0; j < tp->n && tp->t[j] > 0 && (t == 0 || tp->t[j] < t); j++) {}
+    if (j < tp->n && tp->t[j] == t) continue;
+    if (tp->n >= CAT_TEMP_MAX) continue;
+    for (k = tp->n; k > j; k--) tp->t[k] = tp->t[k - 1];
+    tp->t[j] = t;
+    tp->n++;
+  }
+}
+
+static int publicarEpisodiosEscolhidos(const char *corpo, int alvoItem,
+                                       const char *titulo, const char *sobre,
+                                       int modo, TempsPub *tp, int cedo,
+                                       int substituir, int pendente) {
   CatEp *eps = malloc(sizeof(CatEp) * VIDEOS_MAX);
   int n = 0;
   if (!eps) return 0;
   n = parsearEpisodios(corpo, eps, VIDEOS_MAX);
+  if (tp && n) temporadasDosEps(eps, n, tp);
   if (sobre && n) {
     CatEp *o = malloc(sizeof(CatEp) * VIDEOS_MAX);
     if (o) {
@@ -5081,12 +7746,114 @@ static int publicarEpisodios(const char *corpo, int alvoItem, const char *titulo
       free(o);
     }
   }
-  if (n && (alvoItem = epAlvo(alvoItem)) >= 0) cat_definir_episodios(alvoItem, eps, n);
+  alvoItem = epPublicacaoIniciar(alvoItem);
+  if (n && alvoItem >= 0 && (!cedo || !cat_n_episodios(alvoItem))) {
+    int antigos = cat_n_episodios(alvoItem);
+    CatItem atual;
+    int parcial = !cedo && cat_copiar_item(alvoItem, &atual) && atual.epsParciais;
+    int trocarTopologia = !cedo && (parcial || substituir);
+    int provisorio = cedo || pendente;
+    CatEp *estavel = antigos > 0 && epPedidoAtual() && !trocarTopologia
+                   ? malloc(sizeof(CatEp) * VIDEOS_MAX) : NULL;
+    // The flag goes up before the list: CW and the player must never see
+    // provisional video IDs as final, not even between two writes.
+    if (provisorio && cat_copiar_item(alvoItem, &atual) && !atual.epsParciais) {
+      atual.epsParciais = 1;
+      descCatAtualizar(cat_atualizar_item, alvoItem, &atual);
+    }
+    if (trocarTopologia) {
+      // A provisional list, or a complete list that lost source selection,
+      // must not contribute extra topology to the selected final list:
+      // continuous S1E13 and split S2E1 can be the same episode. Text/art
+      // enrichment was already applied above to matching final pairs.
+      descCatEpisodios(alvoItem, eps, n);
+      if (tp) temporadasDosEps(eps, n, tp);
+      if (cat_copiar_item(alvoItem, &atual)) {
+        atual.epsParciais = provisorio;
+        if (tp) {
+          atual.nTemporadas = tp->n;
+          memcpy(atual.temporadas, tp->t, sizeof(int) * (size_t)tp->n);
+        }
+        descCatAtualizar(cat_atualizar_item, alvoItem, &atual);
+      }
+    } else if (estavel) {
+      int k = 0;
+      // Mantem os pares e a ordem ja vistos; novos pares entram no fim.
+      // ponytail: busca O(n²), limitada a 2400 pares; indexar se o teto crescer.
+      for (int i = 0; i < antigos && k < VIDEOS_MAX; i++) {
+        const CatEp *e = cat_episodio(alvoItem, i);
+        if (!e) continue;
+        estavel[k] = *e;
+        for (int j = 0; j < n; j++)
+          if (e->temporada == eps[j].temporada && e->episodio == eps[j].episodio) {
+            estavel[k] = eps[j]; break;
+          }
+        k++;
+      }
+      for (int j = 0; j < n && k < VIDEOS_MAX; j++) {
+        int i;
+        for (i = 0; i < k; i++)
+          if (estavel[i].temporada == eps[j].temporada &&
+              estavel[i].episodio == eps[j].episodio) break;
+        if (i == k) estavel[k++] = eps[j];
+      }
+      descCatEpisodios(alvoItem, estavel, k);
+      if (tp) temporadasDosEps(estavel, k, tp);
+      free(estavel);
+    } else if (!antigos || !epPedidoAtual()) descCatEpisodios(alvoItem, eps, n);
+    else if (tp) {
+      // Sem memoria para mesclar, conserva a lista visivel e suas abas.
+      CatItem atual;
+      if (cat_copiar_item(alvoItem, &atual)) {
+        tp->n = atual.nTemporadas;
+        memcpy(tp->t, atual.temporadas, sizeof tp->t);
+      }
+    }
+    if (cedo && tp) {
+      CatItem edit;
+      if (cat_copiar_item(alvoItem, &edit)) {
+        edit.epsParciais = 1;
+        edit.nTemporadas = tp->n;
+        memcpy(edit.temporadas, tp->t, sizeof(int) * (size_t)tp->n);
+        descCatAtualizar(cat_atualizar_item, alvoItem, &edit);
+      }
+    }
+  }
+  pthread_mutex_unlock(&epPedidoTrava);
   free(eps);
   marco("episodios na tela");
   printf("[desc] %s: %d episodios publicados antes dos extras\n", titulo, n);
   fflush(stdout);
   return n;
+}
+
+static int publicarEpisodiosEx(const char *corpo, int alvoItem, const char *titulo,
+                               const char *sobre, int modo, TempsPub *tp, int cedo) {
+  return publicarEpisodiosEscolhidos(corpo, alvoItem, titulo, sobre, modo, tp,
+                                     cedo, 0, 0);
+}
+
+static int publicarEpisodios(const char *corpo, int alvoItem, const char *titulo,
+                             const char *sobre, int modo, TempsPub *tp) {
+  return publicarEpisodiosEx(corpo, alvoItem, titulo, sobre, modo, tp, 0);
+}
+
+// A source selected as the better episode list owns the topology. This is
+// distinct from ordinary enrichment: merging the old numeric pairs would keep
+// both S1E13 and S2E1 when two providers number the same episode differently.
+static int publicarEpisodiosSubstituir(const char *corpo, int alvoItem,
+                                       const char *titulo, const char *sobre,
+                                       int modo, TempsPub *tp) {
+  return publicarEpisodiosEscolhidos(corpo, alvoItem, titulo, sobre, modo, tp,
+                                     0, 1, 0);
+}
+
+// Cinemeta before the episode addons answer: visible, but not final until the
+// addon selection ends (cleared with the basic meta below).
+static int publicarEpisodiosPendentes(const char *corpo, int alvoItem,
+                                      const char *titulo, TempsPub *tp) {
+  return publicarEpisodiosEscolhidos(corpo, alvoItem, titulo, NULL, 0, tp,
+                                     0, 0, 1);
 }
 
 // O Cinemeta as vezes conhece MENOS episodios que o addon de metadados do
@@ -5103,34 +7870,69 @@ static int publicarEpisodios(const char *corpo, int alvoItem, const char *titulo
 // se e menor, a do Cinemeta fica e leva nome e sinopse do addon nos episodios
 // que os dois tem. Devolve 1 quando o texto do addon entrou.
 static int episodiosDoAddon(int alvoItem, const char *serie, const char *titulo,
-                            const char *corpoCine, int nCine, int aplicar) {
+                            const char *corpoCine, int nCine, int aplicar, TempsPub *tp) {
   char *melhorCorpo = NULL;
   const char *melhorNome = "";
-  int melhor = 0, i, n = addons_n(), usouTexto = 0;
+  int melhor = 0, melhorArq = 0, i, n = addons_n(), usouTexto = 0;
   for (i = 0; i < n; i++) {
     char *c2 = metaDoAddon(i, "series", serie);
-    int n2;
+    int n2, brutos = 0, arq;
     if (!c2) continue;
-    n2 = desc_meta_n_episodios(c2);
-    if (n2 > melhor) {
+    // Episodios DISTINTOS: pela contagem bruta, a lista de arquivos de um addon
+    // de fontes (18529 "episodios" contra 62) ganhava de qualquer lista real.
+    n2 = metaContarEpisodios(c2, &brutos);
+    arq = metaListaDeArquivos(n2, brutos);
+    // LISTA DE ARQUIVOS SO ENTRA SE SOUBER MAIS EPISODIOS que o Cinemeta (20 em
+    // 4 variantes contra 12: os 8 a mais nao se perdem). No empate ou com menos
+    // ela nao serve nem de lista nem de texto: o "nome" dela e nome de arquivo.
+    if (arq && n2 <= nCine) {
+      printf("[desc] %s: %s respondeu %d videos para %d episodios (lista de arquivos) "
+             "contra %d do Cinemeta; nao serve de lista de episodios\n",
+             titulo, addons_nome(i), brutos, n2, nCine);
+      fflush(stdout);
+      free(c2);
+      continue;
+    }
+    if (arq && !metaArquivosCompativeis(c2, corpoCine)) {
+      printf("[desc] %s: %s respondeu lista de arquivos com menos temporadas ou "
+             "cobertura inferior a 90%%; mantendo a lista do Cinemeta\n", titulo, addons_nome(i));
+      fflush(stdout);
+      free(c2);
+      continue;
+    }
+    // Entre addons, mais episodios ganha; no empate, a lista de verdade tira a
+    // de arquivos.
+    if (n2 > melhor || (n2 == melhor && melhorArq && !arq)) {
       free(melhorCorpo);
-      melhorCorpo = c2; melhor = n2; melhorNome = addons_nome(i);
+      melhorCorpo = c2; melhor = n2; melhorArq = arq; melhorNome = addons_nome(i);
     } else free(c2);
   }
   if (!melhorCorpo) return 0;
-  if (melhor > nCine || (aplicar && melhor >= nCine)) {
+  if (melhorArq) {
+    // So chegou aqui por saber MAIS episodios. A lista e dela; o texto nao:
+    // o nome do Cinemeta entra por cima nos episodios que os dois tem, e o
+    // texto do addon nao conta como aplicado (o TMDB segue podendo traduzir).
+    printf("[desc] %s: %s tem %d episodios (lista de arquivos) contra %d do Cinemeta; "
+           "usando a lista do addon com os nomes do Cinemeta\n",
+           titulo, melhorNome, melhor, nCine);
+    fflush(stdout);
+    publicarEpisodiosSubstituir(melhorCorpo, alvoItem, titulo, corpoCine,
+                                DESC_MESCLA_TEXTO, tp);
+    arte_reserva_episodios(serie, melhorCorpo);
+  } else if (melhor > nCine || (aplicar && melhor >= nCine)) {
     printf("[desc] %s: %s tem %d episodios contra %d do Cinemeta; usando a lista do addon\n",
            titulo, melhorNome, melhor, nCine);
     fflush(stdout);
-    publicarEpisodios(melhorCorpo, alvoItem, titulo, aplicar ? corpoCine : NULL,
-                      DESC_MESCLA_VAZIOS);
+    publicarEpisodiosSubstituir(melhorCorpo, alvoItem, titulo,
+                                aplicar ? corpoCine : NULL,
+                                DESC_MESCLA_VAZIOS, tp);
     arte_reserva_episodios(serie, melhorCorpo);
     usouTexto = aplicar;
   } else if (aplicar) {
     printf("[desc] %s: %s tem %d episodios contra %d do Cinemeta; nome e sinopse do addon\n",
            titulo, melhorNome, melhor, nCine);
     fflush(stdout);
-    publicarEpisodios(corpoCine, alvoItem, titulo, melhorCorpo, DESC_MESCLA_TEXTO);
+    publicarEpisodios(corpoCine, alvoItem, titulo, melhorCorpo, DESC_MESCLA_TEXTO, tp);
     usouTexto = 1;
   }
   free(melhorCorpo);
@@ -5176,19 +7978,43 @@ static void generosDe(const char *corpo, char *lista, size_t tam, const char *ti
 // tudo isso do mesmo /meta que buscarEps ja tem na mao — entao o que falta e
 // copiar de la, e o detalhe fica igual em qualquer entrada.
 //
-// Raso = sem sinopse. Um item completo nao e tocado. Poster e generos ficam
+// Sinopse pronta: completa lacunas de logo/ano/nota e o fundo quando ainda e
+// so o cartaz da semente. Texto pronto nao significa que a arte ja chegou.
+// Sem sinopse: segue a regra de enriquecimento raso. Poster e generos ficam
 // (o poster ja esta na tela; os generos buscarEps ja regrava).
 static void completarRaso(CatItem *dst, const char *corpo, const char *tipo) {
   const char *m = corpo ? strstr(corpo, "\"meta\"") : NULL;
   CatItem *cheio;
-  if (!m || !dst || dst->sinopse[0]) return;
+  int raso;
+  if (!m || !dst) return;
+  {
+    // Logo/ano/nota nao dependem de sinopse nem de poster na ficha.
+    const char *raiz = strchr(m, '{');
+    if (!raiz) return;
+    if (!dst->logo[0]) {
+      urlArteInteira(raiz, NULL, "logo", 0, dst->logo, sizeof dst->logo, dst->titulo);
+      if (ehSvg(dst->logo) || !strcmp(dst->logo, dst->poster)) dst->logo[0] = 0;
+    }
+    if (!dst->meta[0]) js_texto_raiz_em(raiz, NULL, "releaseInfo", dst->meta, sizeof dst->meta);
+    if (!dst->nota) {
+      double nota = js_num(raiz, NULL, "imdbRating", 0);
+      if (nota > 0) {
+        int n10 = (int)(nota * 10 + .5);
+        dst->nota = n10 > 99 ? n10 / 10 : n10;
+      }
+    }
+  }
+  raso = !dst->sinopse[0];
+  if (!raso && dst->backdrop[0] && strcmp(dst->backdrop, dst->poster)) return;
   cheio = malloc(sizeof *cheio);
   if (!cheio) return;
   if (deMeta(m, NULL, tipo, cheio)) {
-    snprintf(dst->sinopse, sizeof dst->sinopse, "%s", cheio->sinopse);
-    if (cheio->meta[0]) snprintf(dst->meta, sizeof dst->meta, "%s", cheio->meta);
-    if (cheio->nota > 0) dst->nota = cheio->nota;
-    if (cheio->tmdb > 0 && dst->tmdb <= 0) dst->tmdb = cheio->tmdb;
+    if (raso) {
+      snprintf(dst->sinopse, sizeof dst->sinopse, "%s", cheio->sinopse);
+      if (!dst->meta[0] && cheio->meta[0]) snprintf(dst->meta, sizeof dst->meta, "%s", cheio->meta);
+      if (!dst->nota && cheio->nota > 0) dst->nota = cheio->nota;
+      if (cheio->tmdb > 0 && dst->tmdb <= 0) dst->tmdb = cheio->tmdb;
+    }
     // Fundo e logo do /meta MANDAM, inclusive o logo vazio: o do metahub que
     // o item raso montou pode nem existir, e a busca desenharia o nome.
     // Com a arte do addon ligada (Ajustes), o fundo e o logo que o catalogo do
@@ -5196,14 +8022,17 @@ static void completarRaso(CatItem *dst, const char *corpo, const char *tipo) {
     int fundoAddon = ajustes_fundo_addon() && dst->origem[0] &&
                      dst->backdropCatalogo[0] && strcmp(dst->backdropCatalogo, dst->poster);
     int logoAddon = ajustes_logo_addon() && dst->origem[0] && dst->logo[0];
-    if (cheio->backdrop[0] && !fundoAddon) {
+    // A fonte de complemento pode trazer a paisagem depois da sinopse.
+    // So uma paisagem real libera a reserva; outro poster nao e melhoria.
+    if (cheio->backdrop[0] && !fundoAddon &&
+        (raso || strcmp(cheio->backdrop, cheio->poster))) {
       snprintf(dst->backdrop, sizeof dst->backdrop, "%s", cheio->backdrop);
       snprintf(dst->backdropCatalogo, sizeof dst->backdropCatalogo, "%s", cheio->backdropCatalogo);
       snprintf(dst->backdropTmdb, sizeof dst->backdropTmdb, "%s", cheio->backdropTmdb);
       snprintf(dst->backdropTrakt, sizeof dst->backdropTrakt, "%s", cheio->backdropTrakt);
     }
-    if (!logoAddon) snprintf(dst->logo, sizeof dst->logo, "%s", cheio->logo);
-    if (!strcmp(dst->classificacao, "14")) dst->classificacao[0] = 0;
+    if (raso && !logoAddon && cheio->logo[0]) snprintf(dst->logo, sizeof dst->logo, "%s", cheio->logo);
+    if (raso && !strcmp(dst->classificacao, "14")) dst->classificacao[0] = 0;
   }
   free(cheio);
 }
@@ -5227,13 +8056,16 @@ static void completarRaso(CatItem *dst, const char *corpo, const char *tipo) {
 //   b) outros addons com "meta" ATIVOS, na ordem da lista do usuario, cujo
 //      idPrefixes casa com o id (addons_aceita_id == 1). Id do IMDb aceita
 //      tambem quem nao declarou prefixo (-1), porque "tt" e o id que todo mundo
-//      fala. So se ainda falta: uma fonte que ja entregou ficha completa
-//      (sinopse + episodios) encerra a busca.
+//      fala. Um addon que NAO atende o id do item recebe o id do mesmo titulo
+//      que ele atende, pelo ARM (armIdParaAddon: kitsu -> mal, anidb -> kitsu,
+//      "tt"/"tmdb:" de anime -> kitsu...). So se ainda falta: uma fonte que ja
+//      entregou ficha completa (sinopse + episodios) encerra a busca.
 //   c) o Cinemeta, para id do IMDb — e para o "tt" que a propria ficha do addon
 //      revelou (imdb_id, imdbId, link do IMDb).
 //   d) id que nao e do IMDb, sem "tt" a vista e a ficha incompleta: a API ARM
-//      (arm.haglund.dev, publica, sem chave — conferido em 29/09/2026) converte
-//      kitsu/mal/anilist/anidb em imdb, e dai o Cinemeta entra como em (c).
+//      (arm.haglund.dev, publica, sem chave — conferido em 22/10/2026) converte
+//      qualquer id de site de anime (e tmdb/tvdb de serie de anime) em imdb, e
+//      dai o Cinemeta entra como em (c).
 //
 // A REGRA DE MESCLA: a primeira fonte que responde uma ficha valida e a BASE
 // (titulo, sinopse, episodios, generos, elenco). As seguintes so preenchem o que
@@ -5337,15 +8169,14 @@ static char *cinemetaMeta(const char *tipoItem, const char *tt, int *ehFilme) {
   int nTipos = desc_meta_tipos(tipoItem, tipos), ti;
   char *corpo = NULL;
   for (ti = 0; ti < nTipos; ti++) {
-    char chave[96], url[300];
+    char chave[96];
     int ultimo = ti == nTipos - 1;
     free(corpo);
     corpo = NULL;
     desc_meta_chave(chave, sizeof chave, tipos[ti], tt);
     corpo = metaCacheObter(chave);
     if (!corpo) {
-      snprintf(url, sizeof url, "%s/meta/%s/%s.json", CINEMETA, tipos[ti], tt);
-      corpo = rede_baixar(url, 10);
+      corpo = metaprov_meta(tipos[ti], tt, 10, NULL);   // Nuvio, depois Cinemeta
       if (!corpo) { if (ultimo) break; continue; }
       metaCacheGuardar(chave, corpo);
     }
@@ -5356,41 +8187,69 @@ static char *cinemetaMeta(const char *tipoItem, const char *tt, int *ehFilme) {
   return corpo;
 }
 
-// ARM (arm.haglund.dev): converte id de anime em IMDb. Publica e sem chave; o
-// unico dado enviado e o numero do id. "kitsu:41370" -> tt9335498. Cache no
-// mesmo metaCache (chave "arm/<id>"). Vazio quando nao ha mapeamento.
-static void armImdb(const char *id, char *dst, size_t n) {
-  static const struct { const char *pref, *fonte; } MAPA[] = {
-    { "kitsu:", "kitsu" }, { "mal:", "myanimelist" }, { "anilist:", "anilist" },
-    { "anidb:", "anidb" }, { "myanimelist:", "myanimelist" },
-  };
-  char chave[96], num[24], url[200], *c;
-  size_t k = 0, i;
-  const char *fonte = NULL;
-  if (n) dst[0] = 0;
-  for (i = 0; i < sizeof MAPA / sizeof *MAPA; i++)
-    if (!strncmp(id, MAPA[i].pref, strlen(MAPA[i].pref))) {
-      fonte = MAPA[i].fonte;
-      id += strlen(MAPA[i].pref);
-      break;
-    }
-  if (!fonte) return;
-  while (id[k] >= '0' && id[k] <= '9' && k + 1 < sizeof num) { num[k] = id[k]; k++; }
-  num[k] = 0;
-  if (!k) return;
-  snprintf(chave, sizeof chave, "arm/%s:%s", fonte, num);
-  c = metaCacheObter(chave);
-  if (!c) {
-    if (metaNegAtiva(chave)) return;
-    snprintf(url, sizeof url, "https://arm.haglund.dev/api/v2/ids?source=%s&id=%s", fonte, num);
-    c = rede_baixar(url, 8);
-    if (!c) { metaNegGuardar(chave); return; }
-    metaCacheGuardar(chave, c);
+// ARM: ver armids.h (o mesmo anime em cada site; tambem usado pelas fontes).
+
+// Vale perguntar ao ARM por este titulo? Id de site de anime, sempre. "tt",
+// "tmdb:" e "tvdb:" so quando o titulo e anime pela mesma regra de
+// artehero_eh_anime (genero Animacao/Anime E pais Japao): o ARM so conhece
+// anime, e um filme qualquer pagaria uma consulta para nada.
+static int armVale(const CatItem *c, const char *id) {
+  if (arm_id_anime(id)) return 1;
+  if (!arm_id_conhecido(id)) return 0;
+  if (!strstr(c->genero, "Anima") && !strstr(c->genero, "Anime")) return 0;
+  return strstr(c->pais, "Jap") != NULL;
+}
+
+// O mesmo titulo no espaco de ids que o addon `i` declara atender, quando nao e
+// o do item: "kitsu:41370" num addon so de "mal:" vira "mal:38000"; um "tt" de
+// anime num addon so de "kitsu:" vira "kitsu:41370" (so se sem ambiguidade). A
+// consulta e feita UMA vez por abertura (`feito`/`a`), so se algum addon
+// precisar; um addon que ja atende o id do item nem chega aqui. 1 com o id em `dst`.
+static int armIdParaAddon(int i, const char *tipo, const char *id, ArmIds *a, int *feito,
+                          char *dst, size_t n) {
+  size_t k;
+  // So vale consultar se o addon declara algum dos prefixos que o ARM devolve:
+  // addon so de fontes, so de "tt" ou sem manifesto lido nunca aceitaria.
+  for (k = 0; k < ARM_COLS; k++) {
+    snprintf(dst, n, "%s1", arm_prefixo((int)k));
+    if (addons_aceita_id(i, tipo, dst) == 1) break;
   }
-  { char tt[32] = "";
-    if (js_texto_raiz(c, "imdb", tt, sizeof tt) && !strncmp(tt, "tt", 2))
-      snprintf(dst, n, "%s", tt); }
-  free(c);
+  if (k == ARM_COLS) return 0;
+  if (!*feito) { *feito = 1; arm_consultar(id, tipo, a); }
+  for (k = 0; k < ARM_COLS; k++) {
+    if (!a->id[k]) continue;
+    snprintf(dst, n, "%s%lu", arm_prefixo((int)k), a->id[k]);
+    if (!strcmp(dst, id)) continue;
+    if (addons_aceita_id(i, tipo, dst) == 1) return 1;
+  }
+  return 0;
+}
+
+// Ficha pedida com um id TRADUZIDO ("mal:38000" para um item "kitsu:41370"): os
+// ids de video dela ("mal:38000:5") sao do addon de metadados, e cat_id_stream
+// os mandaria aos addons de FONTE, que falam o id do item. A chave "id" desses
+// videos vira "_id": o episodio fica sem id proprio e cat_id_stream monta o do
+// item ("kitsu:41370:5", ou "tt...:T:E"). Devolve um corpo novo (ou NULL).
+static char *armSemIdsDeVideo(const char *corpo, const char *qid) {
+  size_t nq = strlen(qid), extra = 0;
+  const char *p;
+  char *novo, *d;
+  for (p = strstr(corpo, "\"id\""); p; p = strstr(p + 4, "\"id\"")) extra++;
+  novo = malloc(strlen(corpo) + extra + 1);
+  if (!novo) return NULL;
+  for (p = corpo, d = novo; *p; ) {
+    if (!strncmp(p, "\"id\"", 4)) {
+      const char *v = p + 4;
+      while (*v == ' ' || *v == ':' || *v == '\t' || *v == '\n' || *v == '\r') v++;
+      if (*v == '"' && !strncmp(v + 1, qid, nq) && v[1 + nq] == ':') {
+        memcpy(d, "\"_id\"", 5); d += 5; p += 4;
+        continue;
+      }
+    }
+    *d++ = *p++;
+  }
+  *d = 0;
+  return novo;
 }
 
 // Tenta a ficha do addon `i`; guarda em `mf` se valida. Um pedido, no tipo
@@ -5427,38 +8286,121 @@ static int catalogoPrimeiro(const CatItem *c) {
 // caminho do catalogo: ha ficha de um addon, ou (id que nao e do IMDb) ao menos
 // a do Cinemeta achada pelo mapeamento. 0 = nada util; quem chama segue o
 // caminho antigo (Cinemeta para "tt", nada para o resto).
-static int metaCatalogoResolver(const CatItem *orig, MetaFontes *mf) {
+static void fichaDe(CatItem *d, const char *corpo, int soVazios);
+static void metaPublicarPrimario(const CatItem *orig, const char *corpo, int indice) {
+  CatItem *cedo = malloc(sizeof *cedo);
+  if (!cedo) return;
+  *cedo = *orig;
+  completarRaso(cedo, corpo, orig->tipo);
+  fichaDe(cedo, corpo, 1);
+  indice = epPublicacaoIniciar(indice);
+  if (indice >= 0) {
+    descCatSinopse(indice, orig->imdb, cedo->sinopse, cedo->titulo);
+    descCatBasico(indice, cedo);
+  }
+  pthread_mutex_unlock(&epPedidoTrava);
+  marco("detalhe: ficha primaria publicada antes do complemento");
+  free(cedo);
+}
+typedef struct {
+  const CatItem *orig;
+  int indice, fil;
+  EpPedido *pedido;
+  char *corpo;
+} EpCine;
+static void epPublicarCedo(const CatItem *orig, const char *corpo, int indice) {
+  TempsPub tp = {0};
+  int brutos = 0, distintos = metaContarEpisodios(corpo, &brutos);
+  if (!corpo || !distintos || metaListaDeArquivos(distintos, brutos)) return;
+  publicarEpisodiosEx(corpo, indice, orig->titulo, NULL, 0, &tp, 1);
+}
+static void *epCineBuscar(void *u) {
+  EpCine *c = u;
+  pthread_once(&epPedidoOnce, epPedidoKeyCriar);
+  pthread_setspecific(epPedidoKey, c->pedido);
+  char id[64];
+  idbase_copiar(c->orig->imdb, id, sizeof id);
+  c->corpo = cinemetaMeta(c->orig->tipo, id, &c->fil);
+  epPublicarCedo(c->orig, c->corpo, c->indice);
+  pthread_setspecific(epPedidoKey, NULL);
+  return NULL;
+}
+static int metaCatalogoResolver(const CatItem *orig, MetaFontes *mf, int indice) {
   char id[64];
   int origem = addonDaOrigem(orig->origem), i, n = addons_n(), extras = 0;
   int ehImdb = !strncmp(orig->imdb, "tt", 2);
+  ArmIds arm;
+  int armFeito = 0;
+  char armAlt[64];
+  const char *cid;
+  EpCine cedo = { orig, indice, 1, epPedidoAtual(), NULL };
+  pthread_t cineFio;
+  int paralelo = ehImdb && strcmp(orig->tipo, "movie") &&
+                 pthread_create(&cineFio, NULL, epCineBuscar, &cedo) == 0;
   memset(mf, 0, sizeof *mf);
   idbase_copiar(orig->imdb, id, sizeof id);
   // a) quem publicou
   if (origem >= 0) tentarFichaDoAddon(mf, origem, orig->tipo, id);
+  if (mf->n && !epPedidoSaiu()) {
+    epPublicarCedo(orig, mf->corpo[0], indice);
+    indice = epAlvo(indice);
+    if (indice >= 0) metaPublicarPrimario(orig, mf->corpo[0], indice);
+  }
   // b) outros addons de metadados, na ordem do usuario
-  for (i = 0; i < n && extras < 2 && (!mf->n || !metaCompleta(mf->corpo[0])); i++) {
+  for (i = 0; i < n && !epPedidoSaiu() && extras < 2 && (!mf->n || !metaCompleta(mf->corpo[0])); i++) {
     int r;
+    const char *qid = id;
     if (i == origem) continue;
     r = addons_aceita_id(i, orig->tipo, id);
+    // Id que este addon nao atende: o ARM diz qual id do MESMO titulo ele
+    // atende (kitsu -> mal, anidb -> kitsu, tt/tmdb de anime -> kitsu...). Para
+    // "tt" so quando o addon declarou que nao fala IMDb (r == 0) e o titulo e
+    // anime: um filme qualquer nao custa uma consulta.
+    if (r != 1 && (!ehImdb || r == 0) && armVale(orig, id) &&
+        armIdParaAddon(i, orig->tipo, id, &arm, &armFeito, armAlt, sizeof armAlt)) {
+      qid = armAlt;
+      r = 1;
+      if (epPedidoSaiu()) break;   // a consulta ao ARM pode ter esperado ate 8 s
+    }
     if (r == 1 || (r == -1 && ehImdb && addons_sondado(i) && addons_fornece(i, ADD_META))) {
-      if (tentarFichaDoAddon(mf, i, orig->tipo, id)) extras++;
+      if (tentarFichaDoAddon(mf, i, orig->tipo, qid)) {
+        if (qid != id) {
+          char *limpo = armSemIdsDeVideo(mf->corpo[mf->n - 1], qid);
+          if (limpo) { free(mf->corpo[mf->n - 1]); mf->corpo[mf->n - 1] = limpo; }
+        }
+        if (mf->n == 1 && !epPedidoSaiu()) {
+          int alvo = epAlvo(indice);
+          if (alvo >= 0) {
+            epPublicarCedo(orig, mf->corpo[0], alvo);
+            metaPublicarPrimario(orig, mf->corpo[0], alvo);
+          }
+        }
+        extras++;
+      }
     }
   }
+  if (paralelo) pthread_join(cineFio, NULL);
+  if (epPedidoSaiu()) { free(cedo.corpo); return 0; }
   // O IMDb do titulo: o proprio id, ou o que a ficha revelou.
   if (ehImdb) snprintf(mf->tt, sizeof mf->tt, "%s", id);
   else for (i = 0; i < mf->n && !mf->tt[0]; i++) metaImdbDaFicha(mf->corpo[i], mf->tt, sizeof mf->tt);
-  // d) sem IMDb a vista e ficha incompleta: a API ARM
-  if (!mf->tt[0] && !ehImdb && (!mf->n || !metaCompleta(mf->corpo[0])))
-    armImdb(id, mf->tt, sizeof mf->tt);
-  // c) o Cinemeta completa o que faltar (ou e a base, se nenhum addon serviu)
-  if (mf->tt[0]) {
+  // d) sem IMDb a vista e ficha incompleta: a API ARM (a consulta de b, se houve)
+  if (!mf->tt[0] && !ehImdb && armVale(orig, id) && (!mf->n || !metaCompleta(mf->corpo[0]))) {
+    if (!armFeito) { armFeito = 1; arm_consultar(id, orig->tipo, &arm); }
+    snprintf(mf->tt, sizeof mf->tt, "%s", arm.imdb);
+  }
+  // c) o Cinemeta completa o que faltar (ou e a base, se nenhum addon serviu).
+  // "tmdb:" sem IMDb na ficha: o catalogo do Nuvio resolve o proprio id (#555).
+  cid = mf->tt[0] ? mf->tt : (!strncmp(id, "tmdb:", 5) ? id : "");
+  if (cid[0]) {
     int fil = 1;
     char tp[16] = "";
     char *cm;
     if (mf->n) metaTipoProprio(mf->corpo[0], tp, sizeof tp);
-    cm = cinemetaMeta(tp[0] ? tp : orig->tipo, mf->tt, &fil);
+    if (paralelo) { cm = cedo.corpo; fil = cedo.fil; }
+    else cm = cinemetaMeta(tp[0] ? tp : orig->tipo, cid, &fil);
     if (cm) {
-      printf("[desc] ficha do Cinemeta (%s)\n", mf->n ? "complemento" : "por mapeamento");
+      printf("[desc] ficha do catalogo Nuvio/Cinemeta (%s)\n", mf->n ? "complemento" : "por mapeamento");
       fflush(stdout);
       metaFontesAdd(mf, cm, "Cinemeta", 1);
       if (mf->n == 1) mf->ehFilme = fil;
@@ -5481,36 +8423,7 @@ static int metaCatalogoResolver(const CatItem *orig, MetaFontes *mf) {
 // Elenco/direcao/generos/nota/pais a partir de uma ficha, so nos campos que
 // `d` ainda tem vazios (`soVazios`=1) ou todos os que a ficha traz (0).
 static void fichaDe(CatItem *d, const char *corpo, int soVazios) {
-  const char *c = js_array(corpo, NULL, "cast");
-  if (!soVazios || !d->nElenco) {
-    int k = 0;
-    while (c && k < CAT_ELENCO_MAX) {
-      size_t n2 = 0;
-      const char *p2 = c;
-      if (*p2 != '"') break;
-      p2++;
-      while (*p2 && *p2 != '"' && n2 + 1 < sizeof d->elenco[k].nome) d->elenco[k].nome[n2++] = *p2++;
-      d->elenco[k].nome[n2] = 0;
-      d->elenco[k].papel[0] = 0;
-      d->elenco[k].foto[0] = 0;
-      d->elenco[k].tmdb = 0;
-      k++;
-      p2++;
-      while (*p2 == ' ') p2++;
-      c = (*p2 == ',') ? p2 + 1 : NULL;
-      while (c && *c == ' ') c++;
-    }
-    if (k) d->nElenco = k;
-  }
-  if (!soVazios || !d->direcao[0]) {
-    const char *dr = js_array(corpo, NULL, "director");
-    if (dr && *dr == '"') {
-      size_t n2 = 0;
-      dr++;
-      while (*dr && *dr != '"' && n2 + 1 < sizeof d->direcao) d->direcao[n2++] = *dr++;
-      d->direcao[n2] = 0;
-    }
-  }
+  desc_meta_elenco(corpo, d, soVazios);
   { char lista[160];
     generosDe(corpo, lista, sizeof lista, strcmp(d->tipo, "movie") ? "series" : "movie");
     // O genero que o catalogo trouxe ("Programa de TV") e o rotulo do tipo, nao
@@ -5528,7 +8441,7 @@ static void fichaDe(CatItem *d, const char *corpo, int soVazios) {
 }
 
 // As fontes de COMPLEMENTO (a partir da segunda) preenchem o que a base deixou
-// vazio: ficha e sinopse/fundo/logo (completarRaso, que so age em item sem sinopse).
+// vazio: ficha e sinopse/fundo/logo (completarRaso tambem completa fundo raso).
 static void completarFicha(CatItem *d, const MetaFontes *mf, const char *tipo) {
   int i;
   for (i = 0; i < mf->n; i++) {
@@ -5545,51 +8458,126 @@ static void completarFicha(CatItem *d, const MetaFontes *mf, const char *tipo) {
   }
 }
 
-// Episodios do caminho do catalogo. A lista da BASE manda; sem nenhum episodio
-// nela, a da primeira fonte que tem. Mescla episodio a episodio (still, data,
+// Episodios do caminho do catalogo. A base manda no texto; a lista maior
+// do mesmo IMDb conserva os episodios que o addon ainda nao conhece. Mescla episodio a episodio (still, data,
 // duracao, so vazios) apenas quando as duas listas falam o mesmo id — IMDb.
 // Devolve 1 quando os episodios publicados sao de um addon (o TMDB, depois, so
-// preenche o que faltar neles).
+// preenche o que faltar neles). Lista de ARQUIVOS mantida devolve 0: o nome
+// dela nao e texto que valha proteger da traducao.
 static int episodiosDoCatalogo(int alvoItem, const char *titulo, const char *serie,
-                               const MetaFontes *mf) {
-  int i, fonte = -1, outro = -1;
-  for (i = 0; i < mf->n; i++)
-    if (desc_meta_n_episodios(mf->corpo[i]) > 0) { if (fonte < 0) fonte = i; else if (outro < 0) outro = i; }
+                               const MetaFontes *mf, TempsPub *tp) {
+  int i, fonte = -1, outro = -1, mesmoId = idbase_e_imdb(serie);
+  int nEp[META_FONTES_MAX], arq[META_FONTES_MAX];
+  for (i = 0; i < mf->n; i++) {
+    int brutos = 0;
+    nEp[i] = metaContarEpisodios(mf->corpo[i], &brutos);
+    arq[i] = metaListaDeArquivos(nEp[i], brutos);
+    if (nEp[i] > 0 && fonte < 0) fonte = i;
+  }
   if (fonte < 0) return 0;
+  // LISTA DE ARQUIVOS NA BASE (addon de fontes que tambem publica catalogo): a
+  // base manda no texto da ficha, mas a lista dela so fica quando conhece MAIS
+  // episodios distintos e preserva temporadas/cobertura. Senao vale a maior lista de
+  // verdade. So entre listas do mesmo espaco de ids (item do IMDb): "kitsu:1"
+  // e uma temporada, e a serie inteira do Cinemeta nao a substitui.
+  if (arq[fonte] && mesmoId) {
+    int melhor = -1;
+    for (i = 0; i < mf->n; i++)
+      if (i != fonte && !arq[i] && nEp[i] > 0 &&
+          (nEp[i] >= nEp[fonte] || !metaArquivosCompativeis(mf->corpo[fonte], mf->corpo[i])) &&
+          (melhor < 0 || nEp[i] > nEp[melhor]))
+        melhor = i;
+    if (melhor >= 0) {
+      printf("[desc] %s: %s respondeu uma lista de arquivos com %d episodios; "
+             "sem ampliar temporadas/cobertura do catalogo; usando os %d de %s\n", titulo, mf->nome[fonte], nEp[fonte], nEp[melhor],
+             mf->nome[melhor]);
+      fflush(stdout);
+      fonte = melhor;
+    }
+  }
   // Mesmo espaco de ids: a lista do IMDb (Cinemeta) sobre uma de addon so faz
-  // sentido quando o item tambem e do IMDb.
-  if (outro >= 0 && !(idbase_e_imdb(serie) && mf->cine[outro])) outro = -1;
-  publicarEpisodios(mf->corpo[fonte], alvoItem, titulo,
-                    outro >= 0 ? mf->corpo[outro] : NULL, DESC_MESCLA_VAZIOS);
+  // sentido quando o item tambem e do IMDb. Procura o Cinemeta entre TODAS as
+  // outras fontes: parar na primeira com episodios deixava a lista sem
+  // complemento quando havia outro addon no meio.
+  for (i = 0; mesmoId && i < mf->n && outro < 0; i++)
+    if (i != fonte && nEp[i] > 0 && mf->cine[i]) outro = i;
+  // Uma lista real menor do addon conserva os pares do Cinemeta e aplica
+  // o texto localizado, como episodiosDoAddon.
+  int modo = arq[fonte] ? DESC_MESCLA_TEXTO : DESC_MESCLA_VAZIOS;
+  if (outro >= 0 && !arq[fonte] && nEp[outro] > nEp[fonte]) {
+    int addon = fonte; fonte = outro; outro = addon;
+    modo = DESC_MESCLA_TEXTO;
+  }
+  // Lista de arquivos que ficou (sabe mais episodios): o nome dela e nome de
+  // arquivo, entao o do Cinemeta entra por cima nos episodios que os dois tem.
+  publicarEpisodiosSubstituir(mf->corpo[fonte], alvoItem, titulo,
+                              outro >= 0 ? mf->corpo[outro] : NULL,
+                              modo, tp);
   arte_reserva_episodios(serie, mf->corpo[fonte]);
-  return !mf->cine[fonte];
+  // Lista de arquivos nao e "texto do addon" (como em episodiosDoAddon): com 1
+  // o TMDB so preencheria vazios e os nomes de arquivo que sobraram ficariam.
+  return (!mf->cine[fonte] && !arq[fonte]) ||
+         (outro >= 0 && !mf->cine[outro] && !arq[outro]);
+}
+
+// Cada novo titulo invalida o pedido anterior. A rede em voo pode terminar
+// e alimentar o cache, mas nao publica nem segura o titulo atual.
+static int preCede(const char *id) {
+  if (!descSessaoAtual()) return 1;
+  if (!epPedidoSaiu()) return 0;
+  printf("[desc] pedido de %s cedeu ao titulo em cena\n", id);
+  fflush(stdout);
+  return 1;
 }
 
 static void *buscarEps(void *u) {
-  int alvoItem = epItem;
-  const CatItem *orig = cat_item(alvoItem);
+  EpPedido *pedido = epPedidoAtual();
+  int alvoItem = pedido ? pedido->item : epItem;
+  const CatItem *orig;
   CatItem base;
   const CatItem *it;
-  char url[600], *corpo = NULL;
+  char *corpo = NULL;
   char serie[64];
+  char meuId[64];
   MetaFontes mf;
-  int viaCatalogo = 0;
+  int viaCatalogo = 0, solto = 0;
   (void)u;
   memset(&mf, 0, sizeof mf);
-  if (!orig || !orig->imdb[0]) { fioEpVivo = 0; return NULL; }
-  snprintf(epAlvoId, sizeof epAlvoId, "%s", orig->imdb);
-  // COPIA AGORA (#190): o ponteiro de cat_item so vale ate o fim do quadro, e
-  // este fio vai para a rede antes de ler o resto dele.
-  base = *orig;
+  if (!descSessaoVincular(pedido ? pedido->sessao : nv_perfil_sessao_ler())) { epConcluir(); return NULL; }
+  if (pedido) base = pedido->base;
+  else if (!cat_copiar_item(alvoItem, &base)) { epConcluir(); return NULL; }
+  if (!base.imdb[0]) { epConcluir(); return NULL; }
   orig = &base;
-  // CANAL NAO PASSA AQUI. O Cinemeta so conhece filme/serie por id do IMDb
-  // ("tt..."); id de canal e "cs:channel:<hash>". "ehFilme = tipo != series"
-  // tratava canal como filme, pedia /meta/movie/<id> com um id que o
-  // Cinemeta nunca teve, E o corte no primeiro ':' (abaixo, ao montar
-  // `serie`) reduzia TODO canal a "cs" — a mesma chave de cache para todos,
-  // entao o primeiro canal aberto "vazava" elenco/genero/nota para os
-  // seguintes. Medido: nenhum canal tem tipo "movie" nem "series" (#37).
-  if (ehCanal(orig->tipo)) { fioEpVivo = 0; return NULL; }
+  if (preCede(orig->imdb)) { epConcluir(); return NULL; }
+  if (!pedido) snprintf(epAlvoId, sizeof epAlvoId, "%s", orig->imdb);
+  snprintf(meuId, sizeof meuId, "%s", orig->imdb);
+  // Copia sob a trava antes de sair para a rede; nenhum ponteiro de quadro.
+  // Live channels use only their publishing addon, with the exact ID/type.
+  // Never resolve them through Cinemeta or the movie/series metadata pipeline.
+  if (ehCanal(orig->tipo)) {
+    int addon = addonDaOrigem(orig->origem);
+    char *meta = addon >= 0 ? metaDoAddonT(addon, orig->tipo, orig->imdb, 8) : NULL;
+    if (meta && metaValida(meta) && !epPedidoSaiu())
+      metaPublicarPrimario(orig, meta, alvoItem);
+    free(meta);
+    epConcluir(); return NULL;
+  }
+  // PERSONAL SERVER ITEM: the server is the only source of its page. No
+  // Cinemeta, TMDB or addon /meta gets an opaque server id.
+  if (jfid_e(orig->imdb)) {
+    CatEp *eps = malloc(sizeof(CatEp) * VIDEOS_MAX);
+    CatItem ed = base;
+    int ne = eps ? servidores_ficha(&ed, eps, VIDEOS_MAX) : -1;
+    alvoItem = epPublicacaoIniciar(alvoItem);
+    if (ne >= 0 && alvoItem >= 0) {
+      descCatAtualizar(cat_atualizar_item, alvoItem, &ed);
+      if (ne > 0) descCatEpisodios(alvoItem, eps, ne);
+    }
+    pthread_mutex_unlock(&epPedidoTrava);
+    free(eps);
+    epConcluir();
+    return NULL;
+  }
   // FILME TAMBEM PASSA AQUI. O /meta/movie traz elenco, direcao, generos e
   // nota — antes so os titulos enriquecidos no catalogo tinham elenco, e a
   // pagina do filme abria sem a fileira. O que e so de serie (episodios,
@@ -5602,10 +8590,11 @@ static void *buscarEps(void *u) {
   // CATALOGO PRIMEIRO (metaCatalogo, logo acima): a ficha do addon que PUBLICOU o
   // item, e o Cinemeta so como complemento. Devolve 0 quando nao ha nada
   // util — ai o caminho de sempre: Cinemeta para "tt", nada para o resto.
-  if (catalogoPrimeiro(orig)) viaCatalogo = metaCatalogoResolver(orig, &mf);
-  if (!viaCatalogo && strncmp(orig->imdb, "tt", 2)) {
+  if (catalogoPrimeiro(orig)) viaCatalogo = metaCatalogoResolver(orig, &mf, alvoItem);
+  if (epPedidoSaiu()) { metaFontesLiberar(&mf); epConcluir(); return NULL; }
+  if (!viaCatalogo && strncmp(orig->imdb, "tt", 2) && strncmp(orig->imdb, "tmdb:", 5)) {
     metaFontesLiberar(&mf);
-    fioEpVivo = 0;
+    epConcluir();
     return NULL;
   }
   // TIPO INCERTO ("anime" de catalogo do AIOMetadata, ou qualquer outro que
@@ -5626,26 +8615,25 @@ static void *buscarEps(void *u) {
     ehFilme = mf.ehFilme;
   } else
   for (ti = 0; ti < nTipos; ti++) {
-    char chave[40];
+    char chave[96];
     int ultimo = ti == nTipos - 1;
     // A CHAVE DO CACHE LEVA O TIPO. Era so o id, e /meta/movie/tt13293588 e
     // /meta/series/tt13293588 sao titulos DIFERENTES no Cinemeta: aberto uma
     // vez como filme, o corpo errado ficava no cache e a abertura seguinte,
     // ja como serie, lia "meta do cache" com 0 episodios (log 2043).
     desc_meta_chave(chave, sizeof chave, tipos[ti], serie);
-    snprintf(url, sizeof url, "%s/meta/%s/%s.json", CINEMETA, tipos[ti], serie);
     free(corpo);
     corpo = metaCacheObter(chave);
     marco(corpo ? "episodios: meta do cache" : "episodios: baixando meta");
     if (!corpo) {
-      corpo = rede_baixar(url, 25);
+      corpo = metaprov_meta(tipos[ti], serie, 25, NULL);   // Nuvio, depois Cinemeta
       if (!corpo) { if (ultimo) break; continue; }
       metaCacheGuardar(chave, corpo);
     }
     ehFilme = strcmp(tipos[ti], "series") != 0;
     if (ultimo || desc_meta_tem_temporadas(corpo)) break;
   }
-  if (!corpo) { metaFontesLiberar(&mf); fioEpVivo = 0; return NULL; }
+  if (!corpo || preCede(meuId)) { metaFontesLiberar(&mf); free(corpo); epConcluir(); return NULL; }
   if (nTipos > 1) {
     const char *resolvido = ehFilme ? "movie" : "series";
     printf("[desc] %s: tipo '%s' do catalogo resolvido como '%s' pelo /meta\n",
@@ -5665,15 +8653,20 @@ static void *buscarEps(void *u) {
   // Na ficha do catalogo o texto JA e o do addon; a preferencia nao tem o que trocar.
   int aplicar = !viaCatalogo && (externo || (idiomaNaoIngles() && !tmdbTraduz));
   int epsDoAddon = 0;
+  TempsPub tp = {0};
   if (!ehFilme && viaCatalogo)
-    epsDoAddon = episodiosDoCatalogo(alvoItem, it->titulo, serie, &mf);
+    epsDoAddon = episodiosDoCatalogo(alvoItem, it->titulo, serie, &mf, &tp);
   else if (!ehFilme) {
-    int nCine = publicarEpisodios(corpo, alvoItem, it->titulo, NULL, 0);
+    int nCine = publicarEpisodiosPendentes(corpo, alvoItem, it->titulo, &tp);
     // Temporada e data de cada episodio para a reserva do still: quando o
     // TMDB divide a serie em outras temporadas (One Piece), e por elas que o
     // still do TMDB e achado (artereserva.h).
     arte_reserva_episodios(serie, corpo);
-    epsDoAddon = episodiosDoAddon(alvoItem, serie, it->titulo, corpo, nCine, aplicar);
+    // A disputa e de distintos contra distintos, os dois do corpo INTEIRO: o
+    // nCine publicado para em VIDEOS_MAX, e contra ele uma lista com os mesmos
+    // episodios acima do teto "sabia mais" so por nao estar cortada.
+    if (nCine >= VIDEOS_MAX) nCine = desc_meta_n_episodios(corpo);
+    epsDoAddon = episodiosDoAddon(alvoItem, serie, it->titulo, corpo, nCine, aplicar, &tp);
   }
   // O MAPA DE EPISODIOS VISTOS NAO E PEDIDO AQUI, e essa linha existe para dizer
   // por que: extras.c JA baixa /shows/<id>/progress/watched ao abrir o titulo,
@@ -5684,34 +8677,8 @@ static void *buscarEps(void *u) {
   // novo para cada uma seria tres viagens ao mesmo lugar.
   {
     CatItem edit = *it;
-    int manter = 0;
-    const char *c = js_array(corpo, NULL, "cast");
-    int k = 0;
-    while (c && k < CAT_ELENCO_MAX) {
-      size_t n2 = 0;
-      const char *p2 = c;
-      if (*p2 != '"') break;
-      p2++;
-      while (*p2 && *p2 != '"' && n2 + 1 < sizeof edit.elenco[k].nome)
-        edit.elenco[k].nome[n2++] = *p2++;
-      edit.elenco[k].nome[n2] = 0;
-      edit.elenco[k].papel[0] = 0;   // o Cinemeta nao diz o personagem
-      edit.elenco[k].foto[0] = 0;
-      k++;
-      p2++;
-      while (*p2 == ' ') p2++;
-      c = (*p2 == ',') ? p2 + 1 : NULL;
-      while (c && *c == ' ') c++;
-    }
-    edit.nElenco = k;
-    { const char *dr = js_array(corpo, NULL, "director");
-      if (dr && *dr == '"') {
-        size_t n2 = 0;
-        dr++;
-        while (*dr && *dr != '"' && n2 + 1 < sizeof edit.direcao)
-          edit.direcao[n2++] = *dr++;
-        edit.direcao[n2] = 0;
-      } }
+    int manter = (externo || viaCatalogo) ? DESC_MANTER_ELENCO : 0;
+    desc_meta_elenco(corpo, &edit, 0);
     // GENEROS, NOTA E PAIS. Vinham so do CATALOGO, e o catalogo do Cinemeta nao
     // traz nenhum dos tres: a linha de meta ficava com o TIPO ("Programa de TV")
     // no lugar dos generos, sem selo do IMDb e sem pais. O /meta traz os tres, e
@@ -5729,13 +8696,18 @@ static void *buscarEps(void *u) {
         edit.nota = n10;
       } }
     js_texto(corpo, NULL, "country", edit.pais, sizeof edit.pais);
-    // Temporadas presentes, sem repetir e em ordem.
-    { const char *v = js_array(corpo, NULL, "videos");
+    // Temporadas presentes, sem repetir e em ordem: as da lista publicada
+    // (TempsPub, #372); o corpo so quando nada foi publicado.
+    if (tp.n > 0) {
+      edit.nTemporadas = tp.n;
+      memcpy(edit.temporadas, tp.t, sizeof(int) * (size_t)tp.n);
+    } else
+    { const char *v = desc_meta_n_episodios(corpo) ? js_array(corpo, NULL, "videos") : NULL;
       edit.nTemporadas = 0;
       while (v) {
         const char *fv = js_fim(v);
         int t2 = videoTemporada(v, fv);
-        if (t2 > 0) {
+        if (t2 >= 0) {
           int j, achou = 0;
           for (j = 0; j < edit.nTemporadas; j++)
             if (edit.temporadas[j] == t2) { achou = 1; break; }
@@ -5746,13 +8718,22 @@ static void *buscarEps(void *u) {
       { int i2, j2, tmp;
         for (i2 = 0; i2 < edit.nTemporadas; i2++)
           for (j2 = i2 + 1; j2 < edit.nTemporadas; j2++)
-            if (edit.temporadas[j2] < edit.temporadas[i2]) {
+            if (edit.temporadas[j2] > 0 &&
+                (edit.temporadas[i2] == 0 || edit.temporadas[j2] < edit.temporadas[i2])) {
               tmp = edit.temporadas[i2];
               edit.temporadas[i2] = edit.temporadas[j2];
               edit.temporadas[j2] = tmp;
             } } }
     completarRaso(&edit, corpo, ehFilme ? "movie" : "series");
     if (viaCatalogo) completarFicha(&edit, &mf, ehFilme ? "movie" : "series");
+    // A logo e a ficha basica nao esperam a traducao/fotos opcionais.
+    alvoItem = epPublicacaoIniciar(alvoItem);
+    if (alvoItem >= 0) {
+      descCatSinopse(alvoItem, edit.imdb, edit.sinopse, edit.titulo);
+      descCatBasico(alvoItem, &edit);
+      marco("detalhe: campos primarios publicados antes dos extras");
+    }
+    pthread_mutex_unlock(&epPedidoTrava);
     // TITULO, SINOPSE E GENEROS DO ADDON DE METADADOS (#176). So campo que o
     // addon preencheu troca o do Cinemeta; o que ele nao tem fica como estava.
     if (aplicar) {
@@ -5784,6 +8765,7 @@ static void *buscarEps(void *u) {
           if (metaTextos(c5, tA, sizeof tA, NULL, 0)) {
             generosDe(c5, lista, sizeof lista, tipoA);
             if (lista[0]) snprintf(edit.genero, sizeof edit.genero, "%s", lista);
+            desc_meta_elenco(c5, &edit, 0);
             cA = c5;
           } else free(c5);
         }
@@ -5793,8 +8775,20 @@ static void *buscarEps(void *u) {
       }
     }
     // Publica texto, generos e temporadas antes do enriquecimento de imagens.
-    if ((alvoItem = epAlvo(alvoItem)) >= 0) cat_atualizar_item(alvoItem, &edit);
+    edit.epsParciais = 0;
+    alvoItem = epPublicacaoIniciar(alvoItem);
+    if (alvoItem >= 0) descCatAtualizar(cat_atualizar_item, alvoItem, &edit);
+    pthread_mutex_unlock(&epPedidoTrava);
     marco("detalhe: meta basico na tela");
+    // A FICHA ESTA NA TELA: ESTE FIO JA NAO SEGURA O PROXIMO TITULO (R2). O que
+    // resta (fotos do elenco e as notas por temporada do TMDB, uma viagem por
+    // temporada: 20+ numa serie longa, segundos) so ENFEITA a pagina. Com
+    // fioEpVivo ligado ate o fim, abrir outro titulo nesse meio (uma
+    // recomendacao dos detalhes) deixava o pedido da ficha dele guardado em
+    // pendItem ate a cauda inteira acabar — pagina aberta e vazia. A cauda
+    // escreve pelo id guardado em meuId (epAlvoDe), nao pelo global.
+    solto = 1;
+    epConcluir();
     { char idBase[24];
       const char *dp;
       snprintf(idBase, sizeof idBase, "%s", it->imdb);
@@ -5805,21 +8799,49 @@ static void *buscarEps(void *u) {
       // e UMA temporada, e o titulo/sinopse do TMDB da serie inteira
       // sobrescreveriam os dela.
       if (idbase_e_imdb(it->imdb))
-        fotosDoElenco(&edit, idBase, !strcmp(it->tipo, "series"), manter); }
-    if (alvoItem >= 0 && (alvoItem = epAlvo(alvoItem)) >= 0) cat_atualizar_item(alvoItem, &edit);
+        fotosDoElenco(&edit, idBase, !strcmp(it->tipo, "series"), manter);
+      else {
+        // TVDB / TMDB (resultado de busca de addon: Ted Lasso pelo Spotlight
+        // chegava como "tvdb:383203", MEDIDO na TCL 05/10/2026, e saia sem foto
+        // e sem clique no elenco). Esses ids sao da SERIE INTEIRA, entao o "tt"
+        // que a propria ficha revela vale. O Kitsu continua de fora (acima).
+        char tt[32] = "";
+        if (strncmp(it->imdb, "kitsu:", 6)) metaImdbDaFicha(corpo, tt, sizeof tt);
+        if (tt[0]) {
+          printf("[desc] elenco %s: fotos pelo IMDb da ficha (%s)\n", it->imdb, tt); fflush(stdout);
+          // ARTE PELO MESMO IMDb: o item de busca com id de fora traz so o
+          // POSTER, e a pagina abria com ele esticado no fundo (sem fundo largo
+          // nenhum para trocar). O metahub monta as URLs pelo "tt", como o
+          // hero ja faz (artehero.c).
+          if (!edit.backdrop[0] || !strcmp(edit.backdrop, edit.poster)) {
+            snprintf(edit.backdrop, sizeof edit.backdrop, "https://images.metahub.space/background/medium/%s/img", tt);
+            printf("[desc] %s: fundo pelo IMDb da ficha\n", it->imdb); fflush(stdout);
+          }
+          if (!edit.logo[0])
+            snprintf(edit.logo, sizeof edit.logo, "https://images.metahub.space/logo/medium/%s/img", tt);
+          fotosDoElenco(&edit, tt, !strcmp(it->tipo, "series"), manter);
+        } else { printf("[desc] elenco %s: id fora do IMDb, sem fotos (meta pedido como %s)\n", it->imdb, serie); fflush(stdout); }
+      } }
+    // AS ABAS NAO SAO DESTA CAUDA (#372). Ela roda com fioEpVivo ja solto: o
+    // mesmo titulo reaberto (bloco de episodios reciclado) publica outra lista
+    // com outras abas, e republicar o `edit` inteiro devolvia as abas velhas
+    // (T1 com 72 episodios em T1-T3: T2/T3 carregados e escondidos). As abas
+    // ficam as que estao no item; o resto (elenco, arte, texto) e desta cauda.
+    alvoItem = epPublicacaoIniciar(alvoItem);
+    if (alvoItem >= 0) descCatAtualizar(cat_atualizar_item_sem_abas, alvoItem, &edit);
+    pthread_mutex_unlock(&epPedidoTrava);
     printf("[desc] %s: %d atores, dir='%s', %d temporadas\n",
            edit.titulo, edit.nElenco, edit.direcao, edit.nTemporadas);
     fflush(stdout);
 
-    // NOTA POR EPISODIO (issue #87): o Cinemeta nao tem voto por episodio, o
-    // TMDB tem — uma viagem por temporada presente na lista, nao uma por
-    // episodio. edit.tmdb ja foi resolvido por fotosDoElenco; se o /find dela
-    // falhou (rede), resolve-se aqui pelo mesmo /find. "Titulo e sinopse" e a
-    // porta: quem desligou o TMDB nao quer este trafego. Republica so se alguma nota entrou.
-    if (!ehFilme && ajustes_tmdb_basico() && idbase_e_imdb(serie)) {
+    // TMDB episode scores: one request per season, independent of optional
+    // title/synopsis translation. Cinemeta's `rating` remains the IMDb score.
+    if (!ehFilme && (ajustes_tmdb_basico() || ajustes_nota_episodio(EX_TMDB)) &&
+        (idbase_e_imdb(serie) || !strncmp(serie,"tmdb:",5))) {
       const char *chave2 = desc_chave_tmdb();
       long tmdbId = edit.tmdb;
-      if (chave2[0] && tmdbId <= 0) {
+      if (tmdbId<=0 && !strncmp(serie,"tmdb:",5)) tmdbId=strtol(serie+5,NULL,10);
+      if (chave2[0] && tmdbId <= 0 && idbase_e_imdb(serie)) {
         char u2[400];
         char *c3;
         snprintf(u2, sizeof u2,
@@ -5841,8 +8863,8 @@ static void *buscarEps(void *u) {
             // Sinopse sempre (#150). O NOME so num idioma que nao e o ingles
             // (#176): em ingles o do Cinemeta ja e o do TMDB. Com o texto do
             // addon na lista, o TMDB so preenche o que ficou vazio.
-            int textosEp = DESC_EPT_SINOPSE | (idiomaNaoIngles() ? DESC_EPT_NOME : 0) |
-                           (epsDoAddon ? DESC_EPT_SO_VAZIO : 0);
+            int textosEp = ajustes_tmdb_basico() ? DESC_EPT_SINOPSE | (idiomaNaoIngles() ? DESC_EPT_NOME : 0) |
+                           (epsDoAddon ? DESC_EPT_SO_VAZIO : 0) : 0;
             for (i2 = 0; i2 < neps; i2++) {
               const CatEp *e0 = cat_episodio(alvoItem, i2);
               if (e0) tmp[i2] = *e0; else memset(&tmp[i2], 0, sizeof tmp[i2]);
@@ -5863,13 +8885,23 @@ static void *buscarEps(void *u) {
                   free(c4);
                 } }
             }
-            if (preenchidas > 0 && (alvoItem = epAlvo(alvoItem)) >= 0 &&
+            { int marcados = 0;
+              for (i2 = 0; i2 < neps; i2++)
+                if (tmp[i2].tmdbE > 0) {
+                  const CatEp *e0 = cat_episodio(alvoItem, i2);
+                  tmp[i2].tmdbSerie = tmdbId;
+                  if (e0 && (e0->tmdbSerie != tmdbId || e0->tmdbE != tmp[i2].tmdbE)) marcados++;
+                }
+              if (marcados > 0 && preenchidas == 0) preenchidas = -marcados; }
+            alvoItem = epPublicacaoIniciar(alvoItem);
+            if (preenchidas != 0 && alvoItem >= 0 &&
                 cat_n_episodios(alvoItem) == neps) {
-              cat_definir_episodios(alvoItem, tmp, neps);
+              descCatEpisodios(alvoItem, tmp, neps);
               printf("[desc] %s: nota/sinopse TMDB em %d episodios\n",
                      edit.titulo, preenchidas);
               fflush(stdout);
             }
+            pthread_mutex_unlock(&epPedidoTrava);
             free(tmp);
           }
         }
@@ -5879,7 +8911,16 @@ static void *buscarEps(void *u) {
 
   free(corpo);
   metaFontesLiberar(&mf);
-  fioEpVivo = 0;
+  if (!solto) epConcluir();   // solto antes: um fio mais novo pode estar vivo
+  return NULL;
+}
+
+static void *buscarEpsPedido(void *u) {
+  pthread_once(&epPedidoOnce, epPedidoKeyCriar);
+  pthread_setspecific(epPedidoKey, u);
+  buscarEps(NULL);
+  pthread_setspecific(epPedidoKey, NULL);
+  free(u);
   return NULL;
 }
 
@@ -5900,15 +8941,50 @@ static int pendItem = -1, pendTemp;
 
 static CatItem  vtItens[VT_MAX];
 static int      vtN;
-static char     vtBase[600], vtTipo[8], vtCat[96], vtGenre[96];
+static char     vtBase[NV_ADDON_URL_MAX], vtTipo[8], vtCat[96], vtGenre[96];
 static int      vtPagina, vtFim, vtFioVivo, vtErro;
 static unsigned vtGeracao;
+static NvPerfilSessao vtSessao;
 // Fonte nao-addon aberta por desc_vertudo_fonte (issue #44): vtProvedor 1 e
 // TMDB, 2 e Trakt; vtFonte e uma copia zerada da ColSource para o memcmp de
 // "mesma fonte" ser seguro (a struct tem preenchimento).
 static ColSource vtFonte;
 static int      vtProvedor;
 static pthread_mutex_t vtTrava = PTHREAD_MUTEX_INITIALIZER;
+
+// #366: o filtro e uma PROJECAO da lista recebida, nunca uma remocao dela.
+// Desligar o ajuste ou desmarcar um filme devolve o mesmo titulo, na ordem do
+// addon, sem outra viagem de rede. vtN/skip/limites continuam contando a lista
+// crua; uma pagina cheia de vistos nao pode ser confundida com fim de catalogo.
+static int vtVisiveis[VT_MAX], vtNVisiveis;
+static int vtProjN = -1, vtProjOcultar;
+static unsigned vtProjGeracao, vtProjItens, vtProjRevisao;
+
+// Chamado sob vtTrava. O historico e o progresso usam as mesmas fontes do selo
+// do cartaz; tipos incertos, series e canais nunca entram no filtro de FILMES.
+static int vtProjetar(void) {
+  int ocultar = ajustes_ocultar_filmes_vistos();
+  unsigned itens = cat_revisao_itens();
+  if (vtProjN == vtN && vtProjGeracao == vtGeracao &&
+      vtProjOcultar == ocultar && (!ocultar || vtProjItens == itens)) return vtNVisiveis;
+  vtNVisiveis = 0;
+  for (int i = 0; i < vtN; i++)
+    if (!ocultar || !desc_filme_visto(&vtItens[i]))
+      vtVisiveis[vtNVisiveis++] = i;
+  vtProjN = vtN; vtProjGeracao = vtGeracao; vtProjOcultar = ocultar;
+  vtProjItens = itens;
+  vtProjRevisao++;
+  return vtNVisiveis;
+}
+
+// Um pedido pode atravessar algumas paginas inteiramente vistas para achar
+// algo para mostrar. O teto torna esse preenchimento limitado mesmo quando um
+// addon ignora skip; duplicatas e os limites crus ainda encerram a leitura.
+#define VT_VISTOS_PAGINAS_MAX 3
+static int vtPaginaSoDeVistos(int antes, int adicionados, int paginas) {
+  return ajustes_ocultar_filmes_vistos() && adicionados > 0 && !vtFim &&
+         !vtErro && paginas < VT_VISTOS_PAGINAS_MAX && vtProjetar() == antes;
+}
 
 // Um item de resultado do TMDB (results[], items[], cast[], crew[],
 // parts[]) vira CatItem. O id fica "tmdb:<n>" — nao e imdb, e quem abre
@@ -5987,40 +9063,54 @@ static int deMetaTrakt(const char *p, const char *f, const char *midia,
 // do TMDB — mesma lista de chaves que applyTmdbDiscoverFilters do web.
 static void tmdbFiltros(char *q, size_t n, const char *filtros, int isTv) {
   const char *fim = filtros ? filtros + strlen(filtros) : NULL;
-  static const struct { const char *js, *url; int soTv; } M[] = {
+  static const struct { const char *js, *url; int tipo; /* 0 string, 1 TV string, 2 number */ } M[] = {
     {"withGenres","with_genres",0}, {"withoutGenres","without_genres",0},
-    {"voteAverageGte","vote_average.gte",0}, {"voteAverageLte","vote_average.lte",0},
-    {"voteCountGte","vote_count.gte",0},
+    {"voteAverageGte","vote_average.gte",2}, {"voteAverageLte","vote_average.lte",2},
+    {"voteCountGte","vote_count.gte",2},
     {"withOriginalLanguage","with_original_language",0},
     {"withOriginCountry","with_origin_country",0},
     {"withKeywords","with_keywords",0}, {"withoutKeywords","without_keywords",0},
     {"withCompanies","with_companies",0}, {"withoutCompanies","without_companies",0},
     {"withNetworks","with_networks",1},
-    {"withRuntimeGte","with_runtime.gte",0}, {"withRuntimeLte","with_runtime.lte",0},
+    {"withRuntimeGte","with_runtime.gte",2}, {"withRuntimeLte","with_runtime.lte",2},
   };
   char v[128];
   size_t u;
   if (!filtros || *filtros != '{') return;
   for (u = 0; u < sizeof M / sizeof *M; u++) {
-    if (M[u].soTv && !isTv) continue;
+    if (M[u].tipo == 1 && !isTv) continue;
+    if (M[u].tipo == 2) {
+      double valor = js_num(filtros, fim, M[u].js, -1);
+      if (valor >= 0)
+        snprintf(q + strlen(q), n - strlen(q), "&%s=%g", M[u].url, valor);
+      continue;
+    }
     if (js_texto(filtros, fim, M[u].js, v, sizeof v) && v[0])
       snprintf(q + strlen(q), n - strlen(q), "&%s=%s", M[u].url, v);
   }
   if (js_texto(filtros, fim, "releaseDateGte", v, sizeof v) && v[0])
     snprintf(q + strlen(q), n - strlen(q), "&%s.gte=%s",
-             isTv ? "first_air_date" : "release_date", v);
+             isTv ? "first_air_date" : "primary_release_date", v);
   if (js_texto(filtros, fim, "releaseDateLte", v, sizeof v) && v[0])
     snprintf(q + strlen(q), n - strlen(q), "&%s.lte=%s",
-             isTv ? "first_air_date" : "release_date", v);
+             isTv ? "first_air_date" : "primary_release_date", v);
   { long ano = (long)js_num(filtros, fim, "year", 0.0);
     if (ano > 0)
       snprintf(q + strlen(q), n - strlen(q), "&%s=%ld",
                isTv ? "first_air_date_year" : "year", ano); }
-  if (js_texto(filtros, fim, "withWatchProviders", v, sizeof v) && v[0]) {
-    char reg[8] = "";
-    js_texto(filtros, fim, "watchRegion", reg, sizeof reg);
-    snprintf(q + strlen(q), n - strlen(q), "&watch_region=%s&with_watch_providers=%s",
-             reg[0] ? reg : "US", v);
+  { char sem[128] = "", reg[8] = "";
+    v[0] = 0;
+    js_texto(filtros, fim, "withWatchProviders", v, sizeof v);
+    js_texto(filtros, fim, "withoutWatchProviders", sem, sizeof sem);
+    if (v[0] || sem[0]) {
+      js_texto(filtros, fim, "watchRegion", reg, sizeof reg);
+      snprintf(q + strlen(q), n - strlen(q), "&watch_region=%s", reg[0] ? reg : "US");
+    }
+    if (v[0])
+      snprintf(q + strlen(q), n - strlen(q),
+               "&with_watch_providers=%s&with_watch_monetization_types=flatrate|free|ads|rent|buy", v);
+    if (sem[0])
+      snprintf(q + strlen(q), n - strlen(q), "&without_watch_providers=%s", sem);
   }
 }
 
@@ -6077,24 +9167,279 @@ static const char *tmdbMontarUrl(const ColSource *f, int pagina,
   }
 }
 
+// A Vitrine tem varias fontes ao mesmo tempo; o carregador de abas abaixo
+// continua com a sua unica lista. Somente ids da pagina sao guardados aqui:
+// 72 KiB no teto, em vez de outro vetor de mil CatItems por fio.
+typedef struct {
+  char imdb[sizeof(((CatItem *)0)->imdb)];
+  char tipo[sizeof(((CatItem *)0)->tipo)];
+} ColecaoId;
+
+static const char *colecaoTextoFim(const char *p, const char *fim) {
+  for (p++; p < fim; p++) {
+    if (*p == '"') return p + 1;
+    if (*p == '\\') { if (p + 1 >= fim) return NULL; p++; }
+  }
+  return NULL;
+}
+
+static int colecaoArray(const char *corpo, const char *chave, const char **primeiro) {
+  const char *p = corpo, *fim, *fimArray;
+  if (!corpo) return 0;
+  while (*p && (unsigned char)*p <= ' ') p++;
+  fim = js_fim(p);
+  if (!fim || fim <= p) return 0;
+  if (chave) {
+    if (*p != '{' || fim[-1] != '}') return 0;
+    // Somente o campo da raiz; nao confundir arrays aninhados ou texto com
+    // a pagina. Pular valores sem copia aceita [] com qualquer whitespace.
+    p++;
+    for (;;) {
+      const char *nome, *depois;
+      while (p < fim && ((unsigned char)*p <= ' ' || *p == ',')) p++;
+      if (p >= fim || *p != '"') return 0;
+      nome = p + 1; depois = colecaoTextoFim(p, fim);
+      if (!depois) return 0;
+      p = depois;
+      while (p < fim && (unsigned char)*p <= ' ') p++;
+      if (p >= fim || *p++ != ':') return 0;
+      while (p < fim && (unsigned char)*p <= ' ') p++;
+      if ((size_t)(depois - nome - 1) == strlen(chave) &&
+          !memcmp(nome, chave, (size_t)(depois - nome - 1))) break;
+      if (p >= fim) return 0;
+      if (*p == '"') p = colecaoTextoFim(p, fim);
+      else if (*p == '[' || *p == '{') p = js_fim(p);
+      else while (p < fim && *p != ',' && *p != '}') p++;
+      if (!p || p >= fim) return 0;
+    }
+  }
+  if (p >= fim || *p != '[') return 0;
+  fimArray = js_fim(p);
+  if (!fimArray || fimArray > fim || fimArray <= p || fimArray[-1] != ']') return 0;
+  p++;
+  while (p < fimArray && (unsigned char)*p <= ' ') p++;
+  if (*p == ']') { *primeiro = NULL; return 1; }
+  if (*p != '{' && *p != '"') return 0;
+  *primeiro = p;
+  return 1;
+}
+
+// Collection diagnostics deliberately omit the addon base/query and response body.
+static const char *colecaoLogCampo(const char *s) {
+  return s && !strstr(s, "://") ? s : "<redacted>";
+}
+static void colecaoLog(const char *nome, const char *base, const char *tipo, const char *id,
+                        const char *genre, int skip, int status, int itens,
+                        const char *motivo) {
+  char aba[128] = "";
+  if (nome && *nome) snprintf(aba, sizeof aba, "%s", nome);
+  else {
+    pthread_mutex_lock(&nomeCatTrava);
+    for (int i = 0; i < nNomeCat; i++)
+      if (nomeCatBase(i, base) && !strcmp(nomeCat[i].tipo, tipo) && !strcmp(nomeCat[i].id, id)) {
+        snprintf(aba, sizeof aba, "%s", nomeCat[i].nome); break;
+      }
+    pthread_mutex_unlock(&nomeCatTrava);
+  }
+  printf("[colecao] aba=%.127s catalogo=%.7s/%.95s extra=genre:%.95s,skip:%d rc=%d itens=%d motivo=%s\n",
+         colecaoLogCampo(aba[0] ? aba : id), colecaoLogCampo(tipo),
+         colecaoLogCampo(id), colecaoLogCampo(genre), skip, status, itens, motivo);
+  fflush(stdout);
+}
+static char *colecaoBaixar(const char *url, int *status) {
+  char *corpo = rede_baixar_st(url, 10, NULL, status);
+  if (*status < 200 || *status >= 300) { free(corpo); return NULL; }
+  return corpo;
+}
+
+static int colecaoTeto(const char *id) {
+  return strstr(id, "top100") ? 100 : strstr(id, "top250") ? 250 :
+         strstr(id, "top10") ? 10 : VT_MAX;
+}
+
+static int colecaoTipo(const ColSource *fonte, const CatItem *item) {
+  const char *tipo = fonte->prov[0] ?
+    (!strcasecmp(fonte->midia, "TV") ? "series" : "movie") : fonte->type;
+  if (!strcmp(tipo, item->tipo)) return 1;
+  if (!strcmp(tipo, "tv")) tipo = "series";
+  return (strcmp(tipo, "movie") && strcmp(tipo, "series")) || !strcmp(tipo, item->tipo);
+}
+
+int desc_colecao_inicial(const ColSource *fonte, const char *base,
+                         NvPerfilSessao sessao, CatItem *itens, int limite,
+                         DescColecaoResultado *resultado) {
+  DescColecaoResultado r = {0};
+  ColSource f;
+  ColecaoId *ids;
+  CatItem item;
+  char origem[NV_ADDON_URL_MAX], url[NV_ADDON_PEDIDO_MAX];
+  int prov, nIds = 0, total = 0, prefixoVistos = 0, visiveis = 0;
+  int ocultar, pagina, skip = 0, teto;
+  if (resultado) *resultado = r;
+  if (!fonte || !itens || !resultado || limite < 1 || limite > 20 ||
+      !descSessaoVincular(sessao)) return 0;
+  f = *fonte;
+  prov = !f.prov[0] ? 0 : !strcmp(f.prov, "tmdb") ? 1 :
+         !strcmp(f.prov, "trakt") ? 2 : -1;
+  r.pagina = prov ? 1 : 0;
+  snprintf(origem, sizeof origem, "%s", base ? base : f.base);
+  if (prov < 0 || (!prov && (!origem[0] || !f.type[0] || !f.catId[0] ||
+                            strlen(base ? base : f.base) >= sizeof origem))) {
+    r.erro = 1; *resultado = r; return nv_perfil_sessao_atual(sessao);
+  }
+  ids = calloc(VT_MAX, sizeof *ids);
+  if (!ids) { r.erro = 1; *resultado = r; return nv_perfil_sessao_atual(sessao); }
+  teto = colecaoTeto(f.catId);
+  if (!nv_perfil_sessao_travar(sessao)) { free(ids); return 0; }
+  ocultar = ajustes_ocultar_filmes_vistos();
+  nv_perfil_sessao_destravar();
+
+  for (pagina = 1; pagina <= VT_VISTOS_PAGINAS_MAX; pagina++) {
+    char *corpo = NULL, cabChave[160];
+    const char *vetor = "metas", *p = NULL;
+    const char *cab[] = { "trakt-api-version: 2", NULL, NULL };
+    int raw = 0, aceitos = 0, novos = 0, fim = 0, pronta = 1, status = 0;
+    // Congelar URL/chave/idioma enquanto o perfil ainda e o dono. A trava
+    // termina antes de qualquer HTTP, inclusive a consulta do Trakt.
+    if (!nv_perfil_sessao_travar(sessao)) { free(ids); return 0; }
+    if (prov == 1) {
+      vetor = tmdbMontarUrl(&f, pagina, url, sizeof url);
+      pronta = vetor && strlen(url) < sizeof url - 1;
+    } else if (prov == 2) {
+      const char *cli = nuvem_trakt_cliente();
+      int w = snprintf(cabChave, sizeof cabChave, "trakt-api-key: %s", cli);
+      cab[1] = cabChave;
+      vetor = NULL;
+      pronta = cli[0] && w >= 0 && (size_t)w < sizeof cabChave;
+      w = snprintf(url, sizeof url,
+        "https://api.trakt.tv/lists/%ld/items/%s?page=%d&limit=40&sort_by=%s&sort_how=%s",
+        f.traktLista, !strcasecmp(f.midia, "TV") ? "show" : "movie", pagina,
+        f.ordenar[0] ? f.ordenar : "rank", f.ordem[0] ? f.ordem : "asc");
+      pronta = pronta && w >= 0 && (size_t)w < sizeof url;
+    } else {
+      char encoded[sizeof f.genre * 3 + 1], extra[340] = "";
+      int z = 0, w;
+      for (const unsigned char *c = (const unsigned char *)f.genre; *c; c++) {
+        if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+            (*c >= '0' && *c <= '9') || *c == '-' || *c == '_') encoded[z++] = *c;
+        else { snprintf(encoded + z, 4, "%%%02X", *c); z += 3; }
+      }
+      encoded[z] = 0;
+      if (encoded[0]) snprintf(extra, sizeof extra, "genre=%s&skip=%d", encoded, skip);
+      else if (skip) snprintf(extra, sizeof extra, "skip=%d", skip);
+      w = catalogoUrl(url, sizeof url, origem, f.type, f.catId, extra);
+      pronta = !addons_base_desligada(origem) && descPedidoCoube(origem, w, sizeof url);
+    }
+    nv_perfil_sessao_destravar();
+    if (!pronta) {
+      if (!prov) colecaoLog(f.title, origem, f.type, f.catId, f.genre, skip, 0, 0, "request_unavailable");
+      r.erro = 1; break;
+    }
+    if (!descSessaoAtual()) { free(ids); return 0; }
+    corpo = !prov ? colecaoBaixar(url, &status) :
+            prov == 2 ? rede_baixar_com(url, 12, cab) : rede_baixar(url, 12);
+    if (!descSessaoAtual()) { free(corpo); free(ids); return 0; }
+    if (!colecaoArray(corpo, vetor, &p)) {
+      if (!prov) colecaoLog(f.title, origem, f.type, f.catId, f.genre, skip, status, 0,
+                             corpo ? "invalid_metas" : "http_or_transport");
+      free(corpo); r.erro = 1; break;
+    }
+    if (prov == 1) {
+      fim = !strcasecmp(f.tmdbTipo, "COLLECTION") || !strcasecmp(f.tmdbTipo, "PERSON") ||
+            !strcasecmp(f.tmdbTipo, "DIRECTOR");
+      if (!fim) {
+        long tp = (long)js_num(corpo, NULL, "total_pages", 0);
+        long pg = (long)js_num(corpo, NULL, "page", pagina);
+        fim = !tp || pg >= tp;
+      }
+    }
+    for (; p && (!prov || aceitos < 48); p = js_prox(js_fim(p))) {
+      const char *fimItem = js_fim(p);
+      int ok, visto, repetido = 0;
+      raw++;
+      if (total >= teto) continue;
+      if (*p != '{') continue;
+      if (!nv_perfil_sessao_travar(sessao)) { free(corpo); free(ids); return 0; }
+      if (prov == 1 && !strcasecmp(f.tmdbTipo, "DIRECTOR")) {
+        char trabalho[48] = "";
+        js_texto(p, fimItem, "job", trabalho, sizeof trabalho);
+        if (strcasecmp(trabalho, "director")) { nv_perfil_sessao_destravar(); continue; }
+      }
+      ok = prov == 1 ? deMetaTmdb(p, fimItem, !strcasecmp(f.midia, "TV") ? "series" : "movie", &item) :
+           prov == 2 ? deMetaTrakt(p, fimItem, f.midia, &item) : deMeta(p, fimItem, f.type, &item);
+      if (!ok || !colecaoTipo(&f, &item)) { nv_perfil_sessao_destravar(); continue; }
+      if (descOcultaNaoLancado(&item)) { novos++; nv_perfil_sessao_destravar(); continue; }
+      if (!prov) origemDaBase(origem, item.origem, sizeof item.origem);
+      visto = desc_filme_visto(&item);
+      nv_perfil_sessao_destravar();
+      aceitos++;
+      for (int j = 0; item.imdb[0] && j < nIds; j++)
+        if (!strcmp(ids[j].imdb, item.imdb) && !strcmp(ids[j].tipo, item.tipo)) { repetido = 1; break; }
+      if (repetido) continue;
+      if (item.imdb[0] && nIds < VT_MAX) {
+        snprintf(ids[nIds].imdb, sizeof ids[nIds].imdb, "%s", item.imdb);
+        snprintf(ids[nIds++].tipo, sizeof ids[0].tipo, "%s", item.tipo);
+      }
+      total++; novos++;
+      if (!visto) visiveis++;
+      if (r.n < limite) {
+        itens[r.n++] = item;
+        prefixoVistos += visto;
+      } else if (prefixoVistos && !visto && r.extraN < limite) itens[limite + r.extraN++] = item;
+    }
+    if (!prov) colecaoLog(f.title, origem, f.type, f.catId, f.genre, skip, status, aceitos,
+                           !raw ? "empty_page" : !novos ? "no_new_items" : "ok");
+    free(corpo);
+    if (prov == 2 && raw < 40) fim = 1;
+    r.mais = raw > 0 && novos > 0 && total < teto && !fim;
+    r.pagina = prov ? pagina + (r.mais ? 1 : 0) : skip + raw;
+    if (!raw || !novos || total >= teto || fim || !ocultar || visiveis) break;
+    skip += raw;
+  }
+  free(ids);
+  if (r.erro) r.mais = 0;
+  if (!descSessaoAtual()) return 0;
+  if (prov == 2) {
+    // Somente as duas janelas que serao mostradas precisam de arte. O helper
+    // usa o mesmo pedido de sessao e seus proprios fios/buffers de enfeite.
+    if (r.n) r.n = descEnfeitar(itens, r.n);
+    if (!descSessaoAtual()) return 0;
+    if (r.extraN) r.extraN = descEnfeitar(itens + limite, r.extraN);
+  }
+  if (!nv_perfil_sessao_travar(sessao)) return 0;
+  *resultado = r;
+  nv_perfil_sessao_destravar();
+  return 1;
+}
+
 static void *fioVerTudo(void *u) {
   (void)u;
+  unsigned geracaoPaginas = 0;
+  int paginas = 0;
   for (;;) {
-  char url[1600], base[600], type[8], id[96], genre[96], encoded[290], *corpo;
-  int raw=0, skip, cap, prov;unsigned generation;
+  char url[NV_ADDON_PEDIDO_MAX], base[NV_ADDON_URL_MAX], type[8], id[96], genre[96], encoded[290], *corpo;
+  int raw=0, ocultos=0, skip, cap, prov, antes, status=0;unsigned generation;
   ColSource fonte;
   pthread_mutex_lock(&vtTrava);
   skip=vtPagina;generation=vtGeracao;prov=vtProvedor;
+  if (geracaoPaginas != generation) { geracaoPaginas = generation; paginas = 0; }
+  paginas++;
+  antes = vtProjetar();
+  NvPerfilSessao sessao = vtSessao;
   memset(&fonte,0,sizeof fonte);fonte=vtFonte;
   snprintf(base,sizeof base,"%s",vtBase);snprintf(type,sizeof type,"%s",vtTipo);
   snprintf(id,sizeof id,"%s",vtCat);snprintf(genre,sizeof genre,"%s",vtGenre);
   pthread_mutex_unlock(&vtTrava);
+  if (!descSessaoVincular(sessao)) {
+    pthread_mutex_lock(&vtTrava); vtFioVivo = 0; pthread_mutex_unlock(&vtTrava); return NULL;
+  }
 
   // FONTE NAO-ADDON (issue #44): pasta de colecao do site cujo conteudo vem
   // do TMDB ou do Trakt, nao de um catalogo de addon. vtPagina aqui e o
   // NUMERO da pagina (comeca em 1), nao o skip de itens.
   if (prov) {
-    CatItem lote[48]; int nl=0, semMais=0, ok=0;
+    CatItem *lote=malloc(sizeof *lote*48); int nl=0, semMais=0, ok=0;
+    if(!lote){pthread_mutex_lock(&vtTrava);vtErro=1;vtFioVivo=0;pthread_mutex_unlock(&vtTrava);return NULL;}
     corpo=NULL;
     if (prov==1) {
       const char *vetor=tmdbMontarUrl(&fonte,skip,url,sizeof url);
@@ -6111,7 +9456,9 @@ static void *fioVerTudo(void *u) {
             js_texto(p,f,"job",job,sizeof job);
             if (strcasecmp(job,"director")) continue;
           }
-          if (deMetaTmdb(p,f,padrao,&lote[nl])) nl++;
+          if (deMetaTmdb(p,f,padrao,&lote[nl]) && colecaoTipo(&fonte, &lote[nl])) {
+            if (descOcultaNaoLancado(&lote[nl])) ocultos++; else nl++;
+          }
         }
         if (!strcasecmp(fonte.tmdbTipo,"COLLECTION")||
             !strcasecmp(fonte.tmdbTipo,"PERSON")||
@@ -6119,7 +9466,7 @@ static void *fioVerTudo(void *u) {
         else {
           long tp=(long)js_num(corpo,NULL,"total_pages",0);
           long pg=(long)js_num(corpo,NULL,"page",skip);
-          if (!tp||pg>=tp||!nl) semMais=1;
+          if (!tp||pg>=tp||(!nl&&!ocultos)) semMais=1;
         }
         ok=1;
       }
@@ -6142,7 +9489,9 @@ static void *fioVerTudo(void *u) {
           const char *p=*corpo=='['?js_raiz_array(corpo):NULL;
           for(;p&&nl<48;p=js_prox(js_fim(p))) {
             const char *f=js_fim(p);raw++;
-            if (deMetaTrakt(p,f,fonte.midia,&lote[nl])) nl++;
+            if (deMetaTrakt(p,f,fonte.midia,&lote[nl]) && colecaoTipo(&fonte, &lote[nl])) {
+              if (descOcultaNaoLancado(&lote[nl])) ocultos++; else nl++;
+            }
           }
           // rede_baixar nao devolve cabecalhos; menos que a pagina cheia e o
           // fim da lista (o web le X-Pagination-Page-Count, mesmo efeito).
@@ -6154,11 +9503,12 @@ static void *fioVerTudo(void *u) {
     free(corpo);
     // Itens do Trakt chegam sem poster: o lote inteiro ganha arte pelo
     // Cinemeta de uma vez, como a fileira "Continuar assistindo" ja faz.
-    if (prov==2&&nl) trakt_enfeitar_lote(lote,nl);
+    if (prov==2&&nl) descEnfeitar(lote,nl);
     pthread_mutex_lock(&vtTrava);
-    if(generation!=vtGeracao){pthread_mutex_unlock(&vtTrava);continue;}
-    { int added=0;
-      for(int i=0;i<nl&&vtN<VT_MAX;i++){
+    if(generation!=vtGeracao || !descSessaoAtual()){pthread_mutex_unlock(&vtTrava);free(lote);continue;}
+    int seguir = 0;
+    { int added=ocultos;   // pagina so de futuros nao encerra a paginacao
+      for(int i=0;i<nl&&vtN<colecaoTeto(fonte.catId);i++){
         int dup=0;
         for(int j=0;j<vtN;j++)
           if(lote[i].imdb[0]&&!strcmp(vtItens[j].imdb,lote[i].imdb)
@@ -6166,9 +9516,12 @@ static void *fioVerTudo(void *u) {
         if(!dup){vtItens[vtN++]=lote[i];added++;}
       }
       vtErro=!ok;
-      if(ok){if(semMais||!added||vtN>=VT_MAX)vtFim=1;else vtPagina=skip+1;}
-      vtFioVivo=0; }
+      if(ok){if(semMais||!added||vtN>=colecaoTeto(fonte.catId))vtFim=1;else vtPagina=skip+1;}
+      seguir = vtPaginaSoDeVistos(antes, added, paginas);
+      if (!seguir) vtFioVivo=0; }
     pthread_mutex_unlock(&vtTrava);
+    free(lote);
+    if (seguir) continue;
     return NULL;
   }
 
@@ -6177,38 +9530,50 @@ static void *fioVerTudo(void *u) {
     if((*c>='a'&&*c<='z')||(*c>='A'&&*c<='Z')||(*c>='0'&&*c<='9')||*c=='-'||*c=='_')encoded[z++]=*c;
     else {snprintf(encoded+z,4,"%%%02X",*c);z+=3;}
   }encoded[z]=0;
-  if(genre[0])snprintf(url,sizeof url,"%s/catalog/%s/%s/genre=%s&skip=%d.json",base,type,id,encoded,skip);
-  else if(skip)snprintf(url,sizeof url,"%s/catalog/%s/%s/skip=%d.json",base,type,id,skip);
-  else snprintf(url,sizeof url,"%s/catalog/%s/%s.json",base,type,id);
-  corpo=rede_baixar(url,10);
-  cap=strstr(id,"top100")?100:strstr(id,"top250")?250:VT_MAX;
+  { int w; char extra[340] = "";
+  if(genre[0])snprintf(extra,sizeof extra,"genre=%s&skip=%d",encoded,skip);
+  else if(skip)snprintf(extra,sizeof extra,"skip=%d",skip);
+  w=catalogoUrl(url,sizeof url,base,type,id,extra);
+  corpo=(!addons_base_desligada(base)&&descPedidoCoube(base,w,sizeof url))?colecaoBaixar(url,&status):NULL; }
+  cap=colecaoTeto(id);
   pthread_mutex_lock(&vtTrava);
-  if(generation!=vtGeracao){pthread_mutex_unlock(&vtTrava);free(corpo);continue;}
+  if(generation!=vtGeracao || !descSessaoAtual()){pthread_mutex_unlock(&vtTrava);free(corpo);continue;}
   pthread_mutex_unlock(&vtTrava);
   const char *first=corpo?js_array(corpo,NULL,"metas"):NULL;
   int valid=corpo&&strstr(corpo,"\"metas\"");
   int added=0;
+  snprintf(fonte.type, sizeof fonte.type, "%s", type);
+  fonte.prov[0] = 0;
   for(const char *p=first;p;p=js_prox(js_fim(p))) {
     const char *f=js_fim(p);raw++;
     CatItem it;
-    if (deMeta(p, f, type, &it)) {
+    if (deMeta(p, f, type, &it) && colecaoTipo(&fonte, &it)) {
+      // Escondido ainda conta como "pagina com novidade": senao uma pagina so de
+      // futuros encerraria a paginacao do catalogo.
+      if (descOcultaNaoLancado(&it)) { added++; continue; }
       origemDaBase(base, it.origem, sizeof it.origem);
+      it.ranking = skip + raw;
       pthread_mutex_lock(&vtTrava);
       int duplicate=0;
       for(int i=0;i<vtN;i++)if(it.imdb[0]&&!strcmp(vtItens[i].imdb,it.imdb)&&!strcmp(vtItens[i].tipo,it.tipo)){duplicate=1;break;}
-      if(generation==vtGeracao&&vtN<cap&&!duplicate){vtItens[vtN++]=it;added++;}
+      if(generation==vtGeracao&&descSessaoAtual()&&vtN<cap&&!duplicate){vtItens[vtN++]=it;added++;}
       pthread_mutex_unlock(&vtTrava);
     }
   }
+  colecaoLog("", base, type, id, genre, skip, status, added,
+             !corpo ? "http_or_transport" : !valid ? "invalid_metas" :
+             !raw ? "empty_page" : !added ? "no_new_items" : "ok");
   free(corpo);
   pthread_mutex_lock(&vtTrava);
-  if(generation!=vtGeracao){pthread_mutex_unlock(&vtTrava);continue;}
+  if(generation!=vtGeracao || !descSessaoAtual()){pthread_mutex_unlock(&vtTrava);continue;}
   vtErro=!valid;
   // Skip usa quantidade recebida, não 100 presumidos. Muitos addons entregam
   // 20/50 por página. Repetição sem novos ids também termina a paginação.
   if(valid){vtPagina+=raw;if(!raw||!added||vtN>=cap)vtFim=1;}
-  vtFioVivo=0;
+  int seguir = vtPaginaSoDeVistos(antes, added, paginas);
+  if (!seguir) vtFioVivo=0;
   pthread_mutex_unlock(&vtTrava);
+  if (seguir) continue;
   return NULL;
   }
 }
@@ -6219,6 +9584,7 @@ static void vtDisparar(void) {
   pthread_mutex_lock(&vtTrava);
   if (vtFioVivo || vtFim || (!vtBase[0] && !vtProvedor)) {pthread_mutex_unlock(&vtTrava);return;}
   vtFioVivo = 1;
+  vtSessao = nv_perfil_sessao_ler();
   vtErro=0;
   // fioVerTudo empilha buffers grandes; no macOS o stack padrao do pthread
   // estoura (collections.sh: Bus error em ___chkstk_darwin).
@@ -6234,13 +9600,20 @@ void desc_vertudo_abrir(const char *base, const char *tipo, const char *catId) {
   desc_vertudo_filtro(base,tipo,catId,"");
 }
 void desc_vertudo_filtro(const char *base, const char *tipo, const char *catId,const char *genre) {
+  desc_vertudo_filtro_desde(base, tipo, catId, genre, 0);
+}
+void desc_vertudo_filtro_desde(const char *base, const char *tipo, const char *catId, const char *genre, int pagina) {
   if (!base || !tipo || !catId) return;
   pthread_mutex_lock(&vtTrava);
   // Mesmo catalogo que ja esta aberto: mantem o que ja foi lido em vez de
   // recomecar do zero (o dono pode ter voltado e entrado de novo).
   if (!vtProvedor && !strcmp(vtBase, base) && !strcmp(vtTipo, tipo) && !strcmp(vtCat, catId)
       && !strcmp(vtGenre,genre?genre:"") && vtN > 0) {
+    // Reabrir e um pedido explicito: se o lote limitado anterior so tinha
+    // vistos, deixa procurar mais paginas sem um ciclo automatico sem fim.
+    int preencher = ajustes_ocultar_filmes_vistos() && !vtProjetar() && !vtFim && !vtErro;
     pthread_mutex_unlock(&vtTrava);
+    if (preencher) vtDisparar();
     return;
   }
   snprintf(vtBase, sizeof vtBase, "%s", base);
@@ -6248,7 +9621,7 @@ void desc_vertudo_filtro(const char *base, const char *tipo, const char *catId,c
   snprintf(vtCat,  sizeof vtCat,  "%s", catId);
   snprintf(vtGenre,sizeof vtGenre,"%s",genre?genre:"");
   vtProvedor=0;
-  vtN = 0; vtPagina = 0; vtFim = 0;vtErro=0;vtGeracao++;
+  vtN = 0; vtPagina = pagina; vtFim = 0;vtErro=0;vtGeracao++;
   pthread_mutex_unlock(&vtTrava);
   vtDisparar();
 }
@@ -6257,23 +9630,32 @@ void desc_vertudo_filtro(const char *base, const char *tipo, const char *catId,c
 // "trakt". Mesmo protocolo do catalogo de addon — geracao nova, memoria
 // guardada entre aberturas da mesma fonte — so muda quem responde.
 void desc_vertudo_fonte(const ColSource *s) {
+  desc_vertudo_fonte_desde(s, 1);
+}
+void desc_vertudo_fonte_desde(const ColSource *s, int pagina) {
   ColSource copia;
   if (!s || !s->prov[0]) return;
   memset(&copia, 0, sizeof copia); copia = *s;
   pthread_mutex_lock(&vtTrava);
   if (vtProvedor && !memcmp(&vtFonte, &copia, sizeof copia) && vtN > 0) {
-    pthread_mutex_unlock(&vtTrava); return;
+    int preencher = ajustes_ocultar_filmes_vistos() && !vtProjetar() && !vtFim && !vtErro;
+    pthread_mutex_unlock(&vtTrava);
+    if (preencher) vtDisparar();
+    return;
   }
   vtFonte = copia;
   vtProvedor = !strcmp(s->prov, "trakt") ? 2 : 1;
   vtBase[0] = 0;
-  vtN = 0; vtPagina = 1; vtFim = 0; vtErro = 0; vtGeracao++;
+  vtN = 0; vtPagina = pagina; vtFim = 0; vtErro = 0; vtGeracao++;
   pthread_mutex_unlock(&vtTrava);
   vtDisparar();
 }
 
+int desc_vertudo_pagina(void) { pthread_mutex_lock(&vtTrava); int p=vtPagina; pthread_mutex_unlock(&vtTrava); return p; }
 void desc_vertudo_mais(void) { vtDisparar(); }
-int  desc_vertudo_n(void) { pthread_mutex_lock(&vtTrava);int n=vtN;pthread_mutex_unlock(&vtTrava);return n; }
+int  desc_vertudo_n(void) { pthread_mutex_lock(&vtTrava);int n=vtProjetar();pthread_mutex_unlock(&vtTrava);return n; }
+int  desc_vertudo_n_bruto(void) { pthread_mutex_lock(&vtTrava);int n=vtN;pthread_mutex_unlock(&vtTrava);return n; }
+unsigned desc_vertudo_revisao(void) { pthread_mutex_lock(&vtTrava);vtProjetar();unsigned r=vtProjRevisao;pthread_mutex_unlock(&vtTrava);return r; }
 int  desc_vertudo_carregando(void) { pthread_mutex_lock(&vtTrava);int n=vtFioVivo;pthread_mutex_unlock(&vtTrava);return n; }
 int  desc_vertudo_fim(void) { pthread_mutex_lock(&vtTrava);int n=vtFim;pthread_mutex_unlock(&vtTrava);return n; }
 int  desc_vertudo_erro(void) { pthread_mutex_lock(&vtTrava);int n=vtErro;pthread_mutex_unlock(&vtTrava);return n; }
@@ -6282,25 +9664,97 @@ void desc_vertudo_fechar(void) { /* guarda o que leu; ver desc_vertudo_abrir */ 
 int desc_vertudo_item(int i, CatItem *dst) {
   int ok = 0;
   pthread_mutex_lock(&vtTrava);
+  int n = vtProjetar();
+  if (dst && i >= 0 && i < n) { memcpy(dst, &vtItens[vtVisiveis[i]], sizeof *dst); ok = 1; }
+  pthread_mutex_unlock(&vtTrava);
+  return ok;
+}
+
+int desc_vertudo_item_bruto(int i, CatItem *dst) {
+  int ok = 0;
+  pthread_mutex_lock(&vtTrava);
   if (dst && i >= 0 && i < vtN) { memcpy(dst, &vtItens[i], sizeof *dst); ok = 1; }
   pthread_mutex_unlock(&vtTrava);
   return ok;
 }
 
 void desc_episodios(int indiceItem, int temporada) {
-  if (fioEpVivo) { pendItem = indiceItem; pendTemp = temporada; return; }
-  // A lista agora e UNICA e cobre todas as temporadas, entao ter qualquer
-  // episodio deste titulo ja basta — trocar de aba nao pede nada.
-  (void)temporada;
-  if (cat_n_episodios(indiceItem) > 0) return;
+  pthread_mutex_lock(&epPedidoTrava);
+  CatItem identidade;
+  int mesmo = fioEpVivo && cat_copiar_item(indiceItem, &identidade) &&
+              !strcmp(epPedidoId, identidade.imdb);
+  pthread_mutex_unlock(&epPedidoTrava);
+  if (mesmo) return;
+  // Uma lista antecipada continua visivel, mas precisa retomar a mescla.
+  CatItem atual;
+  if (!cat_copiar_item(indiceItem, &atual)) return;
+  if (cat_n_episodios(indiceItem) > 0 && !atual.epsParciais) return;
+  EpPedido *p = calloc(1, sizeof *p);
+  if (!p) return;
+  p->item = indiceItem;
+  if (!cat_copiar_item(indiceItem, &p->base)) { free(p); return; }
+  snprintf(p->id, sizeof p->id, "%s", p->base.imdb);
+  pthread_mutex_lock(&epPedidoTrava);
+  p->geracao = ++epGeracao;
+  p->sessao = nv_perfil_sessao_ler();
+  snprintf(epPedidoId, sizeof epPedidoId, "%s", p->id);
   epItem = indiceItem; epTemp = temporada;
   fioEpVivo = 1;
-  if (pthread_create(&fioEp, NULL, buscarEps, NULL) != 0) fioEpVivo = 0;
-  else pthread_detach(fioEp);
+  pthread_mutex_unlock(&epPedidoTrava);
+  if (pthread_create(&fioEp, NULL, buscarEpsPedido, p) != 0) {
+    pthread_mutex_lock(&epPedidoTrava);
+    if (p->geracao == epGeracao) fioEpVivo = 0;
+    pthread_mutex_unlock(&epPedidoTrava);
+    free(p);
+  } else pthread_detach(fioEp);
+}
+
+// Elenco com nomes mas sem id de pessoa do TMDB em ninguem: veio de catalogo
+// em memoria (o elenco.txt so tem nome~papel~foto) e nunca passou pelo
+// casamento de /credits — o OK num ator nao abre nada (#205).
+static int descElencoPrecisaPessoas(const CatItem *ci) {
+  int i;
+  if (!ci || !ci->nElenco || !ajustes_tmdb_elenco() || !desc_chave_tmdb()[0]) return 0;
+  for (i = 0; i < ci->nElenco; i++) if (ci->elenco[i].tmdb > 0) return 0;
+  return 1;
+}
+
+int desc_elenco_precisa_pessoas(const CatItem *ci) { return descElencoPrecisaPessoas(ci); }
+
+// Ponto unico das entradas (detalhe, player, retomada) e do roteador de app.c:
+// pede a lista de episodios do titulo se ela falta. Mesma regra e argumentos do
+// roteador: serie, tipo incerto, ou filme sem elenco (o fio traz o /meta).
+// Sem pedido duplicado: lista ja carregada ou fio ja a caminho do item = nada.
+void desc_episodios_garantir(int indiceItem) {
+  const CatItem *ci = cat_item(indiceItem);
+  if (!ci || !ci->imdb[0]) return;
+  if (!(!strcmp(ci->tipo, "series") || strcmp(ci->tipo, "movie") ||
+        ci->nElenco == 0 || descElencoPrecisaPessoas(ci))) return;
+  if (desc_episodios_carregando(indiceItem)) return;
+  desc_episodios(indiceItem, 0);
+}
+
+// PRE-BUSCA do carrossel (detail.c): a mesma regra de desc_episodios_garantir,
+// mas NUNCA enfileira nem toma o lugar de um pedido de verdade. Fio em voo ou
+// pedido guardado = -1 (tente de novo); nada a pedir = 0; pedido saiu = 1.
+int desc_episodios_precarregar(int indiceItem) {
+  const CatItem *ci = cat_item(indiceItem);
+  if (!ci || !ci->imdb[0]) return 0;
+  if (!(!strcmp(ci->tipo, "series") || strcmp(ci->tipo, "movie") ||
+        ci->nElenco == 0 || descElencoPrecisaPessoas(ci))) return 0;
+  if (cat_n_episodios(indiceItem) > 0 && !ci->epsParciais) return 0;
+  if (fioEpVivo || pendItem >= 0) return -1;
+  desc_episodios(indiceItem, 0);
+  return fioEpVivo ? 1 : 0;
 }
 
 int desc_episodios_carregando(int indiceItem) {
-  return (fioEpVivo && epItem == indiceItem) || pendItem == indiceItem;
+  pthread_mutex_lock(&epPedidoTrava);
+  CatItem identidade;
+  int carregando = (fioEpVivo && cat_copiar_item(indiceItem, &identidade) &&
+                    !strcmp(epPedidoId, identidade.imdb)) || pendItem == indiceItem;
+  pthread_mutex_unlock(&epPedidoTrava);
+  return carregando;
 }
 
 // Chamada por quadro por quem desenha, para o pedido guardado sair assim que o
@@ -6320,20 +9774,46 @@ void desc_episodios_pendente(void) {
 // ficavam apagados e nao abriam, o que deixava a filmografia decorativa.
 //
 // O meta vem do Cinemeta, a mesma fonte do resto do catalogo, e o item entra no
-// FIM do vetor (cat_acrescentar). O tipo nao e conhecido de antemao — o TMDB
-// diz "movie"/"tv" no credito, mas o relacionado do Trakt nao —, entao tenta-se
-// filme e, se nao houver, serie. Duas chamadas no pior caso, uma no comum.
+// FIM do vetor (cat_acrescentar). O tipo do TMDB e o sufixo de episodio sao
+// preservados: movie e tv podem compartilhar o numero no TMDB, mas sao obras
+// diferentes. Sem tipo conhecido vale desc_meta_tipos: serie com temporada
+// primeiro. Aceitar o filme antes foi o que gravou tt9054364 como
+// "Chasing Mavericks" (#524) — o /meta/movie desse id e outro filme.
 static char sobId[24];
 static long sobTmdb;          // quando > 0, o id do IMDb ainda precisa ser resolvido
 static char sobTipo[8];
 static int  sobIndice = -1;   // resultado, consumido por desc_titulo_pronto
 static int  sobFioVivo;
+static NvPerfilSessao sobSessao;
 static pthread_t sobFio;
+// SEMENTE (R2): o que o clique ja sabia do titulo (nome, ano, cartaz). Com ela
+// a pagina abre NA HORA, com o layout normal, e o buscarEps preenche o resto.
+static CatItem sobSemente;
+static int  sobTemSemente;
+
+// Um sufixo completo de episodio prova que o pedido e de serie, mesmo depois
+// de cortar o id para buscar a ficha. Sem converter numeros: nao ha overflow.
+static int sobIdTemEpisodio(const char *id) {
+  const char *p = strchr(id, ':'), *inicio;
+  int positivo = 0;
+  if (!p) return 0;
+  inicio = ++p;
+  while (*p >= '0' && *p <= '9') p++;
+  if (p == inicio || *p != ':') return 0;
+  inicio = ++p;
+  while (*p >= '0' && *p <= '9') { if (*p != '0') positivo = 1; p++; }
+  return p > inicio && !*p && positivo;
+}
+
+static int sobIndiceDoTipo(const char *id) {
+  return sobTipo[0] ? cat_indice_por_imdb_tipo(id, sobTipo) : cat_indice_por_imdb(id);
+}
 
 static void *buscarTitulo(void *arg) {
   char url[200], id[24], *corpo;
   int achou = -1, passo;
   (void)arg;
+  if (!descSessaoVincular(sobSessao)) { sobFioVivo = 0; return NULL; }
   snprintf(id, sizeof id, "%s", sobId);
 
   // O credito de um ator chega com o id do TMDB, nao com o do IMDb — o
@@ -6347,32 +9827,54 @@ static void *buscarTitulo(void *arg) {
     id[0] = 0;
     if (chave && chave[0]) {
       snprintf(url, sizeof url, "%s/%s/%ld/external_ids?api_key=%s", TMDB,
-               strcmp(sobTipo, "tv") ? "movie" : "tv", sobTmdb, chave);
+               !strcmp(sobTipo, "series") ? "tv" : "movie", sobTmdb, chave);
       corpo = rede_baixar(url, 15);
       if (corpo) { js_texto(corpo, NULL, "imdb_id", id, sizeof id); free(corpo); }
     }
-    if (!id[0] || id[0] != 't') {
-      printf("[desc] sob demanda tmdb %ld -> sem imdb\n", sobTmdb); fflush(stdout);
-      sobIndice = -1; sobFioVivo = 0; return NULL;
-    }
+    // No IMDb mapping: Nuvio still serves the native TMDB id and its videos.
+    if (!idbase_e_imdb(id)) snprintf(id, sizeof id, "tmdb:%ld", sobTmdb);
     // Ja temos? Entao e so abrir.
-    { int j = cat_indice_por_imdb(id);
+    { int j = sobIndiceDoTipo(id);
       if (j >= 0) { sobIndice = j; sobFioVivo = 0; return NULL; } }
+    // Com a semente, o /meta NAO e esperado aqui: o titulo entra no catalogo
+    // so com o que o clique sabia, a pagina abre, e o buscarEps (disparado na
+    // abertura) busca a ficha uma vez so — e a cache dele evita repetir.
+    if (sobTemSemente) {
+      CatItem s = sobSemente;
+      snprintf(s.imdb, sizeof s.imdb, "%s", id);
+      s.tmdb = sobTmdb;
+      sobIndice = descCatAcrescentar(&s);
+      printf("[desc] sob demanda tmdb %ld -> %s com semente, indice %d\n", sobTmdb, id, sobIndice);
+      fflush(stdout);
+      sobFioVivo = 0;
+      return NULL;
+    }
   }
 
-  for (passo = 0; passo < 2 && achou < 0; passo++) {
-    const char *tipo = passo ? "series" : "movie";
-    snprintf(url, sizeof url, "%s/meta/%s/%s.json", CINEMETA, tipo, id);
-    corpo = rede_baixar(url, 20);
+  const char *tiposPedido[2];
+  int nTipos = sobTipo[0] ? 1 : desc_meta_tipos("", tiposPedido);
+  if (sobTipo[0]) tiposPedido[0] = sobTipo;
+  for (passo = 0; passo < nTipos && achou < 0; passo++) {
+    const char *tipo = tiposPedido[passo];
+    int ultimo = passo == nTipos - 1;
+    corpo = metaprov_meta(tipo, id, 20, NULL);   // Nuvio, depois Cinemeta
     if (!corpo) continue;
+    // Serie sem temporada nao prova o tipo (o filme cai no passo seguinte).
+    // Com temporada, o filme do mesmo id nao entra: e a colisao do #524.
+    if (!ultimo && !desc_meta_tem_temporadas(corpo)) { free(corpo); continue; }
     { const char *m = strstr(corpo, "\"meta\"");
       CatItem it;
-      if (m && deMeta(m, NULL, tipo, &it)) {
+      if (m && deMeta(m, NULL, tipo, &it) &&
+          (!sobTipo[0] || (!strcmp(it.tipo, sobTipo) &&
+                          (!it.imdb[0] || !strcmp(it.imdb, id) ||
+                           (sobTmdb > 0 && !strncmp(id, "tmdb:", 5) &&
+                            idbase_e_imdb(it.imdb) && it.imdb[2] &&
+                            strspn(it.imdb + 2, "0123456789") == strlen(it.imdb + 2)))))) {
         // O id do proprio pedido manda: o Cinemeta as vezes devolve o campo
         // vazio, e sem ele o titulo entraria no catalogo sem chave e nao
         // poderia ser reaberto nem casar com progresso.
         if (!it.imdb[0]) snprintf(it.imdb, sizeof it.imdb, "%s", id);
-        achou = cat_acrescentar(&it);
+        achou = descCatAcrescentar(&it);
       } }
     free(corpo);
   }
@@ -6382,16 +9884,20 @@ static void *buscarTitulo(void *arg) {
   return NULL;
 }
 
-void desc_pedir_titulo_tmdb(long tmdbId, const char *tipo) {
+static void pedirTmdb(long tmdbId, const char *tipo, int semente) {
   if (tmdbId <= 0 || sobFioVivo) return;
+  sobTemSemente = semente;
   sobTmdb = tmdbId;
-  snprintf(sobTipo, sizeof sobTipo, "%s", tipo ? tipo : "movie");
+  snprintf(sobTipo, sizeof sobTipo, "%s", tipo &&
+           (!strcmp(tipo, "tv") || !strcmp(tipo, "series") || !strcmp(tipo, "show")) ? "series" : "movie");
   sobId[0] = 0;
   sobIndice = -1;
   sobFioVivo = 1;
+  sobSessao = nv_perfil_sessao_ler();
   if (pthread_create(&sobFio, NULL, buscarTitulo, NULL) != 0) sobFioVivo = 0;
   else pthread_detach(sobFio);
 }
+void desc_pedir_titulo_tmdb(long tmdbId, const char *tipo) { pedirTmdb(tmdbId, tipo, 0); }
 
 void desc_pedir_titulo(const char *imdb) {
   char id[24];
@@ -6403,19 +9909,133 @@ void desc_pedir_titulo(const char *imdb) {
             if (k >= sizeof id) k = sizeof id - 1;
             memcpy(id, imdb, k); id[k] = 0; }
   else snprintf(id, sizeof id, "%s", imdb);
-  if (cat_indice_por_imdb(id) >= 0) return;   // ja temos
+  snprintf(sobTipo, sizeof sobTipo, "%s", sobIdTemEpisodio(imdb) ? "series" : "");
+  if (sobIndiceDoTipo(id) >= 0) return;   // ja temos no tipo pedido
+  sobTemSemente = 0;
   snprintf(sobId, sizeof sobId, "%s", id);
   sobTmdb = 0;
   sobIndice = -1;
   sobFioVivo = 1;
+  sobSessao = nv_perfil_sessao_ler();
   if (pthread_create(&sobFio, NULL, buscarTitulo, NULL) != 0) sobFioVivo = 0;
   else pthread_detach(sobFio);
 }
 
-int desc_titulo_pronto(void) { int v = sobIndice; sobIndice = -1; return v; }
+// Como desc_pedir_titulo/_tmdb, mas com o que o clique ja sabia. Sem cartaz ou
+// sem nome cai no caminho de sempre (a pagina espera o /meta).
+//   imdb "tt...": o titulo entra no catalogo AGORA e o roteador abre no proximo
+//   quadro. `tipo` e o do clique ("movie"/"series"; "tv" tambem serve) e DEVE
+//   ser certo: o catalogo recusa atualizar um item de filme para serie
+//   (cat_atualizar_item compara tipo_base), entao "incerto" nao e opcao aqui.
+//   tmdb > 0: um pedido so (external_ids) para achar o IMDb, depois o mesmo.
+void desc_pedir_titulo_semente(const char *imdb, long tmdb, const char *tipo,
+                               const char *titulo, const char *ano, const char *poster) {
+  CatItem s;
+  char id[24];
+  const char *dp;
+  if (sobFioVivo) return;
+  if (!titulo || !*titulo || !poster || !*poster || !tipo ||
+      (strcmp(tipo, "tv") && strcmp(tipo, "series") && strcmp(tipo, "movie"))) {
+    if (tmdb > 0) desc_pedir_titulo_tmdb(tmdb, tipo);
+    else desc_pedir_titulo(imdb);
+    return;
+  }
+  memset(&s, 0, sizeof s);
+  snprintf(s.titulo, sizeof s.titulo, "%s", titulo);
+  snprintf(s.meta, sizeof s.meta, "%.4s", ano ? ano : "");
+  snprintf(s.poster, sizeof s.poster, "%s", poster);
+  // O cartaz da lista NAO vira fundo (#502/#503): recomendacao e filmografia
+  // trazem o poster pequeno (w185/w342) e, em `backdrop`, ele 1) nao passa na
+  // subida w1280/w780 -> original de artehero_url (o detalhe fica com a
+  // miniatura esticada) e 2) mantem arteFixaPoster em 0 no detalhe, entao a
+  // arte congelada nunca solta quando a ficha traz o fundo de verdade. Sem
+  // fundo, arteDeViva cai no poster (arte contida, nao esticada) e marca
+  // arteFixaPoster; o /meta escreve o w1280 e a pagina troca sozinha.
+  s.backdrop[0] = 0;
+  if (tipo && (!strcmp(tipo, "tv") || !strcmp(tipo, "series"))) snprintf(s.tipo, sizeof s.tipo, "series");
+  else if (tipo && !strcmp(tipo, "movie")) snprintf(s.tipo, sizeof s.tipo, "movie");
+  if (s.tipo[0]) snprintf(s.genero, sizeof s.genero, "%s", i18n(rotuloTipoSing(s.tipo)));
+  s.tmdb = tmdb > 0 ? tmdb : 0;
+  if (tmdb > 0) {
+    sobSemente = s;
+    pedirTmdb(tmdb, tipo, 1);
+    return;
+  }
+  if (!imdb || imdb[0] != 't') { desc_pedir_titulo(imdb); return; }
+  dp = strchr(imdb, ':');
+  { size_t k = dp ? (size_t)(dp - imdb) : strlen(imdb);
+    if (k >= sizeof id) k = sizeof id - 1;
+    memcpy(id, imdb, k); id[k] = 0; }
+  sobSessao = nv_perfil_sessao_ler();
+  { int j = cat_indice_por_imdb_tipo(id, s.tipo);
+    if (j >= 0) { sobIndice = j; return; } }
+  snprintf(s.imdb, sizeof s.imdb, "%s", id);
+  sobIndice = descCatAcrescentar(&s);
+  printf("[desc] sob demanda %s com semente, indice %d\n", id, sobIndice);
+  fflush(stdout);
+}
+
+int desc_titulo_pronto(void) { int v = nv_perfil_sessao_atual(sobSessao) ? sobIndice : -1; sobIndice = -1; return v; }
 int desc_titulo_buscando(void) { return sobFioVivo; }
 
 // Idioma dos textos do TMDB. Antes era so o idioma da interface; agora a
 // conta pode escolher outro em Ajustes -> Integracoes (tmdb_language), e
 // "Da interface" continua sendo o padrao — ver ajustes_tmdb_idioma().
 const char *desc_tmdb_idioma(void) { return ajustes_tmdb_idioma(); }
+
+// The epoch was advanced before this hook. No network mutex or job join here.
+void desc_abrir_sessao(void) {
+  NvPerfilSessao sessao = nv_perfil_sessao_ler();
+  snprintf(tmdbChave, sizeof tmdbChave, "%s", tmdbChavePacote);
+  // The drawing thread uses the live session; only detached jobs keep a token.
+  pthread_once(&descSessaoUma, descSessaoCriar);
+  free(pthread_getspecific(descSessaoChave));
+  pthread_setspecific(descSessaoChave, NULL);
+  pthread_mutex_lock(&listaTrava);
+  aberturaSessao = sessao;
+  aberturaPendente = 1;
+  aberturaFontesProntas = 0;
+  aberturaRetentarEm = 0;
+  montagemGeracao++;
+  geracaoPedida++;
+  descVoltas++;
+  descDeb.adiado = 0;
+  repetirAoFim = buscando ? 1 : 0;
+  descPedidoPessoa = 1;
+  parcialNaTela = 0;
+  if (!buscando) nFileirasMontadas = 0;
+  pthread_mutex_unlock(&listaTrava);
+  desc_alvos_busca_zerar();
+  pthread_mutex_lock(&cwFilaTrava);
+  cwDeNovo = cwVivo ? 1 : 0;
+  pthread_mutex_unlock(&cwFilaTrava);
+  pthread_mutex_lock(&cwPubTrava);
+  cwGerNaTela = 0;
+  pthread_mutex_unlock(&cwPubTrava);
+  pthread_mutex_lock(&locFilaTrava);
+  locNIdx = 0; locDeNovo = 0; locSessao = sessao;
+  pthread_mutex_unlock(&locFilaTrava);
+  pthread_mutex_lock(&locTrava);
+  memset(locCache, 0, sizeof locCache); locProx = 0;
+  __atomic_store_n(&locDiscoLido, 0, __ATOMIC_RELEASE);
+  pthread_mutex_unlock(&locTrava);
+  pthread_mutex_lock(&hsTrava);
+  hsNIdx = 0; hsDeNovo = 0; hsSessao = sessao;
+  memset(hsNeg, 0, sizeof hsNeg);
+  pthread_mutex_unlock(&hsTrava);
+  pendItem = -1;
+  // O pedido de episodios em voo e da sessao anterior: cede e nao publica.
+  pthread_mutex_lock(&epPedidoTrava);
+  epGeracao++; fioEpVivo = 0;
+  pthread_mutex_unlock(&epPedidoTrava);
+  pthread_mutex_lock(&vtTrava);
+  vtGeracao++; vtN = 0; vtPagina = 0; vtFim = 1; vtErro = 0;
+  vtBase[0] = vtTipo[0] = vtCat[0] = vtGenre[0] = 0;
+  vtProvedor = 0;
+  pthread_mutex_unlock(&vtTrava);
+  sobIndice = -1;
+  cwo_conta_definir(NULL, 0);
+  cwo_ajustados_definir(NULL, 0);
+  cwo_publicar_futuros(NULL, 0);
+  cat_definir_tudo(NULL, 0, NULL, 0);
+}

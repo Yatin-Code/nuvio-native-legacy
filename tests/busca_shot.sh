@@ -1,14 +1,16 @@
 #!/bin/bash
+export TMPDIR="${TMPDIR:-/tmp}"
+TMPDIR="${TMPDIR%/}"
 # Capturas da Busca para revisao visual. A compilacao exclui novidades1312.c
 # porque o pacote de trabalho atual tem esse arquivo em edicao por outro agente;
 # os simbolos da tela ficam neutros neste harness e nenhuma fonte e revertida.
 set -eu
 cd "$(dirname "$0")/.."
-saida="${1:-/tmp/nuvio-busca}"
+saida="${1:-${TMPDIR:-/tmp}/nuvio-busca}"
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/nuvio-busca-shot-XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 sources=()
-for source in src/*.c; do
+for source in src/*.c src/dts/*.c; do
   [ "$source" = "src/main.c" ] && continue
   [ "$source" = "src/novidades1312.c" ] && continue
   sources+=("$source")

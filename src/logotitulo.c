@@ -17,7 +17,7 @@ int logotitulo_desenhar(const CatItem *ci, const char *nome, TxtEstilo estilo,
   const char *u = logotitulo_url(ci, maxW);
   // A textura menor que ja existe serve enquanto a do tamanho certo decodifica
   // (o mesmo do hero): abrir o menu em cima do destaque nao pisca o nome.
-  GLuint t = u ? tex_obter_larg_qualquer(u, maxW) : 0;
+  GLuint t = u ? tex_obter_logo_larg_qualquer(u, maxW) : 0;
   float asp = t ? tex_aspecto(u) : 0.0f;
   if (t && asp > 0.01f) {
     float w = maxW, h = w / asp;

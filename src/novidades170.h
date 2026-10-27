@@ -32,5 +32,12 @@ int  novidades170_itens(void);
 int  novidades170_item_largura(int i, int *limite, const char **nome);
 // 1 = a previa esta com o foco (cima), 0 = os botoes.
 int  novidades170_foco_na_previa(void);
+// Uma cena da previa fora do cartao (o "Ver exemplo" do Guia de uso): a cena
+// `c` com o canto em (x, y), no tamanho da previa (N170_PREVIA_W x
+// N170_PREVIA_H), no instante `t`.
+#define N170_PREVIA_W 760.0f
+#define N170_PREVIA_H novidades170_previa_altura()
+float novidades170_previa_altura(void);
+void  novidades170_cena_desenhar(int c, float x, float y, float t);
 
 #endif

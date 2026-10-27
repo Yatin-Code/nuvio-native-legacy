@@ -19,7 +19,7 @@ CHROME="${NV_CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrom
 [ -x "$CHROME" ] || { echo "gifbanco-tizen.sh: Chrome nao encontrado ($CHROME)" >&2; exit 127; }
 GIFS=$(bash tests/gifbanco.sh --so-gerar)
 OUT="${TMPDIR:-/tmp}/nuvio-gifbanco-tizen"
-REF="${NV_GIFBANCO_REF:-master}"
+REF="${NV_GIFBANCO_REF:-v1.4.6}"
 rm -rf "$OUT"; mkdir -p "$OUT/antigo/src" "$OUT/novo/src" "$OUT/antigo/tests" "$OUT/novo/tests" "$OUT/antigo0/src" "$OUT/antigo0/tests"
 git show "$REF:src/gif.c" > "$OUT/antigo/src/gif.c"
 git show "$REF:src/gif.h" > "$OUT/antigo/src/gif.h"
@@ -101,12 +101,17 @@ for v in antigo antigo0 novo; do
     --user-data-dir="$OUT/perfil-$v" --use-angle=swiftshader --enable-unsafe-swiftshader \
     --window-size=1280,720 "http://127.0.0.1:$PORTA/$v/index.html" > "$OUT/chrome-$v.log" 2>&1 &
   CR=$!
+  fim=0
   for _ in $(seq 1 240); do
-    grep -q PAGINA_FIM "$OUT/log.txt" 2>/dev/null && break
+    if grep -q PAGINA_FIM "$OUT/log.txt" 2>/dev/null; then fim=1; break; fi
     sleep 1
   done
   kill $CR 2>/dev/null || true
   wait $CR 2>/dev/null || true
+  if [ "$fim" -ne 1 ]; then
+    echo "gifbanco-tizen.sh: $v nao concluiu; ver $OUT/chrome-$v.log" >&2
+    exit 1
+  fi
   echo "== $v"
   grep -E "BANCO|deu a volta|WORKER" "$OUT/log.txt" || { echo "  (sem resultado; ver $OUT/chrome-$v.log)"; }
 done

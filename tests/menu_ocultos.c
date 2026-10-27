@@ -1,6 +1,7 @@
 // #162: itens escondidos nos Ajustes somem da barra lateral e as setas pulam
 // por cima deles. Guia e Agenda desligados pelo ajustes.txt, como o arranque le.
 #include "ajustes.h"
+#include "nvtmp.h"
 #include "menu.h"
 #include <SDL2/SDL.h>
 #include <assert.h>
@@ -27,7 +28,7 @@ static int descer(int n) {
 }
 
 int main(void) {
-  char dir[] = "/tmp/nuvio-menu-ocultos-XXXXXX", caminho[700];
+  char dir[NVT_MAX], caminho[700]; nvt_set(dir, sizeof dir, "/nuvio-menu-ocultos-XXXXXX");
   FILE *f;
   assert(mkdtemp(dir));
   snprintf(caminho, sizeof caminho, "%s/ajustes.txt", dir);
@@ -52,6 +53,33 @@ int main(void) {
   menu_fechar(); menu_definir_destino(MENU_GUIA); menu_abrir();
   tecla(SDLK_RIGHT);
   assert(menu_destino() == MENU_INICIO);
+
+  // MENU OVER A LAYER (the title page, owner 03/10): Right/Back only hand the
+  // focus back (no choice, the layer stays); OK on any row is a choice the
+  // app uses to close the layer, even on the current destination.
+  menu_escolheu(); menu_mudou_destino();
+  menu_fechar(); menu_definir_destino(MENU_INICIO);
+  for (int i = 0; i < 200; i++) menu_atualizar(0.016f, 0);
+  menu_abrir_sobre(1);
+  assert(menu_aberto() && menu_sobre());
+  for (int i = 0; i < 30; i++) menu_atualizar(0.016f, 0);
+  tecla(SDLK_DOWN); tecla(SDLK_RIGHT);
+  assert(!menu_aberto() && menu_destino() == MENU_INICIO && !menu_escolheu());
+  assert(menu_sobre());                       // still drawn while collapsing
+  for (int i = 0; i < 200; i++) menu_atualizar(0.016f, 0);
+  assert(!menu_sobre());
+  menu_abrir_sobre(1); tecla(SDLK_ESCAPE);
+  assert(!menu_aberto() && !menu_escolheu());
+  for (int i = 0; i < 200; i++) menu_atualizar(0.016f, 0);
+  menu_abrir_sobre(1); tecla(SDLK_RETURN);   // current destination
+  assert(!menu_aberto() && menu_escolheu() && !menu_mudou_destino());
+  for (int i = 0; i < 200; i++) menu_atualizar(0.016f, 0);
+  menu_abrir_sobre(0); tecla(SDLK_DOWN); tecla(SDLK_RETURN);
+  assert(menu_escolheu() && menu_mudou_destino() && menu_destino() == MENU_EXPLORAR);
+  // A plain open keeps Right = choose.
+  for (int i = 0; i < 200; i++) menu_atualizar(0.016f, 0);
+  menu_abrir(); assert(!menu_sobre()); tecla(SDLK_RIGHT);
+  assert(menu_escolheu());
 
   unlink(caminho);
   { char t[700]; snprintf(t, sizeof t, "%s/ajustes.tmp", dir); unlink(t);

@@ -38,6 +38,7 @@
 #ifndef NV_SERIEAUD_H
 #define NV_SERIEAUD_H
 #include "gfx.h"
+#include "notasui.h"
 
 // Teto de episodios POR TEMPORADA, que e tambem o teto de pedidos /stats.
 // Ver a conta do orcamento em serieaud.c.
@@ -117,11 +118,23 @@ void serieaud_selecionar(int i);
 int  serieaud_selecionado(void);
 
 // --- DESENHO -----------------------------------------------------------------
-// Cada um desenha DENTRO de `r` e devolve a altura usada, para quem empilha.
-// Sao so primitivas gfx_* e texto: nenhuma textura, nenhum byte do orcamento
-// de imagens (NV_TEX_ORCAMENTO_MB ja vive encostado no teto na TV do dono).
-float serieaud_arco(GfxRect r);
-float serieaud_radar(GfxRect r);
-float serieaud_digital(GfxRect r);
+// Glass UI 1.8: os tres graficos viraram UM bloco, "Numeros da temporada N",
+// com tres cartoes (retencao, notas por episodio, impressao digital) e o
+// mesmo episodio em foco nos tres. So primitivas gfx_* e texto: nenhuma
+// textura, nenhum byte do orcamento de imagens.
+typedef struct {
+  int temporada;            // NUMERO da temporada (titulo do bloco)
+  int tempIdx;              // indice dela em `notas` (mapa de episodios); -1
+  int sel;                  // episodio em foco (indice na temporada)
+  int selEp;                // numero dele
+  int aberto;               // a audiencia desta temporada ja foi pedida
+  const NotasSecao *notas;  // notas por episodio de todas as temporadas
+} SaBloco;
+// Altura FIXA do bloco: os dados chegam sem mexer no empilhamento.
+float serieaud_bloco_altura(void);
+// Desenha com o canto superior esquerdo em (x, y). Devolve a altura.
+float serieaud_bloco(float x, float y, const SaBloco *b, float a);
+// Volta o portao do texto (nova pagina de titulo).
+void  serieaud_bloco_reiniciar(void);
 
 #endif

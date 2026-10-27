@@ -62,11 +62,37 @@ static void tabela(void) {
   ptv_padrao(PTV_TPK, 2048, &p);
   assert(p.heroiLarg == 1280);
   ptv_definir_gpu_fraca(0);
+  // #286: heroi 960 so no .tpk com GPU Utgard marcada; sem a marca, nada muda.
+  assert(!ptv_gpu_utgard_atual());
+  ptv_definir_gpu_utgard(1);
+  ptv_definir_gpu_fraca(1);
+  ptv_padrao(PTV_TPK, 1108, &p);
+  assert(p.heroiLarg == 960 && p.texMb == 64 && p.fiosRede == 2);
+  ptv_padrao(PTV_TPK, 2048, &p);
+  assert(p.heroiLarg == 960);
+  ptv_padrao(PTV_LG, 1024, &p);
+  assert(p.heroiLarg == 1280);   // outras plataformas: intactas
+  ptv_definir_gpu_utgard(0);
+  ptv_definir_gpu_fraca(1);
+  ptv_padrao(PTV_TPK, 1108, &p);
+  assert(p.heroiLarg == 1280);   // GPU fraca que nao e Utgard (Midgard): 1280
+  ptv_definir_gpu_fraca(0);
+  ptv_padrao(PTV_TPK, 2048, &p);
+  assert(p.heroiLarg == 1920);
+  puts("ok  heroi 960 so na Utgard do .tpk");
   assert(ptv_gpu_fraca("Mali-TDVX"));
   assert(ptv_gpu_fraca("Mali-T830"));
   assert(ptv_gpu_fraca("Mali-450 MP"));
   assert(!ptv_gpu_fraca("Mali-G52"));
   assert(!ptv_gpu_fraca("Mali-G71"));
+  // Trailer automatico da home vetado so no Utgard (ajustes_trailer_hero_vetar).
+  assert(ptv_gpu_utgard("Mali-400 MP"));
+  assert(ptv_gpu_utgard("Mali-450 MP"));
+  assert(ptv_gpu_utgard("ARM Mali-470"));
+  assert(!ptv_gpu_utgard("Mali-TDVX"));
+  assert(!ptv_gpu_utgard("Mali-G57"));
+  assert(!ptv_gpu_utgard("Mali-4"));
+  assert(!ptv_gpu_utgard(NULL));
   assert(!ptv_gpu_fraca("Apple M4 Pro"));
   assert(!ptv_gpu_fraca(NULL));
   puts("ok  tabela do .tpk nativo (PTV_TPK) e GPU fraca pelo GL_RENDERER");
@@ -75,7 +101,7 @@ static void tabela(void) {
 // NENHUM candidato, em nenhuma RAM, em nenhum modo, passa do teto.
 static void limites(void) {
   int i, plat, modo;
-  for (plat = 0; plat < 3; plat++)
+  for (plat = 0; plat <= PTV_ANDROID; plat++)
     for (modo = 0; modo < 2; modo++)
       for (i = 0; i < N_RAMS; i++) {
         PtvPerfil c;
@@ -91,7 +117,7 @@ static void limites(void) {
           assert(c.texMb <= 128);
           if (m < 2000) assert(c.heroiLarg == 1280);
         }
-        if (plat == PTV_LG && m && m < 1200)
+        if ((plat == PTV_LG || plat == PTV_ANDROID) && m && m < 1200)
           assert(c.texMb <= 64 && c.heroiLarg == 1280 && c.fiosRede <= 2);
       }
   { PtvPerfil c;
@@ -160,6 +186,16 @@ static void margem(void) {
   const PtvPerfil s96_1920 = { 96, 2, 1920 }, s96_1280 = { 96, 2, 1280 };
   PtvMedida a, b;
   const char *m = NULL;
+
+  // Android de 2 GB: 300 MB e candidato para imagens, nao compromisso de
+  // aplicar. Sem ganho/arte descartada, 128 MB continuam; sob pressao, sobe.
+  { PtvPerfil atual, cand;
+    ptv_padrao(PTV_ANDROID, 2245, &atual);
+    ptv_candidato(PTV_ANDROID, 2245, PTV_QUALIDADE, 0, &cand);
+    assert(atual.texMb == 128 && cand.texMb == 192);
+    a = medida(1000, 0, 33, 0); b = medida(950, 0, 33, 0);
+    assert(ptv_decidir(&atual, &cand, &a, &b, 0, &m) == PTV_DEC_RUIDO);
+    assert(ptv_decidir(&atual, &cand, &a, &b, 2, &m) == PTV_DEC_APLICAR); }
 
   // LG, rodada A: 96|4|1920 -> 160|4|1920, artes 316 -> 297 ms (6%, 19 ms).
   // Sem arte visivel despejada, mais memoria nao se justifica: fica o 96.
@@ -348,7 +384,52 @@ static void dimensoes(void) {
   puts("ok  dimensoes pelo cabecalho (PNG, JPEG, GIF, WebP)");
 }
 
+static void android_policy(void) {
+  const int locks[] = { 0, 16, 48, 96, 300, 999 };
+  for (int gpu = 0; gpu <= 1; gpu++) {
+    ptv_definir_gpu_fraca(gpu);
+    for (int i=0;i<N_RAMS;i++) {
+      long mem = RAMS[i];
+      PtvPerfil a, old;
+      assert(ptv_tex_auto_mb(PTV_ANDROID,mem) == ptv_tex_auto_mb(PTV_LG,mem));
+      // Android < 3 GB fica um degrau abaixo do teto da LG: numa TCL de 2,4 GB
+      // 300 MB de textura + buffer de video derrubaram o app (lmkd).
+      if (mem && mem < 3000 && mem >= 2000)
+        assert(ptv_tex_teto_mb(PTV_ANDROID,mem) == 192);
+      else
+        assert(ptv_tex_teto_mb(PTV_ANDROID,mem) == ptv_tex_teto_mb(PTV_LG,mem));
+      ptv_padrao(PTV_ANDROID,mem,&a); ptv_padrao(PTV_LG,mem,&old);
+      assert(!memcmp(&a,&old,sizeof a));
+      // Onde o teto diverge (< 3 GB), o candidato de Qualidade e o limitar
+      // divergem junto; compara contra o teto proprio.
+      int diverge = mem && mem >= 2000 && mem < 3000;
+      for (int mode=0;mode<2;mode++) for (int j=0;j<6;j++) {
+        ptv_candidato(PTV_ANDROID,mem,(PtvModo)mode,locks[j],&a);
+        ptv_candidato(PTV_LG,mem,(PtvModo)mode,locks[j],&old);
+        if (!diverge) assert(!memcmp(&a,&old,sizeof a));
+        else assert(a.texMb <= 192);
+      }
+      a = (PtvPerfil){999,9,3840}; old = a;
+      assert(ptv_limitar(PTV_ANDROID,mem,&a) == ptv_limitar(PTV_LG,mem,&old));
+      if (!diverge) assert(!memcmp(&a,&old,sizeof a));
+      else assert(a.texMb == 192);
+    }
+  }
+  ptv_definir_gpu_fraca(0);
+  assert(!strcmp(ptv_plataforma_nome(PTV_ANDROID),"android"));
+  PtvPerfil before, candidate;
+  ptv_padrao(PTV_ANDROID,2245,&before);
+  ptv_candidato(PTV_ANDROID,2245,PTV_DESEMPENHO,96,&candidate);
+  assert(candidate.texMb==96 && candidate.fiosRede==2 && candidate.heroiLarg==1280);
+  PtvMedida a={1000,10,0,20,0}, bad={1800,9,1,20,0}, noise=a, good={700,10,0,20,0};
+  assert(ptv_decidir(&before,&candidate,&a,&bad,0,NULL)==PTV_DEC_RESTAURAR);
+  assert(ptv_decidir(&before,&candidate,&a,&noise,0,NULL)==PTV_DEC_RUIDO);
+  assert(ptv_decidir(&before,&candidate,&a,&good,0,NULL)==PTV_DEC_APLICAR);
+  puts("ok  Android identity preserves native policy, overrides, and rollback");
+}
+
 int main(void) {
+  android_policy();
   tabela();
   limites();
   regra();

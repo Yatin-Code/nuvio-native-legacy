@@ -16,6 +16,7 @@
 // nao o que esta foto quer provar.
 #define NV_REC_URL "http://127.0.0.1:8799"
 #include "../src/recomenda.c"
+#include "nvtmp.h"
 #include "salvospainel.h"
 #include "salvos.h"
 #include "ctxmenu.h"
@@ -254,7 +255,7 @@ static void semear(const char *dir) {
 }
 
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nuvio-social";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nuvio-social");
   const char *dir = getenv("NUVIO_DADOS");
   char nome[700];
   SDL_Window *w;
@@ -287,6 +288,9 @@ int main(int argc, char **argv) {
   { char caminho[700]; FILE *f;
     const char *en = getenv("NUVIO_SHOT_EN");
     const char *temaEnv = getenv("NUVIO_SHOT_THEME");
+    // NUVIO_SHOT_FONTE, como no detail_secoes_shot: 3 = Montserrat, a fonte
+    // da TV do dono. A captura sai na fonte de quem vai julgar o resultado.
+    const char *fonteEnv = getenv("NUVIO_SHOT_FONTE");
     int ingles = (en && *en && *en != '0');
     int tema = temaEnv && *temaEnv ? atoi(temaEnv) : 2;
     if (tema < 0 || tema >= 12) tema = 2;
@@ -294,6 +298,7 @@ int main(int argc, char **argv) {
     f = fopen(caminho, "w");
     assert(f);
     fprintf(f, "idioma %d\nselected_theme %d\n", ingles, tema);
+    if (fonteEnv && *fonteEnv) fprintf(f, "fonteInterface %d\n", atoi(fonteEnv));
     fclose(f);
     ajustes_dir(dados_dir());
     printf("idioma: %s, acento: %d\n", ajustes_idioma_ingles() ? "en" : "pt", tema); }
@@ -397,7 +402,7 @@ int main(int argc, char **argv) {
   // qualquer coisa — inclusive antes das quatro recomendacoes ja semeadas.
   tecla(SDLK_UP);             // lista -> barra de opcoes
   tecla(SDLK_UP);
-  tecla(SDLK_RIGHT);
+  tecla(SDLK_RIGHT); tecla(SDLK_RIGHT);   // Atividade -> Social (a Atividade entrou antes, 02/10)
   printf("consentimento na tela: %d (aparecer=%d)\n",
          recomenda_aparecer() == REC_APARECER_NAO_PERGUNTADO, aparecer);
   snprintf(nome, sizeof nome, "%s-social-consentimento.bmp", saida);
@@ -440,7 +445,7 @@ int main(int argc, char **argv) {
   spainel_abrir();
   tecla(SDLK_UP);             // lista -> barra de opcoes
   tecla(SDLK_UP);
-  tecla(SDLK_RIGHT);
+  tecla(SDLK_RIGHT); tecla(SDLK_RIGHT);   // Atividade -> Social (a Atividade entrou antes, 02/10)
   snprintf(nome, sizeof nome, "%s-social.bmp", saida);
   captura(nome, w);
 
@@ -492,7 +497,7 @@ int main(int argc, char **argv) {
       aparecer = lig ? REC_APARECER_SIM : REC_APARECER_NAO;
       spainel_fechar();
       spainel_abrir();
-      tecla(SDLK_UP); tecla(SDLK_UP); tecla(SDLK_RIGHT);
+      tecla(SDLK_UP); tecla(SDLK_UP); tecla(SDLK_RIGHT); tecla(SDLK_RIGHT);
       tecla(SDLK_DOWN);       // a barra "Organizar" da Social
       // Cinco descidas: tres recomendacoes, "Adicionar um amigo" e o
       // interruptor. A primeira leva o foco da linha de abas para a linha 0.
@@ -529,7 +534,7 @@ int main(int argc, char **argv) {
   aparecer = REC_APARECER_SIM;
   spainel_fechar();
   spainel_abrir();
-  tecla(SDLK_UP); tecla(SDLK_UP); tecla(SDLK_RIGHT);
+  tecla(SDLK_UP); tecla(SDLK_UP); tecla(SDLK_RIGHT); tecla(SDLK_RIGHT);
   tecla(SDLK_DOWN);           // a barra "Organizar" da Social
   tecla(SDLK_DOWN); tecla(SDLK_DOWN); tecla(SDLK_DOWN);
   tecla(SDLK_DOWN); tecla(SDLK_DOWN);
@@ -594,10 +599,10 @@ int main(int argc, char **argv) {
     e.type = SDL_KEYUP;
     e.key.keysym.sym = SDLK_RETURN;
     ctx_evento(&e); }
-  // Desce ate "Recomendar a um amigo". Sao QUATRO opcoes neste item (detalhes,
-  // salvar, assistido, recomendar) — o titulo nao tem progresso, entao "Tirar
-  // de Continuar assistindo" nao aparece.
-  teclaCtx(SDLK_DOWN); teclaCtx(SDLK_DOWN); teclaCtx(SDLK_DOWN);
+  // Desce ate "Recomendar a um amigo". Sao TRES opcoes neste item (salvar,
+  // assistido, recomendar; "Ver detalhes" saiu em 06/10/2026) — o titulo nao
+  // tem progresso, entao "Tirar de Continuar assistindo" nao aparece.
+  teclaCtx(SDLK_DOWN); teclaCtx(SDLK_DOWN);
   snprintf(nome, sizeof nome, "%s-ctx-opcoes.bmp", saida);
   captura(nome, w);
 
@@ -698,7 +703,7 @@ int main(int argc, char **argv) {
   // a linha "Adicionar um amigo" SEM foco por causa disso.
   spainel_fechar();
   spainel_abrir();
-  tecla(SDLK_UP); tecla(SDLK_UP); tecla(SDLK_RIGHT);   // lista -> barra -> abas
+  tecla(SDLK_UP); tecla(SDLK_UP); tecla(SDLK_RIGHT); tecla(SDLK_RIGHT);   // lista -> barra -> abas
   tecla(SDLK_DOWN);           // foco na linha "Adicionar um amigo"
   snprintf(nome, sizeof nome, "%s-social-vazio.bmp", saida);
   captura(nome, w);

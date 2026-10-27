@@ -9,7 +9,11 @@
 // NUVIO_DADOS e uma pasta temporaria (ver o .sh): ajustes.txt e o perfil
 // aprovado sao escritos la, nunca nos dados de quem roda.
 #include "../src/diagnostico.c"
+#include "nvtmp.h"
 #include "rail_shot.h"
+#include "ilha.h"
+#include "ajustes_ux.h"
+#include "badges.h"
 #include <SDL2/SDL_image.h>
 #include <assert.h>
 
@@ -31,6 +35,12 @@ static void captura(const char *nome, SDL_Window *win, int tela) {
     glClear(GL_COLOR_BUFFER_BIT);
     if (tela) ajustes_desenhar(SDL_GetTicks());
     else diagnostico_desenhar(SDL_GetTicks());
+    if (getenv("NUVIO_SHOT_ILHA")) {   // a ilha do relogio, como o app poe
+      ilha_relogio_visivel(1);
+      ilha_posicionar(1);
+      ilha_desenhar(SDL_GetTicks());
+      SDL_Delay(12);
+    }
     rail_shot_desenhar(MENU_AJUSTES);
     if (i == 39) {
       unsigned char *pix = malloc(1920 * 1080 * 4);
@@ -81,7 +91,7 @@ static void resultadoC9(void) {
 }
 
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nuvio-diag";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nuvio-diag");
   const char *dir = getenv("NUVIO_DADOS");
   char nome[600];
   SDL_Window *w;
@@ -100,6 +110,9 @@ int main(int argc, char **argv) {
     f = fopen(caminho, "w");
     assert(f);
     fprintf(f, "idioma %d\nanimacoes 0\n", pt ? 0 : 1);
+    // NUVIO_SHOT_TEMA / NUVIO_SHOT_VIDRO=0: o acento e o material da captura.
+    if (getenv("NUVIO_SHOT_TEMA")) fprintf(f, "selected_theme %s\n", getenv("NUVIO_SHOT_TEMA"));
+    if (getenv("NUVIO_SHOT_VIDRO")) fprintf(f, "vidroLocal %d\n", *getenv("NUVIO_SHOT_VIDRO") == '0' ? 1 : 0);
     fclose(f); }
   ajustes_dir(dir);
   SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
@@ -121,6 +134,10 @@ int main(int argc, char **argv) {
   gfx_tamanho_alvo(1920, 1080);
   assert(gfx_iniciar());
   assert(txt_iniciar("deploy/app", 1));
+  ajustes_recursos("deploy/app/art");
+  gfx_icones_dir("deploy/app/art");
+  badges_carregar("deploy/app/art");
+  ajustes_ui_arte(21);
   tex_iniciar(64);
   gfx_icones_dir("deploy/app/art");
   // A C9: 2245 MB de RAM nao existem no Mac (sem /proc); o que a tela mostra
@@ -130,6 +147,11 @@ int main(int argc, char **argv) {
   d.intro = 0;
   snprintf(nome, sizeof nome, "%s-1-inicio.bmp", saida);
   captura(nome, w, 0);
+
+  d.intro = 1;
+  snprintf(nome, sizeof nome, "%s-0-intro.bmp", saida);
+  captura(nome, w, 0);
+  d.intro = 0;
 
   focoModo = 1;
   snprintf(nome, sizeof nome, "%s-2-inicio-desempenho.bmp", saida);
@@ -174,6 +196,7 @@ int main(int argc, char **argv) {
   addons_adicionar("MediaFusion", "https://exemplo.invalid/d/manifest.json");
   addons_adicionar("OpenSubtitles v3", "https://exemplo.invalid/e/manifest.json");
   memset(&vz, 0, sizeof vz);
+  ajustes_ui_arte(13);
   vz.aberto = 1;
   vz.nAddon = 5;
   vz.addon[0] = (VazAddon){ 1, 812, 200, 1, 34, 3 };

@@ -31,6 +31,7 @@
 //   bash tests/gif.sh
 //   SANITIZE=1 bash tests/gif.sh
 #include "../src/gif.h"
+#include "nvtmp.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -38,7 +39,7 @@
 #include <string.h>
 #include <time.h>
 
-#define CAMINHO "/tmp/nuvio-gif-teste.gif"
+#define CAMINHO nvt("/nuvio-gif-teste.gif")
 
 // --- montador ---------------------------------------------------------------
 static unsigned char buf[8192];
@@ -292,6 +293,26 @@ static void decodificador(void) {
   for (i = 0; i < 30 * 20; i++) idxDe[4][i] = (unsigned char)(i % 4);
   n = montarGif(W, H, 4, q, 5);
 
+  // Capas estaticas usam o mesmo decoder nas TVs sem GIF no SDL_image.
+  // O primeiro quadro precisa manter pixels, transparencia e proporcao.
+  { int w, h, ow, oh;
+    unsigned char *foto = gif_primeiro_rgba(grande, n, 0, &w, &h, &ow, &oh);
+    modelo(W, H, q, 5, 0, esperado);
+    assert(foto && w == W && h == H && ow == W && oh == H);
+    assert(!memcmp(foto, esperado, (size_t)W * H * 4));
+    free(foto);
+    foto = gif_primeiro_rgba(grande, n, 16, &w, &h, &ow, &oh);
+    assert(foto && w == 16 && h == 10 && ow == W && oh == H);
+    free(foto);
+    assert(!gif_primeiro_rgba(grande, 13, 0, &w, &h, &ow, &oh));
+    assert(w == 0 && h == 0 && ow == 0 && oh == 0);
+    { unsigned char salvo[4];
+      memcpy(salvo, grande + 6, 4);
+      memset(grande + 6, 255, 4);
+      assert(!gif_primeiro_rgba(grande, n, 16, &w, &h, &ow, &oh));
+      memcpy(grande + 6, salvo, 4); }
+    puts("ok  capa GIF: primeiro quadro exato, escala e limite de memoria"); }
+
   { GifDec *d;
     unsigned char *copia = (unsigned char *)malloc(n);
     int volta, y0, y1;
@@ -313,6 +334,23 @@ static void decodificador(void) {
       }
     gif_dec_fechar(d);
     puts("ok  decodificador: LZW, paleta local, entrelacado, transparencia e descartes 1/2/3 batem com o modelo"); }
+
+  { int w, h, ow, oh;
+    unsigned char *foto, *copia;
+    size_t corte;
+    q[0].transp = 3;
+    n = montarGif(W, H, 4, q, 1);
+    modelo(W, H, q, 1, 0, esperado);
+    foto = gif_primeiro_rgba(grande, n, 0, &w, &h, &ow, &oh);
+    assert(foto && !memcmp(foto, esperado, (size_t)W * H * 4));
+    free(foto);
+    copia = malloc(n); assert(copia); memcpy(copia, grande, n);
+    assert(!gif_dec_abrir(copia, n, W, H));
+    for (corte = 0; corte < n; corte++) {
+      foto = gif_primeiro_rgba(grande, corte, 16, &w, &h, &ow, &oh);
+      free(foto);
+    }
+    puts("ok  capa GIF unica transparente; animacao ainda exige dois quadros; truncamentos seguros"); }
 
   // TABELA CHEIA: 320x200 de ruido em 256 cores estoura os 4096 codigos
   // varias vezes (CLEAR no meio do quadro).
@@ -626,7 +664,7 @@ int main(void) {
   //    de disco devolver, e ele devolve NULL enquanto o download nao chegou.
   assert(gif_animado(NULL) == 0);
   assert(gif_animado("") == 0);
-  assert(gif_animado("/tmp/nuvio-gif-que-nao-existe.gif") == 0);
+  assert(gif_animado(nvt("/nuvio-gif-que-nao-existe.gif")) == 0);
   puts("ok  NULL, vazio e caminho inexistente devolvem 0");
 
   // L) FORA DO TIZEN NAO HA ANIMACAO, e isso e contrato e nao acidente: o
@@ -720,6 +758,15 @@ int main(void) {
     // LONGO, anima a 25 quadros/s; a 50 quadros/s continua pesado demais.
     assert(gif_custo(241, 500, 281, 241 * 40) <= gif_orcamento_para(2.0));
     assert(gif_custo(241, 500, 281, 241 * 20) > gif_orcamento_para(2.0));
+    // #589: esse mesmo GIF (26,5 MB/s, log da QE55Q80B) anima em camera lenta
+    // dentro do teto em vez de parar; o dobro do teto ou mais continua parado.
+    { size_t c = gif_custo(241, 500, 281, 4880), o = gif_orcamento_para(2.0);
+      double k = gif_estica(c, o);
+      assert(k > 1.0 && k < 1.4);
+      assert(gif_custo(241, 500, 281, (int)(4880 * k + 1)) <= o);
+      assert(gif_estica(o, o) == 1.0 && gif_estica(c, GIF_SEM_TETO) == 1.0);
+      assert(gif_estica(c, 0) == 0.0);
+      assert(gif_estica(o * 2 + 1, o) == 0.0); }
     // Navegador que nao informa: o mesmo teto de 2 GB, nao "sem teto".
     assert(gif_orcamento_para(0.0) == 20 * MB);
     assert(gif_orcamento_para(-1.0) == 20 * MB);

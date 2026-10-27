@@ -4,10 +4,14 @@
 #include "catalogo.h"
 #include "sessao.h"
 #include "perfis.h"
+#include "perfisessao.h"
+#include <pthread.h>
 #include "dados.h"
 #include "js.h"
 #include "jsw.h"
 #include <stdio.h>
+#include <limits.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -19,8 +23,12 @@
 
 static ProgRegistro caixa[SP_MAX];
 static int nCaixa;
+static NvPerfilSessao caixaSessao;
+static pthread_mutex_t caixaTrava = PTHREAD_MUTEX_INITIALIZER;
 
 static int ok2xx(const char *r, int st) { return r && st >= 200 && st < 300; }
+static char *contaRpc(const SyncProgRemocao *, const char *, const char *, int *);
+static int pedidoContaAtual(const SyncProgRemocao *);
 
 
 // updated_at ganha de last_watched, como em rowFreshness do web. Numero pode
@@ -39,48 +47,81 @@ static long long lerInstanteMs(const char *p, const char *f) {
     } else {
       v = js_num(p, f, chaves[i], -1.0);
     }
-    if (v > 0) return v > 1000000000000.0 ? (long long)v : (long long)(v * 1000.0);
+    if (v > 0) {
+      double ms = v > 1000000000000.0 ? v : v * 1000.0;
+      if (isfinite(ms) && ms < (double)LLONG_MAX) return (long long)ms;
+    }
   }
   return 0;
 }
 
-int syncprog_puxar(void) {
+// Ausencia/null permitem o fallback do contrato; um valor presente invalido
+// nao pode virar "ausente" e sobrescrever uma posicao valida com zero.
+static int lerNumero(const char *p, const char *f, const char *chave,
+                     double padrao, double *saida) {
+  char cru[8];
+  if (!js_tem(p, f, chave) ||
+      (js_bruto(p, f, chave, cru, sizeof cru) && !strcmp(cru, "null"))) {
+    *saida = padrao;
+    return 1;
+  }
+  *saida = js_num(p, f, chave, NAN);
+  return isfinite(*saida);
+}
+
+static int lerCoordenada(const char *p, const char *f, const char *chave, int *saida) {
+  double v;
+  if (!lerNumero(p, f, chave, -1.0, &v)) return 0;
+  if (!isfinite(v) || v < INT_MIN || v > INT_MAX) return 0;
+  *saida = (int)v;
+  return v == *saida;
+}
+
+int syncprog_puxar_sessao(int perfil, uint64_t sessao) {
   Jsw w;
   char *r;
   int st = 0, k = 0;
+  ProgRegistro *novo;
+  SyncProgRemocao dono;
+  if (!syncprog_remocao_capturar(&dono) || dono.perfil != perfil || dono.sessao != sessao) return -1;
   const char *p;
 
   jsw_iniciar(&w);
   jsw_obj_ini(&w);
-  jsw_ci(&w, "p_profile_id", perfis_ativo());
+  jsw_ci(&w, "p_profile_id", perfil);
   jsw_obj_fim(&w);
-  r = sessao_rpc("sync_pull_watch_progress", jsw_texto_final(&w), &st);
+  r = contaRpc(&dono, "sync_pull_watch_progress", jsw_texto_final(&w), &st);
+  memset(dono.jwt, 0, sizeof dono.jwt);
   jsw_livre(&w);
   if (!ok2xx(r, st)) { free(r); return -1; }
 
+  novo = calloc(SP_MAX, sizeof *novo);
+  if (!novo) { free(r); return -1; }
   for (p = js_raiz_array(r); p && k < SP_MAX; p = js_prox(js_fim(p))) {
     const char *f = js_fim(p);
-    ProgRegistro *d = &caixa[k];
+    ProgRegistro *d = &novo[k];
     double pos, dur;
     char id[40];
     if (!js_texto(p, f, "content_id", id, sizeof id) || !id[0]) continue;
     // O web aceita position_ms/duration_ms e position/duration; os primeiros
     // ganham quando existem, porque os segundos ja vem em milissegundos nesta
     // RPC e misturar as duas unidades produz progresso de 100% em tudo.
-    pos = js_num(p, f, "position_ms", -1.0);
-    dur = js_num(p, f, "duration_ms", -1.0);
-    if (pos < 0) pos = js_num(p, f, "position", 0);
-    if (dur < 0) dur = js_num(p, f, "duration", 0);
+    if (!lerNumero(p, f, "position_ms", -1.0, &pos) ||
+        !lerNumero(p, f, "duration_ms", -1.0, &dur)) continue;
+    if (pos < 0 && !lerNumero(p, f, "position", 0, &pos)) continue;
+    if (dur < 0 && !lerNumero(p, f, "duration", 0, &dur)) continue;
     pos /= 1000.0;
     dur /= 1000.0;
-    if (dur <= 1.0) continue;
+    if (!isfinite(pos) || !isfinite(dur) || dur <= 1.0 ||
+        pos >= (double)LLONG_MAX / 1000.0 || dur >= (double)LLONG_MAX / 1000.0) continue;
     memset(d, 0, sizeof *d);
+    d->perfil = perfil;
     // content_id pode vir composto de um cliente antigo ("tt123:4:9"): corta,
     // e aproveita temporada/episodio de la se as colunas nao vierem.
     { int tI = 0, eI = 0;
       prog_content_id(d->contentId, sizeof d->contentId, id, &tI, &eI);
-      d->temporada = (int)js_num(p, f, "season", -1);
-      d->episodio  = (int)js_num(p, f, "episode", -1);
+      if (!lerCoordenada(p, f, "season", &d->temporada) ||
+          !lerCoordenada(p, f, "episode", &d->episodio)) continue;
       if (d->episodio <= 0) { d->temporada = tI; d->episodio = eI; } }
     if (d->episodio <= 0) { d->temporada = 0; d->episodio = 0; }
     if (d->temporada < 0) d->temporada = 0;
@@ -89,7 +130,7 @@ int syncprog_puxar(void) {
     // escrita por este mesmo app trazia "tt123:4:9" em progress_key, e adotar
     // isso perpetuaria a duplicata que estamos consertando.
     prog_chave(d->chave, sizeof d->chave, d->contentId, d->temporada, d->episodio);
-    d->posSeg = pos;
+    d->posSeg = pos < 0 ? 0 : pos;
     d->durSeg = dur;
     d->lastWatchedMs = lerInstanteMs(p, f);
     d->pendente = 0;
@@ -97,29 +138,44 @@ int syncprog_puxar(void) {
   }
   free(r);
   // Vazio nao apaga nada: quem consome so aplica o que veio.
+  if (!nv_perfil_sessao_travar(sessao)) { free(novo); return -1; }
+  if (!pedidoContaAtual(&dono)) { nv_perfil_sessao_destravar(); free(novo); return -1; }
+  pthread_mutex_lock(&caixaTrava);
+  memcpy(caixa, novo, sizeof *novo * (size_t)k);
   nCaixa = k;
+  caixaSessao = sessao;
+  pthread_mutex_unlock(&caixaTrava);
+  nv_perfil_sessao_destravar();
+  free(novo);
   return k;
 }
 
-int syncprog_empurrar(void) {
-  static ProgRegistro pend[PROG_MAX];
-  static const char *chaves[PROG_MAX];
+int syncprog_empurrar_sessao(int perfil, uint64_t sessao) {
+  ProgRegistro *pend = malloc(sizeof *pend * PROG_MAX);
+  if (!pend) return -1;
+  SyncProgRemocao dono;
   Jsw w;
   char *r;
   int n, i, k = 0, st = 0;
 
-  n = prog_pendentes(pend, PROG_MAX);
-  if (n <= 0) return 0;   // vazio nunca vira push; delecao tem RPC propria
+  if (!nv_perfil_sessao_travar(sessao)) { free(pend); return -1; }
+  if (!syncprog_remocao_capturar(&dono) || dono.perfil != perfil || dono.sessao != sessao) {
+    nv_perfil_sessao_destravar(); free(pend); return -1;
+  }
+  n = perfil == perfis_ativo() ? prog_pendentes(pend, PROG_MAX) : 0;
+  nv_perfil_sessao_destravar();
+  if (n <= 0) { memset(&dono, 0, sizeof dono); free(pend); return 0; }   // vazio nunca vira push; delecao tem RPC propria
 
   jsw_iniciar(&w);
   jsw_obj_ini(&w);
-  jsw_ci(&w, "p_profile_id", perfis_ativo());
+  jsw_ci(&w, "p_profile_id", dono.perfil);
   jsw_cs(&w, "p_origin_client_id", dados_cliente_id());
   jsw_chave(&w, "p_entries");
   jsw_arr_ini(&w);
   for (i = 0; i < n; i++) {
     const ProgRegistro *p = &pend[i];
     char video[64];
+    if (p->perfil != dono.perfil) continue;
     if (p->durSeg < DUR_MINIMA_SEG) continue;   // ruido: o web tambem nao manda
     if (p->episodio > 0) snprintf(video, sizeof video, PREFIXO_EPISODIO "%d:%d", p->temporada, p->episodio);
     else                 snprintf(video, sizeof video, "%s", p->contentId);
@@ -135,22 +191,31 @@ int syncprog_empurrar(void) {
     jsw_ci(&w, "last_watched", p->lastWatchedMs > 0 ? p->lastWatchedMs : prog_agora_ms());
     jsw_cs(&w, "progress_key", p->chave);
     jsw_obj_fim(&w);
-    chaves[k++] = p->chave;
+    // Compactar so o que foi enviado preserva a copia usada para confirmar o
+    // push. k <= i, entao nao pisa em uma entrada ainda nao processada.
+    if (k != i) pend[k] = *p;
+    k++;
   }
   jsw_arr_fim(&w);
   jsw_obj_fim(&w);
-  if (k == 0) { jsw_livre(&w); return 0; }
-  r = sessao_rpc("sync_push_watch_progress", jsw_texto_final(&w), &st);
+  if (k == 0) { jsw_livre(&w); memset(&dono, 0, sizeof dono); free(pend); return 0; }
+  r = contaRpc(&dono, "sync_push_watch_progress", jsw_texto_final(&w), &st);
+  memset(dono.jwt, 0, sizeof dono.jwt);
   jsw_livre(&w);
   if (!ok2xx(r, st)) {
     printf("[sync] push de progresso falhou (HTTP %d)\n", st);
-    free(r);
+    free(r); free(pend);
     return -1;
   }
   free(r);
-  // So as chaves que foram: o player pode ter gravado outra durante a viagem.
-  prog_marcar_empurrados(chaves, k);
-  return k;
+  // A confirmacao de uma copia antiga nao quita uma escrita mais nova feita
+  // pelo player na mesma chave durante a viagem.
+  NvPerfilSessao agora = nv_perfil_sessao_ler();
+  if (nv_perfil_sessao_travar(agora)) {
+    if (pedidoContaAtual(&dono)) prog_confirmar_empurrados(pend, k);
+    nv_perfil_sessao_destravar();
+  }
+  free(pend); return k;
 }
 
 // APAGA UMA ENTRADA DE PROGRESSO NA CONTA. A outra metade do issue #22: sem
@@ -161,126 +226,105 @@ int syncprog_empurrar(void) {
 // `p_keys` e a chave de progresso (prog_chave), a mesma que o push manda em
 // `progress_key` — e nao o content_id. Mandar o id apagaria todos os episodios
 // da serie.
-int syncprog_remover(const char *chave) {
-  Jsw w;
-  char *r;
-  int st = 0, ok;
-  if (!chave || !chave[0]) return 0;
-  jsw_iniciar(&w);
-  jsw_obj_ini(&w);
-  jsw_chave(&w, "p_keys");
-  jsw_arr_ini(&w);
-  jsw_str(&w, chave);
-  jsw_arr_fim(&w);
-  jsw_obj_fim(&w);
-  r = sessao_rpc("sync_delete_watch_progress", jsw_texto_final(&w), &st);
-  jsw_livre(&w);
-  ok = ok2xx(r, st);
-  free(r);
-  printf("[sync] progresso removido da conta: %s -> %s (HTTP %d)\n",
-         chave, ok ? "ok" : "falhou", st);
-  fflush(stdout);
-  return ok;
+// The public backend contract and the official Android TV client both pass
+// p_profile_id here. Omitting it invokes the SQL default (profile 1).
+extern int sessao_identidade_local_copiar(char *, size_t, char *, size_t) NV_PERFIL_OPCIONAL;
+extern const char *sessao_usuario(void) NV_PERFIL_OPCIONAL;
+extern int sessao_token_copiar(char *, size_t) NV_PERFIL_OPCIONAL;
+extern void sessao_token_recusado(const char *) NV_PERFIL_OPCIONAL;
+extern char *nuvem_rpc_com(const char *, const char *, const char *, int *) NV_PERFIL_OPCIONAL;
+int syncprog_remocao_capturar(SyncProgRemocao *p) {
+  if (!p) return 0;
+  memset(p, 0, sizeof *p); p->sessao = nv_perfil_sessao_ler();
+  if (!nv_perfil_sessao_travar(p->sessao)) return 0;
+  p->perfil = perfis_ativo();
+  if (sessao_identidade_local_copiar)
+    p->autenticada = sessao_identidade_local_copiar(p->usuario, sizeof p->usuario, p->jwt, sizeof p->jwt);
+  else snprintf(p->usuario, sizeof p->usuario, "%s", sessao_usuario ? sessao_usuario() : ""); // account-free fixture
+  nv_perfil_sessao_destravar();
+  return 1;
 }
-
-// MARCA OU DESMARCA UM LOTE DE EPISODIOS NA CONTA.
-//
-// A outra metade do gesto: o Trakt e opcional, a conta Nuvio nem sempre, e quem
-// usa so a conta tambem tem de conseguir marcar um episodio. Uma RPC para o
-// lote inteiro, do mesmo jeito que o Trakt.
-//
-// AS DUAS FORMAS SAO DIFERENTES, e e o contrato quem manda (PLANO-CONTA-SYNC
-// secao 1.5): o push leva ITENS completos ({content_id, content_type, season,
-// episode, watched_at}) e o delete leva CHAVES ({content_id, season, episode}).
-// Mandar a forma do push no delete apagaria nada em silencio.
-int syncep_empurrar(const char *imdb, const char *tipo,
-                    const VistoPar *pares, int qtd, int visto) {
-  Jsw w;
-  char *r, id[24];
-  int i, st = 0, ok;
-  long long agora;
-  if (!imdb || !imdb[0] || !pares || qtd < 1) return 0;
-  for (i = 0; imdb[i] && imdb[i] != ':' && i < (int)sizeof id - 1; i++) id[i] = imdb[i];
-  id[i] = 0;
-  if (!id[0]) return 0;
-  agora = prog_agora_ms();
-
-  jsw_iniciar(&w);
-  jsw_obj_ini(&w);
-  // O PERFIL VAI NO CORPO, como no web (watchedItemsSyncService.js manda
-  // p_profile_id no push E no delete). Sem ele a linha caia no perfil padrao
-  // do servidor, nao no da pessoa que marcou.
-  jsw_ci(&w, "p_profile_id", perfis_ativo());
-  jsw_chave(&w, visto ? "p_items" : "p_keys");
-  jsw_arr_ini(&w);
-  for (i = 0; i < qtd; i++) {
-    jsw_obj_ini(&w);
-    jsw_cs(&w, "content_id", id);
-    if (visto) {
-      jsw_cs(&w, "content_type", tipo && tipo[0] ? tipo : "series");
-      jsw_ci(&w, "watched_at", agora);
+static int pedidoContaAtual(const SyncProgRemocao *p) {
+  if (!sessao_identidade_local_copiar) return 1; // isolated fixtures
+  char usuario[80], jwt[3000];
+  int atual = sessao_identidade_local_copiar(usuario, sizeof usuario, jwt, sizeof jwt) && !strcmp(usuario, p->usuario);
+  memset(jwt, 0, sizeof jwt); return atual;
+}
+static char *contaRpc(const SyncProgRemocao *p, const char *funcao, const char *corpo, int *status) {
+  char *r = NULL; *status = 0;
+  if (p->autenticada && p->jwt[0] && nuvem_rpc_com) {
+    const char *jwt = p->jwt;
+    char atualUsuario[80], novo[3000], confirmado[3000];
+    // Refresh is worker-only and only useful while the original account is
+    // still current. A profile switch alone keeps the immutable destination;
+    // a different login never supplies authentication for this old gesture.
+    if (sessao_identidade_local_copiar && sessao_token_copiar &&
+        sessao_identidade_local_copiar(atualUsuario, sizeof atualUsuario, novo, sizeof novo) &&
+        !strcmp(atualUsuario, p->usuario) && sessao_token_copiar(novo, sizeof novo) &&
+        sessao_identidade_local_copiar(atualUsuario, sizeof atualUsuario, confirmado, sizeof confirmado) &&
+        !strcmp(atualUsuario, p->usuario) && !strcmp(novo, confirmado)) jwt = confirmado;
+    r = nuvem_rpc_com(funcao, corpo, jwt, status);
+    if (*status == 401 && sessao_token_recusado && sessao_identidade_local_copiar &&
+        sessao_identidade_local_copiar(atualUsuario, sizeof atualUsuario, novo, sizeof novo) &&
+        !strcmp(atualUsuario, p->usuario) && !strcmp(novo, jwt)) {
+      sessao_token_recusado(jwt);
+      if (sessao_identidade_local_copiar(atualUsuario, sizeof atualUsuario, novo, sizeof novo) &&
+          !strcmp(atualUsuario, p->usuario) && strcmp(novo, jwt)) {
+        free(r); r = nuvem_rpc_com(funcao, corpo, novo, status);
+      }
     }
-    jsw_ci(&w, "season", pares[i].temporada);
-    jsw_ci(&w, "episode", pares[i].episodio);
-    jsw_obj_fim(&w);
+    memset(novo, 0, sizeof novo); memset(confirmado, 0, sizeof confirmado);
   }
-  jsw_arr_fim(&w);
-  jsw_obj_fim(&w);
-
-  r = sessao_rpc(visto ? "sync_push_watched_items" : "sync_delete_watched_items",
-                 jsw_texto_final(&w), &st);
-  jsw_livre(&w);
-  ok = ok2xx(r, st);
-  free(r);
-  printf("[sync] %s %d episodios de %s na conta -> %s (HTTP %d)\n",
-         visto ? "marcar" : "desmarcar", qtd, id, ok ? "ok" : "falhou", st);
-  fflush(stdout);
-  return ok;
+  // Existing isolated fixtures provide only sessao_rpc. A complete app always
+  // has local identity copy and never resolves a destination account here.
+  else if (!sessao_identidade_local_copiar && nv_perfil_sessao_atual(p->sessao) && p->perfil == perfis_ativo())
+    r = sessao_rpc(funcao, corpo, status);
+  return r;
+}
+int syncprog_remover_pedido(const SyncProgRemocao *p, const char *chave) {
+  if (!p || p->perfil < 1 || !chave || !*chave) return 0;
+  Jsw w; int st = 0; char *r = NULL;
+  jsw_iniciar(&w); jsw_obj_ini(&w);
+  jsw_ci(&w, "p_profile_id", p->perfil);
+  jsw_chave(&w, "p_keys"); jsw_arr_ini(&w); jsw_str(&w, chave); jsw_arr_fim(&w); jsw_obj_fim(&w);
+  r = contaRpc(p, "sync_delete_watch_progress", jsw_texto_final(&w), &st);
+  jsw_livre(&w); int ok = ok2xx(r, st); free(r);
+  printf("[sync] progresso removido da conta no perfil %d: %s -> %s (HTTP %d)\n", p->perfil, chave, ok ? "ok" : "falhou", st);
+  fflush(stdout); return ok;
+}
+int syncprog_remover_sessao(const char *chave, int perfil, uint64_t sessao, const char *usuario) {
+  SyncProgRemocao p;
+  if (!syncprog_remocao_capturar(&p)) return 0;
+  int correto = p.perfil == perfil && p.sessao == sessao && !strcmp(p.usuario, usuario ? usuario : "");
+  int ok = correto ? syncprog_remover_pedido(&p, chave) : 0;
+  memset(&p, 0, sizeof p); return ok;
+}
+int syncprog_remover(const char *chave) {
+  SyncProgRemocao p;
+  if (!syncprog_remocao_capturar(&p)) return 0;
+  int ok = syncprog_remover_pedido(&p, chave); memset(&p, 0, sizeof p); return ok;
 }
 
-// O TITULO INTEIRO NA CONTA: a linha de watched_items com season/episode
-// nulos, que e o que o web grava para filme (toRemoteItem) e o que
-// contalib_aplicar_vistos le como "titulo visto" (temporada e episodio 0).
-// Mesma tabela e mesmas duas RPCs dos episodios; nenhuma tabela nova. Delete e
-// so {content_id}, a forma de toDeleteKey para linha sem temporada.
-int syncvisto_titulo(const char *imdb, const char *tipo, int visto) {
-  Jsw w;
-  char *r, id[24];
-  int i, st = 0, ok;
-  if (!imdb || imdb[0] != 't') return 0;
-  for (i = 0; imdb[i] && imdb[i] != ':' && i < (int)sizeof id - 1; i++) id[i] = imdb[i];
-  id[i] = 0;
-  jsw_iniciar(&w);
-  jsw_obj_ini(&w);
-  jsw_ci(&w, "p_profile_id", perfis_ativo());
-  jsw_chave(&w, visto ? "p_items" : "p_keys");
-  jsw_arr_ini(&w);
-  jsw_obj_ini(&w);
-  jsw_cs(&w, "content_id", id);
-  if (visto) {
-    jsw_cs(&w, "content_type", tipo && !strcmp(tipo, "series") ? "series" : "movie");
-    jsw_cs(&w, "title", "");
-    jsw_chave(&w, "season");  jsw_nulo(&w);
-    jsw_chave(&w, "episode"); jsw_nulo(&w);
-    jsw_ci(&w, "watched_at", prog_agora_ms());
-  }
-  jsw_obj_fim(&w);
-  jsw_arr_fim(&w);
-  jsw_obj_fim(&w);
-  r = sessao_rpc(visto ? "sync_push_watched_items" : "sync_delete_watched_items",
-                 jsw_texto_final(&w), &st);
-  jsw_livre(&w);
-  ok = ok2xx(r, st);
-  free(r);
-  printf("[sync] %s titulo %s na conta -> %s (HTTP %d)\n",
-         visto ? "marcar" : "desmarcar", id, ok ? "ok" : "falhou", st);
-  fflush(stdout);
-  return ok;
+// Marcar/desmarcar visto na conta mora em contapend.c (jornal persistido).
+
+int syncprog_puxar(void) {
+  return syncprog_puxar_sessao(perfis_ativo(), nv_perfil_sessao_ler());
+}
+int syncprog_empurrar(void) {
+  return syncprog_empurrar_sessao(perfis_ativo(), nv_perfil_sessao_ler());
 }
 
 int syncprog_aplicar(int *casaram) {
-  int i, aceitos = 0, noCatalogo = 0;
+  int i, aceitos = 0, noCatalogo = 0, perfil = perfis_ativo();
+  NvPerfilSessao sessao = nv_perfil_sessao_ler();
+  if (casaram) *casaram = 0;
+  if (!nv_perfil_sessao_travar(sessao)) return 0;
+  pthread_mutex_lock(&caixaTrava);
+  if (caixaSessao != sessao) nCaixa = 0;
   for (i = 0; i < nCaixa; i++) {
+    // A resposta pertence ao perfil que fez o pedido. A escolha na TV pode
+    // mudar enquanto a RPC esta em voo ou antes deste consumo no fio principal.
+    if (caixa[i].perfil != perfil) continue;
     if (!prog_aplicar_remoto(&caixa[i])) continue;
     aceitos++;
     { int idx = cat_indice_por_imdb(caixa[i].contentId);
@@ -294,8 +338,17 @@ int syncprog_aplicar(int *casaram) {
     printf("[sync] progresso: %d linhas, %d aceitas, %d no catalogo\n", nCaixa, aceitos, noCatalogo);
   nCaixa = 0;
   if (casaram) *casaram = noCatalogo;
+  pthread_mutex_unlock(&caixaTrava);
+  nv_perfil_sessao_destravar();
   return aceitos;
 }
 
-int  syncprog_puxadas(void) { return nCaixa; }
-void syncprog_esquecer(void) { nCaixa = 0; }
+int syncprog_puxadas(void) {
+  pthread_mutex_lock(&caixaTrava);
+  int n = nv_perfil_sessao_atual(caixaSessao) ? nCaixa : 0;
+  pthread_mutex_unlock(&caixaTrava);
+  return n;
+}
+void syncprog_esquecer(void) {
+  pthread_mutex_lock(&caixaTrava); nCaixa = 0; pthread_mutex_unlock(&caixaTrava);
+}

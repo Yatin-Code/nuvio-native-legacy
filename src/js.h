@@ -13,11 +13,23 @@
 // respeitando aspas e escapes.
 const char *js_fim(const char *p);
 
+// Presenca da chave em [ini,fim), inclusive valores null ou malformados.
+// Permite distinguir um campo ausente de um numero invalido sem converter.
+int js_tem(const char *ini, const char *fim, const char *chave);
+
 // Valor textual de "chave" dentro de [ini,fim). 1 se achou. Escapes \uXXXX
-// viram espaco de proposito: os textos vem cheios de emoji e sao so para
-// exibicao — decodificar UTF-16 aqui seria trabalho sem retorno.
+// e pares de substitutos viram UTF-8; strings truncadas devolvem 0.
+// `fim` NULL significa ate o NUL. O limite vale tambem para o valor.
+// Campo ausente, de outro tipo ou truncado preserva o valor previo de dst.
 int js_texto(const char *ini, const char *fim, const char *chave,
              char *dst, size_t tam);
+// Igual a js_texto, mas mantem as quebras de linha (\n) do valor.
+int js_texto_linhas(const char *ini, const char *fim, const char *chave,
+                    char *dst, size_t tam);
+
+// O mesmo decodificador para uma string JSON ja na mao: `p` aponta para a aspa
+// de abertura (elemento de array, sem chave para js_texto achar).
+int js_cadeia(const char *p, char *dst, size_t tam);
 
 // Numero de "chave". Exige que o caractere apos a chave seja digito/sinal, o
 // que evita casar com um OBJETO de mesmo nome — o caso real e
@@ -31,6 +43,9 @@ const char *js_array(const char *ini, const char *fim, const char *chave);
 // Proximo elemento do array a partir do fim do anterior; NULL no fim.
 const char *js_prox(const char *fimAnterior);
 
+// Reject season-per-video numbering only with repeated episode 1 and year-only dates.
+int js_videos_temporadas_falsas(const char *corpo);
+
 // Primeiro elemento de um array que e a RAIZ do documento. Toda RPC do
 // Supabase responde `[{...},{...}]` sem chave em volta, e js_array — que
 // procura por nome — nao tem o que procurar ali. Avance com js_prox.
@@ -40,6 +55,7 @@ const char *js_raiz_array(const char *corpo);
 // Existe para o `credential_json` das credenciais: o app repassa aquele objeto
 // ao servidor sem interpretar, e reconstrui-lo campo a campo perderia tudo que
 // esta versao do app nao conhece. 1 se achou e coube.
+// Falha preserva o valor previo de dst.
 int js_bruto(const char *ini, const char *fim, const char *chave,
              char *dst, size_t tam);
 

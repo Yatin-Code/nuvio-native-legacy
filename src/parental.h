@@ -19,5 +19,8 @@ void parental_pedir(const char *imdb);
 int  parental_n(void);
 const char *parental_rotulo(int i);
 const char *parental_gravidade(int i);
+#ifdef NV_SHOT_HOOKS
+void parental_shot(const char *const *rot, const char *const *grav, int n);   // capturas
+#endif
 
 #endif

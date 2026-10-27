@@ -1,3 +1,4 @@
+#include "arteurl.h"
 // Catalogo de titulos vindo de um arquivo, no lugar das listas fixas no codigo.
 //
 // Existe porque testar layout com nomes inventados esconde problemas reais: os
@@ -7,6 +8,8 @@
 // lugar do nome em texto.
 #ifndef NV_CATALOGO_H
 #define NV_CATALOGO_H
+#include "addonurl.h"
+#include <stdint.h>
 
 // 40 titulos hoje (14 do historico do dono + 26 dos catalogos). A folga evita
 // o corte silencioso que ja aconteceu: com 32 os oito ultimos sumiam sem aviso.
@@ -17,7 +20,17 @@
 // o item em si custa ~3,5 KB de texto.
 //
 // CAT_MAX sobrevive so como teto de seguranca contra resposta absurda.
+//
+// ANDROID: 8000. O dono liberou fileiras "ilimitadas" so no Android (2.0.4):
+// CAT_FIL_MAX la e 224, e 224 fileiras x 24 itens = 5376 titulos, mais o
+// "Continuar assistindo" e as listas. O vetor continua crescendo SOB DEMANDA
+// (garantirEspaco dobra a partir de 64), entao o numero maior nao custa nada a
+// quem tem 7 fileiras; so deixa de cortar quem tem 150.
+#ifdef NV_ANDROID
+#define CAT_MAX 8000
+#else
 #define CAT_MAX 2000
+#endif
 #define CAT_TEMP_MAX 64
 // Elenco guardado por titulo. O Cinemeta traz 3-5 nomes no `cast` do meta e era
 // isso que a tela mostrava (issue #94); quem completa a fileira e o TMDB, que
@@ -35,11 +48,13 @@ typedef struct {
   char backdropCatalogo[512]; // background vindo do addon/Cinemeta
   char backdropTmdb[512];     // backdrop vindo do TMDB
   char backdropTrakt[512];    // fanart vindo do Trakt
-  // 1024 e nao 512 (#200): a URL de cartaz que o AIOMetadata monta para o
-  // PostersPlus passa de 700 bytes e o corte calado levava o idioma embora.
-  // Mesmo teto do cache de textura (NV_TEX_URL_MAX, tex_cache.h).
-  char poster[1024];
+  // #433: PostersPlus envia 1173 bytes; ate 2047 bytes mais NUL.
+  // Mesmo teto nas copias e no cache de textura (arteurl.h).
+  char poster[NV_ARTE_URL_MAX];
   char logo[512];      // vazio quando o titulo nao tem logo
+  // Language evidence belongs to this exact logo, never to another selection.
+  char logoIdioma[8];
+  char logoIdiomaUrl[512];
   char titulo[160];
   char genero[160];    // "Programa de TV · Drama · Misterio"
   char meta[96];       // "2022 · 3 temporadas"
@@ -81,6 +96,9 @@ typedef struct {
   // filme mostra so o tempo que falta. Temporada/episodio ficam em 0 no filme,
   // e e isso que separa os dois casos no desenho.
   int  temporada, episodio;
+  // Exact remote episode identity. The visible/source season and episode stay
+  // in their provider's numbering; this field is only a proven bridge.
+  int  tvdbEp;
   int  restanteMin;
   char nomeEpisodio[120]; // titulo do episodio em andamento, nunca nome do arquivo
   // Temporadas que a serie tem, na ordem. Sai do campo `videos` do Cinemeta,
@@ -94,11 +112,13 @@ typedef struct {
   // a nota sobre sizeof(CatItem) abaixo).
   int  temporadas[CAT_TEMP_MAX];
   int  nTemporadas;
+  int  epsParciais; // lista antecipada visivel; ainda falta concluir a mescla
   // Vem do Trakt: 1 se esta na watchlist do dono, 1 se esta na colecao dele.
   // Ficam no item e nao numa tabela a parte da biblioteca porque o catalogo e
   // reconstruido da rede — uma tabela por indice apontaria para outro titulo
   // depois da primeira atualizacao.
   int  naLista, naColecao;
+  unsigned listaFontes; // AJ_SALVOS_* bits; naLista remains shared with Agenda.
   // 64 E NAO 16. O campo nasceu para "tt11280740", e 16 bastava. O id de um
   // addon de canal e "cs:channel:globo-tv-integracao-ituiutaba" — 16 bytes
   // cortavam TODO canal da Globo em "cs:channel:glob": todos viravam o mesmo
@@ -114,6 +134,7 @@ typedef struct {
   // fotosDoElenco em descoberta.c). Era descartado; e por ele que se chega a
   // COLECAO do filme, que o TMDB so expoe por id proprio.
   long tmdb;
+  int posCreditos; // TMDB 179430/179431: manter o video ate o fim real
   // QUANDO isto foi visto pela ultima vez, em ms desde a epoca. 0 = nao se sabe.
   //
   // Existe para ordenar a fileira "Continuar assistindo", que agora une DUAS
@@ -136,6 +157,7 @@ typedef struct {
   // conheceu. Vazio = origem desconhecida (Trakt, Salvos, progresso, pacote).
   // Mudar o tamanho invalida o cache em disco sozinho (ver sizeof(CatItem)).
   char origem[96];
+  int ranking; // Posicao original no catalogo, antes dos filtros.
 } CatItem;
 
 // Um episodio de serie. Vem de art/episodios.txt, gerado a partir do campo
@@ -161,11 +183,24 @@ typedef struct {
   // cache nenhum: o unico dump binario e o do CatItem (catalogo-rede.bin) e
   // episodios.txt e texto, campo a campo — ambos leem o que sabem ler.
   int  nota;
+  int  notaImdb;       // Episode IMDb rating x10; 0 = unknown, separate from TMDB.
   // O ID DO VIDEO como o /meta o publicou ("kitsu:41370:5", "tt123:1:2"). E com
   // ele que se pede fonte (/stream/series/<id>.json): o addon de anime tem id
   // proprio por episodio, e montar "<titulo>:<T>:<E>" na mao so acerta no IMDb.
   // Vazio = o meta nao trouxe; ver cat_id_stream.
   char vid[64];
+  // O MESMO EPISODIO NO TMDB (2.0.3): id da serie e o par temporada/episodio
+  // que casou em /tv/<id>/season/<n> (desc_tmdb_notas_temporada_ex). 0 = o
+  // TMDB nao confirmou. Com ele o TheIntroDB e consultado por tmdb_id, sem o
+  // remapeamento IMDb->TMDB que a API faz (intro.h). Nao vai para o disco.
+  long tmdbSerie;
+  int  tmdbT, tmdbE;
+  // Data ORIGINAL do metadata, antes de desc_data_extenso traduzir `data`.
+  // As regras de estreia usam este ISO, nunca o texto apresentado na tela.
+  // Episodios do pacote antigo deixam vazio e conservam a leitura de `data`.
+  // CatEp nao tem dump binario; o cache de metadata guarda o JSON original.
+  char dataIso[32];
+  int  tvdbEp; // exact episode identity published by metadata; 0 = unproven
 } CatEp;
 
 // Le <dir>/catalogo.txt. Devolve quantos itens carregou (0 = nenhum, e quem
@@ -197,7 +232,11 @@ int  cat_carregar(const char *dirArte);
 // pedidos e os 14,5 s medidos acima. A escolha fica dentro de catalogo.c, e nao
 // nos chamadores, porque quem le (home.c) e quem grava (descoberta.c) sao
 // arquivos diferentes e tem de concordar. Ver a nota longa em caminhoCache.
+// App opt-in keeps one validated disk snapshot per account/profile.
+void cat_cache_perfis(int ligado);
 int  cat_gravar_cache(const char *dirArte);
+int  cat_gravar_cache_se_sessao(const char *dirArte, const char *donoEsperado,
+                                  int perfilEsperado, uint64_t sessaoEsperada);
 int  cat_gravar_cache_se_identidade(const char *dirArte, const char *donoEsperado,
                                     int perfilEsperado);
 // Devolve 1 se carregou. Chamar DEPOIS de cat_carregar: ele substitui o
@@ -211,7 +250,7 @@ int  cat_ler_cache(const char *dirArte);
 // trocar de conta mostra a home da conta ANTERIOR — watchlist, continuar
 // assistindo, feed de amigos com nome e avatar — ate a rede substituir.
 //
-// E o dano nao para no estetico: cada CatFileira grava `base[600]`, campo desse
+// E o dano nao para no estetico: cada CatFileira grava `base` (addonurl.h), campo desse
 // tamanho porque o Xperience embute um JWT no CAMINHO do addon (ver a nota do
 // campo). Um cache que sobrevive ao logout e credencial do usuario anterior
 // deixada em disco, do mesmo tipo que fez collections.json ser excluido do
@@ -263,6 +302,16 @@ int  cat_blocos_aposentados(void);
 void cat_dir_gravacao(const char *dir);
 
 int cat_indice_por_imdb(const char *imdb);
+// Copia independente por id base + tipo, sob a trava dos publicadores.
+// Para fios que precisam reaproveitar metadados sem guardar cat_item().
+// Prefere a copia com poster; 0 quando o titulo ainda nao esta no catalogo.
+int cat_copiar_por_id(const char *id, const char *tipo, CatItem *saida);
+// Como a busca por IMDb, mas exige um tipo certo (movie/series/show).
+// Nao reutiliza uma copia de filme para um pedido de serie do mesmo id.
+int cat_indice_por_imdb_tipo(const char *imdb, const char *tipo);
+// Tipo explicito e sem conflito entre as copias do mesmo titulo. Copia sob
+// a trava; desconhecido ou filme/serie contraditorios devolvem 0.
+int cat_tipo_confirmado_por_id(const char *id, char *tipo, unsigned tam);
 // Como cat_indice_por_imdb, mas fica em `preferido` enquanto ele for o mesmo
 // titulo e prefere uma copia COM episodios (#151; ver catalogo.c).
 int cat_indice_titulo(const char *imdb, int preferido);
@@ -291,13 +340,15 @@ int cat_acrescentar_lote(const CatItem *v, int qtd, int *saidaIdx);
 // quantos entraram.
 int cat_mesclar_listas(const CatItem *v, int qtd);
 
-// Atualiza o espelho local de "esta na watchlist". A verdade e o Trakt, mas
-// esperar o proximo ciclo de descoberta para o botao mudar de cara faria o
-// toque parecer sem efeito.
+// Update effective-source membership on every copy of the indexed title.
+// Keep unrelated remote sources; items without an ID update only this index.
 void cat_definir_na_lista(int i, int naLista);
 // Por TITULO, em todas as copias do catalogo (ver catalogo.c).
 int  cat_definir_na_lista_imdb(const char *imdb, int naLista);
 int  cat_imdb_na_lista(const char *imdb);   // alguma copia do titulo esta salva
+int  cat_imdb_na_lista_fonte(const char *imdb); // salvo pela fonte da Biblioteca
+// Membership using the caller's captured effective source.
+int  cat_imdb_na_lista_na_fonte(const char *imdb, int fonte);
 
 // Grava onde o dono parou NESTE app: escreve em progresso.c (pendente, com a
 // chave do web) e atualiza o item. E o caminho do player.
@@ -316,9 +367,26 @@ int cat_tirar_item_da_fileira(int indice);
 // a home remonta no mesmo quadro. Devolve quantos cards sairam.
 int cat_tirar_continuar(const char *imdb);
 void cat_zerar_progresso(int indice);
+// TITULO INTEIRO VISTO (#212): o selo do cartaz e o olho do detalhe. Historico
+// conhecido (Trakt, conta, acao da pessoa) manda; sem ele, progresso >= 90 so
+// em filme. O(1), pode ser chamada por cartaz em todo quadro.
+int cat_visto(const CatItem *c);
+// A fronteira efetiva de conta/perfil troca o mapa em O(HIST_BALDES), uma
+// vez; repetir a mesma identidade conserva provas locais e de outras fontes.
+void cat_historico_contexto(const char *usuario, int perfil);
+unsigned long long cat_historico_geracao(void);
+int cat_historico_estado_id(const char *imdb, const char *tipo);
+int cat_historico_estado_item(int indice);
+void cat_historico_definir_id(const char *imdb, const char *tipo, int visto);
+// Worker captura geracao ANTES da rede. A resposta so pertence ao mapa se a
+// identidade ainda for a mesma; verificacao e escrita compartilham a trava.
+int cat_historico_definir_se_geracao(const char *imdb, const char *tipo,
+                                     int visto, unsigned long long geracao);
 
 void cat_salvar_progresso(int indice, double posSeg, double durSeg);
-void cat_salvar_progresso_ep(int indice, double posSeg, double durSeg, int temporada, int episodio);
+// `tocou`: ver ProgRegistro (progresso.h).
+int cat_salvar_progresso_ep(int indice, double posSeg, double durSeg, int temporada, int episodio,
+                             int tocou);
 
 // So a MEMORIA do item (barra, minutos restantes, episodio em andamento), sem
 // tocar em arquivo. E o que o sync usa para o que veio da conta — a decisao de
@@ -358,10 +426,24 @@ void cat_definir(const CatItem *lista, int n);
 // mexer em mais nada. CONTA, nao medicao em TV: o custo de uma fileira e o dos
 // seus itens, e CatItem pesa 15,6 KB; 40 fileiras x 24 itens = 960 titulos
 // (~15 MB de catalogo) contra CAT_MAX = 2000, entao o vetor de itens continua
-// sendo o teto de verdade e nao estoura. Cada CatFileira pesa ~1 KB: os vetores
-// de fileira (40 x 1 KB = 40 KB) sao static onde eram de pilha — ver
+// sendo o teto de verdade e nao estoura. Cada CatFileira pesa ~2,5 KB (era ~1 KB
+// ate a base passar a NV_ADDON_URL_MAX, #201): os vetores
+// de fileira (40 x 2,5 KB = 100 KB) sao static onde eram de pilha — ver
 // cat_ler_cache, cat_trocar_continuar e montar().
+//
+// ANDROID (2.0.4, pedido do dono: "deixar ilimitado para android as fileiras"):
+// 224 = FIL_LIMITE_MAX do Android (200, o "Ilimitado" de Ajustes) + 24 de folga
+// para as fixas (Continuar, social, servidor pessoal). Os vetores de fileira
+// continuam static (BSS, nunca pilha): 224 x 2,5 KB = 560 KB por vetor, e so as
+// paginas das fileiras de fato escritas viram memoria residente. O custo real e
+// o dos itens: 100 fileiras x 24 x 15,6 KB = ~37 MB de catalogo (ver fileiras.h).
+// webOS, Tizen, .wgt e .tpk seguem com 40 — o _Static_assert de descoberta.c
+// vale nos dois lados.
+#ifdef NV_ANDROID
+#define CAT_FIL_MAX 224
+#else
 #define CAT_FIL_MAX 40
+#endif
 
 typedef struct {
   char chave[192];   // homeCatalogKey: <addonId>_<tipo>_<catalogoId>
@@ -375,7 +457,12 @@ typedef struct {
   // caracteres. Com 300 ela era truncada em silencio, a URL montada aqui virava
   // outra coisa e o catalogo respondia sem `metas` — a tela "Ver tudo" abria
   // vazia sem nenhum erro. addons.c ja usa 600 pelo mesmo motivo.
-  char base[600];
+  // 600 TAMBEM NAO BASTAVA (#201): a URL do Comet tem 870. O tamanho agora e o
+  // de addonurl.h, o mesmo de quem guarda a lista. O campo vai CRU para o
+  // catalogo-rede.bin; o cabecalho do arquivo leva sizeof(CatFileira)
+  // (tamFileira), entao o cache de uma build de 600 e recusado e apagado na
+  // primeira leitura, e a home daquela abertura vem da rede.
+  char base[NV_ADDON_URL_MAX];
   char catId[96];
   // Janela no vetor de itens. As fileiras NAO tem vetor proprio: apontam para
   // o catalogo unico, que e o que a biblioteca e a busca varrem. Duplicar os
@@ -384,10 +471,17 @@ typedef struct {
   // 1 = resposta valida explicitamente vazia. A linha permanece na
   // estrutura para que uma resposta parcial nao desloque as seguintes.
   int estado;
+  // Social-only account generation captured BEFORE fetching its source data.
+  // Metadata/progress revisions never make an old account row current.
+  unsigned socialGeracao;
 } CatFileira;
 
 int cat_n_fileiras(void);
 const CatFileira *cat_fileira(int r);   // NULL fora da faixa
+// Empty or only Continue Watching/social: startup may publish catalogue rows
+// as they arrive. Any other row, saved-list marker or unassigned item is warm.
+// One coherent snapshot under the publication mutex; no transient n==0 read.
+int cat_home_apenas_fixas(void);
 int cat_copiar_fileira(const char *chave, CatItem *itens, int max,
                        CatFileira *meta);
 
@@ -426,10 +520,33 @@ void cat_definir_tudo(const CatItem *lista, int qtd,
 
 // Substitui os episodios de UM titulo. Chamado quando o detalhe abre.
 void cat_definir_episodios(int indiceItem, const CatEp *lista, int n);
+// So o bit da cena pos-creditos (TMDB 179430/179431), pelo id do titulo.
+void cat_marcar_pos_creditos(const char *imdb, int pos);
+// Cache a resolved cast ID only if title and person still match; no other edits.
+int cat_elenco_tmdb(int indice, const char *imdb, const char *tipo,
+                    const char *nome, long tmdb);
 
 // Substitui UM item, preservando o resto. Usado quando o detalhe abre e traz
 // elenco, direcao e temporadas que o catalogo da fileira nao tinha.
 void cat_atualizar_item(int indice, const CatItem *novo);
+// O mesmo, mas as abas de temporada (temporadas/nTemporadas) ficam as que o item
+// JA tem, lidas sob a trava. Para a cauda de enriquecimento (elenco, arte) do
+// detalhe, que roda depois de soltar o fio de episodios: um fio mais novo do
+// mesmo titulo pode ter publicado outra lista com outras abas (#372).
+void cat_atualizar_item_sem_abas(int indice, const CatItem *novo);
+// Copia do item `indice` sob a trava dos publicadores; 0 se o indice nao existe.
+// Para fios fora do desenho (o ponteiro de cat_item() so vale no quadro).
+int  cat_copiar_item(int indice, CatItem *saida);
+// So a sinopse (e o titulo, se vazio) de `indice`, se ele ainda e `imdb` e
+// ainda nao tem sinopse. Nao toca em mais nada. 1 = escreveu.
+int  cat_completar_sinopse(int indice, const char *imdb, const char *sinopse,
+                           const char *titulo);
+// Logo, ano, nota e elenco primarios, apenas onde faltam; revalida id+tipo.
+int  cat_completar_basico(int indice, const CatItem *item);
+// Texto localizado de `indice` (titulo, sinopse, logo, fundo), se ele ainda e
+// `imdb`. Campo vazio nao apaga; nada mais do item e tocado. 1 = mudou.
+int  cat_aplicar_localizado(int indice, const char *imdb, const char *titulo,
+                            const char *sinopse, const char *logo, const char *fundo);
 
 // Titulos parecidos com o de `indice`: mesmo tipo (filme/serie) e pelo menos um
 // genero em comum, os de nota mais alta primeiro. Devolve quantos escreveu.
@@ -443,6 +560,17 @@ int           cat_similares(int indice, int *saida, int max);
 // Quantas vezes o catalogo INTEIRO foi trocado. Muda => todo indice guardado
 // fora daqui deixou de valer, e as faixas de episodio foram zeradas.
 unsigned      cat_revisao(void);
+// Sobe sempre que alguma faixa de episodio e apagada (troca de bloco OU a
+// volta do vetor comum de episodios, que NAO mexe em cat_revisao). Quem mostra
+// a lista de uma serie repede quando ela muda e a lista dele esta vazia.
+unsigned      cat_geracao_episodios(void);
+// Versao de CONTEUDO dos episodios: sobe a CADA escrita (redefinicao da
+// lista, item tirado do meio, zerarFaixas, wrap). Para CACHE derivado dos
+// episodios (duracao esperada da fonte) recalcular em O(1) — sem repedir
+// nada pela rede, ao contrario de cat_geracao_episodios.
+unsigned      cat_versao_episodios(void);
+// Relogio monotonico em ms, para os marcadores [perf] da publicacao.
+double        cat_relogio_ms(void);
 // Sobe a cada mudanca em QUALQUER item (marca de lista, progresso, item novo,
 // substituido ou removido), alem de toda troca do bloco. Barata de ler por
 // quadro; quem deriva uma lista do catalogo reconstroi so quando ela muda.
@@ -455,5 +583,13 @@ const CatEp  *cat_episodio(int indiceItem, int i);   // indice circular; NULL se
 // dele "<id>:<E>" (a convencao do Kitsu/MAL). t<=0 ou e<=0 = sem episodio: devolve o id
 // do titulo. 1 se escreveu algo.
 int           cat_id_stream(int indiceItem, int t, int e, char *dst, unsigned tam);
+// Exact-identity lookups are accepted only after the final episode list has
+// replaced any provisional early list. Conflicting assignments return 0.
+int           cat_episodios_finais(int indiceItem, const char *id);
+int           cat_episodio_tvdb(int indiceItem, const char *id, int t, int e);
+int           cat_episodio_tvdb_qualquer(int indiceItem, const char *id, int t, int e);
+int           cat_episodio_existe_final(int indiceItem, const char *id, int t, int e);
+int           cat_episodio_por_tvdb(int indiceItem, const char *id, int tvdb,
+                                    int *t, int *e);
 
 #endif

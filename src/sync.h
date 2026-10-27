@@ -9,9 +9,14 @@
 // ONDE ELE ESCREVE E ONDE NAO ESCREVE — a distincao mais importante do arquivo:
 //
 //   PUXA E EMPURRA (o app tem a informacao de verdade):
-//     addons, credenciais (Trakt, TMDB, mdblist), progresso de reproducao e —
+//     credenciais (Trakt, TMDB, mdblist), progresso de reproducao e —
 //     desde o #85 — os AJUSTES DO PERFIL, costurados no blob que a conta ja
 //     tinha (ver sync_proteger_ajustes_locais e ajustes_mesclar_blob).
+//   ADDONS SAO MAO UNICA (#360, 11/10/2026): a TV so PUXA a lista da conta.
+//     Nada daqui sobe — sync_push_addons e a pendencia de edicao local de
+//     addons deixaram de existir: o push substituia a lista inteira do perfil
+//     e era a origem das duplicatas e remocoes cruzadas do relato. A mudanca
+//     local vale nesta TV ate o proximo pull.
 //
 // MEDIDO na conta do dono: sync_pull_provider_credentials devolve animeskip,
 // debrid:premiumize, debrid:realdebrid, debrid:torbox, introdb, mdblist e tmdb
@@ -38,6 +43,7 @@
 // Todas as chamadas de rede acontecem num fio proprio. A UI so consulta estado.
 #ifndef NV_SYNC_H
 #define NV_SYNC_H
+#include <stdint.h>
 
 typedef enum {
   SYNC_PARADO = 0,
@@ -49,6 +55,29 @@ typedef enum {
 // Dispara um ciclo completo (puxa e, onde faz sentido, empurra). Volta na hora.
 // Idempotente enquanto um ciclo estiver em andamento.
 void sync_iniciar(void);
+// Confirmed profile opening: clear live private data, keep durable settings.
+void sync_abrir_sessao(int perfilAnterior);
+
+typedef struct {
+  uint64_t sessao;
+  int perfil;
+  char usuario[80];
+} SyncCredencialPedido;
+int sync_credencial_pedido(SyncCredencialPedido *pedido);
+int sync_empurrar_credencial_pedido(const SyncCredencialPedido *pedido,
+                                  const char *provider, const char *credJson);
+
+// SINCRONIZAR ADD-ONS A MAO (#360). Pede uma volta da conta ja (nao espera os 5
+// minutos) e guarda o resultado para a tela de Add-ons dizer o que mudou. A volta
+// e a mesma de sempre, so que marcada: quando acaba, compara a lista de add-ons de
+// antes com a de depois. Sem conta logada nao faz nada (devolve 0).
+int  sync_manual_addons(void);
+// 0 = nada pedido; 1 = rodando; 2 = acabou bem (add/rem/mud preenchidos: quantos
+// entraram, sairam e mudaram de estado ou ordem); 3 = falhou ou o servidor esta
+// fora. Os estados 2 e 3 sao lidos UMA vez (ilhasinais.c, que avisa) e voltam a 0.
+int  sync_manual_addons_estado(int *add, int *rem, int *mud);
+// So consulta, nao consome: a tela de Add-ons desenha o botao ocupado.
+int  sync_manual_addons_rodando(void);
 
 SyncEstado  sync_estado(void);
 const char *sync_resumo(void);   // uma linha para a tela de ajustes
@@ -56,7 +85,9 @@ const char *sync_resumo(void);   // uma linha para a tela de ajustes
 // Marca uma superficie como suja: o proximo ciclo empurra. Chamar quando o
 // usuario mexe em algo local.
 void sync_sujar_progresso(void);
-void sync_sujar_addons(void);
+// The user toggled the addon at `url`: queue that flag for a row-level write
+// and keep it across restart. Membership and order remain the account's.
+void sync_sujar_addons(const char *url);
 
 // Ultimo instante em que um ciclo terminou bem (SDL_GetTicks); 0 se nunca.
 unsigned sync_ultimo_ok(void);
@@ -73,6 +104,10 @@ unsigned sync_ultimo_ok(void);
 // colateral (login impossivel, sessao anonima, sync da conta errada) pareceu
 // bug do app. O ciclo tambem so roda com o app em uso, nunca durante o player.
 #define SYNC_INTERVALO_MS 300000u
+// Com o servidor da conta fora do ar (sync_servidor_fora), a proxima volta
+// sai 1 minuto depois, e nao 5: e ela que substitui a copia local pela conta
+// quando ele voltar. O freio de nuvem.c continua valendo por cima.
+#define SYNC_RETENTA_MS 60000u
 
 // Chamar uma vez por quadro. Nao bloqueia: so recolhe o resultado do fio e
 // aplica no app (lista de addons, credencial do Trakt, progresso).
@@ -125,6 +160,9 @@ void sync_trocar_perfil(int antes);
 // 1 quando o ultimo ciclo terminado e aplicado e do perfil ativo e nao ha
 // ciclo no ar. E a metade "conta" de "a home do perfil novo esta pronta".
 int  sync_perfil_pronto(void);
+// Addons, colecoes e ordem deste perfil ja podem alimentar a descoberta;
+// progresso e pushes podem continuar sem prender a Home.
+int  sync_home_fontes_prontas(void);
 
 // A pessoa mudou um ajuste NESTA TV. Faz duas coisas, e as duas de proposito:
 //
@@ -145,6 +183,9 @@ int  sync_perfil_pronto(void);
 // Limpa-se em sync_reaplicar_ajustes (login / troca de perfil / "Atualizar"),
 // que tambem descarta a pendencia de subida — ela e do perfil anterior.
 void sync_proteger_ajustes_locais(void);
+// 2.1: marca ajustes pendentes de OUTRO perfil (copia/edicao do administrador).
+// So escreve a marca local; o push acontece quando aquele perfil for o ativo.
+void sync_marcar_ajustes_pendentes_perfil(int perfil);
 
 // Manda uma credencial de servico para a CONTA, para os outros aparelhos da
 // pessoa herdarem o vinculo. `credJson` e o objeto pronto (o servidor guarda o
@@ -158,6 +199,20 @@ void sync_proteger_ajustes_locais(void);
 // "trakt" este servidor responde 400 22023 "Unsupported provider credential",
 // e o proprio app web documenta a mesma recusa (traktCredentialSyncService.js).
 int  sync_empurrar_credencial(const char *provider, const char *credJson);
+
+// SERVIDOR DA CONTA FORA DO AR (#215). Estado do ultimo ciclo aplicado:
+//   sync_servidor_fora: 0 quando o servidor respondeu; senao o HTTP da falha
+//     (5xx, 429), ou -1 quando nao houve resposta;
+//   sync_usando_copia: 1 quando, por causa disso, os addons/colecoes/biblioteca/
+//     vistos em uso sao a ULTIMA copia boa guardada neste aparelho
+//     (contacache.h); sync_copia_quando = de quando ela e (epoch).
+// Volta a 0 sozinho no primeiro ciclo em que o servidor responde.
+int  sync_servidor_fora(void);
+int  sync_usando_copia(void);
+long sync_copia_quando(void);
+// Os addons em uso, pelo mesmo motivo: 0 = vieram da conta; 1 = da copia
+// (servidor fora); 2 = o servidor falhou e nao ha copia neste aparelho.
+int  sync_addons_fora(void);
 
 void sync_encerrar(void);
 

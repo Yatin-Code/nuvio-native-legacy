@@ -14,6 +14,7 @@
 //
 //   bash tests/perfilsel.sh --capturas
 #include "perfilsel.h"
+#include "nvtmp.h"
 #include "perfis.h"
 #include "dados.h"
 #include "gfx.h"
@@ -21,6 +22,8 @@
 #include "tex_cache.h"
 #include "catalogo.h"
 #include "ajustes.h"
+#include "gpunivel.h"
+#include "progresso.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <assert.h>
@@ -88,6 +91,15 @@ static void ajustesDeTeste(int reduzidas) {
   f = fopen(caminho, "w");
   assert(f);
   fprintf(f, "animacoes %d\n", reduzidas);
+  // Convencoes das capturas: NUVIO_SHOT_FONTE=3 (Montserrat, a da TV),
+  // NUVIO_PERFILSEL_FUNDO (0 mural, 1 listras, 2 arte do perfil) e
+  // NUVIO_PERFILSEL_VIDRO (0 vidro, 1 solido).
+  if (getenv("NUVIO_SHOT_FONTE") && *getenv("NUVIO_SHOT_FONTE"))
+    fprintf(f, "fonteInterface %d\n", atoi(getenv("NUVIO_SHOT_FONTE")));
+  if (getenv("NUVIO_PERFILSEL_FUNDO"))
+    fprintf(f, "perfilFundoLocal %d\n", atoi(getenv("NUVIO_PERFILSEL_FUNDO")));
+  if (getenv("NUVIO_PERFILSEL_VIDRO"))
+    fprintf(f, "vidroLocal %d\n", atoi(getenv("NUVIO_PERFILSEL_VIDRO")));
   fclose(f);
   ajustes_dir(dados_dir());
 }
@@ -226,11 +238,37 @@ int main(void) {
   escreverCache("1\t0\t1\t0\t#1E88E5\tHenrique\t\tdeploy/app/art/03.jpg\n", 1);
   perfis_carregar_ativo();
   ajustesDeTeste(0);
+  if (getenv("NUVIO_PERFILFUNDO_TEST")) {
+    const char *level = getenv("NUVIO_PERFILFUNDO_TEST");
+    if (!strcmp(level, "auto")) {
+      gpun_preferencia(0);
+      // Healthy 50 FPS on a 60 Hz surface: live reports now reach Minimal.
+      for (int i = 0; i < 750; i++) gpun_medir(20, 15, 4, 1, 1);
+#ifndef NV_BEFORE_GPUAUTO
+      for (int i = 0; i < 6; i++) gpun_relatar(50, 20, 1000.0 / 60, 1, 1);
+#endif
+      printf("automatic effects level: %d\n", gpun_nivel());
+    } else gpun_definir_nivel(atoi(level));
+    perfilsel_iniciar();
+    captura("/picker.bmp");
+    unsigned char pixels[400 * 300 * 4];
+    int colorful = 0;
+    glReadPixels(0, 380, 400, 300, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    for (int i = 0; i < 400 * 300; i++) {
+      int r = pixels[i * 4], g = pixels[i * 4 + 1], b = pixels[i * 4 + 2];
+      int hi = r > g ? r : g, lo = r < g ? r : g;
+      if (b > hi) hi = b;
+      if (b < lo) lo = b;
+      if (hi - lo > 15) colorful++;
+    }
+    printf("picker background: %d art pixels\n", colorful);
+    return colorful > 3000 ? 0 : 1;
+  }
   perfilsel_iniciar();
   assert(!perfilsel_concluido());
   perfilsel_continuar_ativo();
   assert(perfilsel_concluido());
-  captura("/tmp/nuvio-perfilsel-1.bmp");
+  captura(nvt("/nuvio-perfilsel-1.bmp"));
 
   escreverCache("1\t0\t1\t0\t#1E88E5\tHenrique\t\tdeploy/app/art/03.jpg\n"
                 "2\t0\t0\t1\t#E53935\tÁlvaro\t\t\n", 2);
@@ -240,7 +278,7 @@ int main(void) {
   perfis_carregar_ativo();
   ajustesDeTeste(0);
   perfilsel_iniciar();
-  captura("/tmp/nuvio-perfilsel-2.bmp");
+  captura(nvt("/nuvio-perfilsel-2.bmp"));
 
   perfis_esquecer(); dados_iniciar(NULL);
   escreverCache("1\t0\t1\t0\t#1E88E5\tHenrique\t"
@@ -251,13 +289,13 @@ int main(void) {
   perfis_carregar_ativo();
   ajustesDeTeste(0);
   perfilsel_iniciar();
-  captura("/tmp/nuvio-perfilsel-4.bmp");
+  captura(nvt("/nuvio-perfilsel-4.bmp"));
   verificaAnimacoes();
   verificaRevisaoSemTrocaDeUrl();
 
   // O terceiro perfil e o travado: tres DIREITA e a tela do selo de PIN em foco.
   tecla(SDLK_RIGHT); tecla(SDLK_RIGHT);
-  captura("/tmp/nuvio-perfilsel-4-travado.bmp");
+  captura(nvt("/nuvio-perfilsel-4-travado.bmp"));
 
   // OK sobre ele abre o teclado. Depois, quatro digitos e um erro de rede
   // fabricado nao — este e o estado normal de digitacao.
@@ -268,12 +306,13 @@ int main(void) {
     perfilsel_teste_estado(&depois);
     assert(depois.pin > antes.pin && depois.pin < 1.0f);
     assert(depois.mural_tempo == antes.mural_tempo); }
-  tecla(SDLK_UP); tecla(SDLK_UP); tecla(SDLK_UP);   // sobe para a linha do "1"
-  tecla(SDLK_RETURN);                               // 1
-  tecla(SDLK_RIGHT); tecla(SDLK_RETURN);            // 2
-  tecla(SDLK_DOWN); tecla(SDLK_RETURN);             // 5
-  tecla(SDLK_DOWN); tecla(SDLK_RETURN);             // 8
-  captura("/tmp/nuvio-perfilsel-pin.bmp");
+  // #289: three digits only — the 4th would verify against the server. The
+  // pad opens on "5"; the bottom row is blank, 0, delete (no OK key).
+  tecla(SDLK_UP); tecla(SDLK_LEFT); tecla(SDLK_RETURN);  // 1
+  tecla(SDLK_RIGHT); tecla(SDLK_RETURN);                 // 2
+  tecla(SDLK_8);                                         // remote number key
+  tecla(SDLK_DOWN); tecla(SDLK_DOWN); tecla(SDLK_DOWN);  // focus on "0"
+  captura(nvt("/nuvio-perfilsel-pin.bmp"));
 
   // Oito perfis: o pior caso do layout (CONTA_PERFIL_MAX).
   perfis_esquecer(); dados_iniciar(NULL);
@@ -288,12 +327,12 @@ int main(void) {
   perfis_carregar_ativo();
   ajustesDeTeste(0);
   perfilsel_iniciar();
-  captura("/tmp/nuvio-perfilsel-8.bmp");
+  captura(nvt("/nuvio-perfilsel-8.bmp"));
 
   // A primeira captura pega o boom de abertura; esta espera longa prova que
   // ele se dissipa e deixa somente o campo orbital, sem textura adicional.
   capturaQuadros = 600;
-  captura("/tmp/nuvio-perfilsel-8-settled.bmp");
+  captura(nvt("/nuvio-perfilsel-8-settled.bmp"));
   capturaQuadros = 90;
   verificaPressaoSustentada();
 
@@ -302,7 +341,7 @@ int main(void) {
   ajustesDeTeste(1);
   perfilsel_iniciar();
   verificaReducedMotion();
-  captura("/tmp/nuvio-perfilsel-8-reduzido.bmp");
+  captura(nvt("/nuvio-perfilsel-8-reduzido.bmp"));
   { PerfilSelTesteEstado e;
     perfilsel_teste_estado(&e);
     assert(e.burst_desenhado == 0); }
@@ -321,12 +360,117 @@ int main(void) {
   perfilsel_preparar(1, SDL_GetTicks());
   assert(perfilsel_preparando());
   tecla(SDLK_RIGHT);
-  captura("/tmp/nuvio-perfilsel-preparando.bmp");
+  captura(nvt("/nuvio-perfilsel-preparando.bmp"));
   perfilsel_iniciar();
   assert(!perfilsel_preparando());
 
+  // CARTAO "CONTINUAR" (2.0, variante B): o que cada pessoa estava vendo, sob o
+  // perfil em foco. Henrique: serie; Alvaro: filme; Infantil tem PIN (sem
+  // cartao); Visitas nao viu nada. Funciona com qualquer fundo.
+  { static CatItem it[11];
+    PerfilSelTesteEstado e;
+    int i;
+    for (i = 0; i < 9; i++) it[i] = *cat_item(i);
+    snprintf(it[9].imdb, sizeof it[9].imdb, "tt-cont-a");
+    snprintf(it[9].tipo, sizeof it[9].tipo, "series");
+    snprintf(it[9].titulo, sizeof it[9].titulo, "Cidade Submersa");
+    snprintf(it[9].poster, sizeof it[9].poster, "deploy/app/art/poster/03.jpg");
+    it[9].temporada = 2; it[9].episodio = 4;
+    snprintf(it[9].nomeEpisodio, sizeof it[9].nomeEpisodio, "A maré");
+    snprintf(it[10].imdb, sizeof it[10].imdb, "tt-cont-b");
+    snprintf(it[10].tipo, sizeof it[10].tipo, "movie");
+    snprintf(it[10].titulo, sizeof it[10].titulo, "Verão em Lisboa");
+    snprintf(it[10].poster, sizeof it[10].poster, "deploy/app/art/poster/05.jpg");
+    cat_definir_tudo(it, 11, NULL, 0);
+    perfis_esquecer(); dados_iniciar(NULL); prog_invalidar();
+    escreverCache("1\t0\t1\t0\t#1E88E5\tHenrique\t\tdeploy/app/art/03.jpg\n"
+                  "2\t0\t0\t1\t#E53935\tÁlvaro\t\tdeploy/app/art/05.jpg\n"
+                  "3\t1\t0\t0\t#43A047\tInfantil\t\tdeploy/app/art/07.jpg\n"
+                  "4\t0\t0\t0\t#8E24AA\tVisitas\t\t\n", 1);
+    perfis_carregar_ativo();
+    perfis_definir_ativo(3); assert(prog_gravar_local("tt-cont-b", 0, 0, 1000, 6000, -1));
+    perfis_definir_ativo(2); assert(prog_gravar_local("tt-cont-b", 0, 0, 2300, 6000, -1));
+    perfis_definir_ativo(1); assert(prog_gravar_local("tt-cont-a", 2, 4, 1560, 2640, -1));
+    ajustesDeTeste(0);
+    perfilsel_iniciar();
+    captura(nvt("/nuvio-perfilsel-continuar-1.bmp"));
+    perfilsel_teste_estado(&e);
+    assert(e.cont_tem[0] && e.cont_tem[1] && !e.cont_tem[2] && !e.cont_tem[3]);
+    tecla(SDLK_RIGHT);
+    captura(nvt("/nuvio-perfilsel-continuar-2.bmp"));
+    tecla(SDLK_RIGHT);   // Infantil: PIN, sem cartao
+    captura(nvt("/nuvio-perfilsel-continuar-pin.bmp"));
+    tecla(SDLK_LEFT); tecla(SDLK_LEFT); tecla(SDLK_LEFT);
+    /* meio da entrada: Henrique volta ao foco, o cartao esta subindo */
+    tecla(SDLK_RIGHT);
+    for (i = 0; i < 4; i++) {
+      txt_novo_quadro(); tex_novo_quadro(); tex_bombear(6); gfx_novo_quadro();
+      perfilsel_atualizar(1.0f / 60.0f, SDL_GetTicks());
+    }
+    glClearColor(0.051f, 0.051f, 0.051f, 1); glClear(GL_COLOR_BUFFER_BIT);
+    txt_novo_quadro(); tex_novo_quadro(); gfx_novo_quadro();
+    perfilsel_desenhar(SDL_GetTicks());
+    salvarTela(shotPath(nvt("/nuvio-perfilsel-continuar-meio.bmp")));
+    tecla(SDLK_LEFT);
+    /* animacoes reduzidas: o cartao ja nasce no lugar */
+    ajustesDeTeste(1);
+    perfilsel_iniciar();
+    perfilsel_atualizar(0.016f, SDL_GetTicks());
+    captura(nvt("/nuvio-perfilsel-continuar-reduzido.bmp"));
+    ajustesDeTeste(0);
+  }
+
+  // AMBIENTE DO PERFIL (2.0, variante A): Henrique e Infantil tem arte, Alvaro
+  // nao. So roda com NUVIO_PERFILSEL_FUNDO=2.
+  if (ajustes_ps_fundo() == 2) {
+    PerfilSelTesteEstado e;
+    int i;
+    perfis_esquecer(); dados_iniciar(NULL);
+    escreverCache("1\t0\t1\t0\t#1E88E5\tHenrique\t\tdeploy/app/art/03.jpg\n"
+                  "2\t0\t0\t1\t#E53935\tÁlvaro\t\t\n"
+                  "3\t1\t0\t0\t#43A047\tInfantil\t\tdeploy/app/art/07.jpg\n"
+                  // #295: avatar but no background art.
+                  "4\t0\t0\t0\t#8E24AA\tLia\tdeploy/app/art/poster/05.jpg\t\n", 1);
+    perfis_carregar_ativo();
+    ajustesDeTeste(0);
+    perfilsel_iniciar();
+    captura(nvt("/nuvio-perfilsel-amb-arte.bmp"));
+    perfilsel_teste_estado(&e);
+    assert(e.amb_t == 1.0f && e.amb_atual == 0);
+    // Meio da troca: Henrique -> Infantil, ~0,2 s de 0,45 s.
+    tecla(SDLK_RIGHT); tecla(SDLK_RIGHT);
+    for (i = 0; i < 12; i++) {
+      txt_novo_quadro(); tex_novo_quadro(); tex_bombear(6); gfx_novo_quadro();
+      perfilsel_atualizar(1.0f / 60.0f, SDL_GetTicks());
+    }
+    perfilsel_teste_estado(&e);
+    assert(e.amb_ant == 0 && e.amb_atual == 2 && e.amb_t > 0.2f && e.amb_t < 0.6f);
+    glClearColor(0.051f, 0.051f, 0.051f, 1); glClear(GL_COLOR_BUFFER_BIT);
+    txt_novo_quadro(); tex_novo_quadro(); gfx_novo_quadro();
+    perfilsel_desenhar(SDL_GetTicks());
+    salvarTela(shotPath(nvt("/nuvio-perfilsel-amb-meio.bmp")));
+    for (i = 0; i < 60; i++) {
+      txt_novo_quadro(); tex_novo_quadro(); tex_bombear(6); gfx_novo_quadro();
+      perfilsel_atualizar(1.0f / 60.0f, SDL_GetTicks());
+    }
+    perfilsel_teste_estado(&e);
+    assert(e.amb_t == 1.0f);
+    perfilsel_teste_estado(&e);
+    assert(e.amb_fonte == 1);
+    // #295: no art and no avatar -> the profile's colour light, not the wall.
+    tecla(SDLK_LEFT);
+    captura(nvt("/nuvio-perfilsel-amb-sem-arte.bmp"));
+    perfilsel_teste_estado(&e);
+    assert(e.amb_atual == 1 && e.amb_fonte == 0);
+    // #295: avatar only -> the blurred avatar with the profile colour.
+    tecla(SDLK_RIGHT); tecla(SDLK_RIGHT); tecla(SDLK_RIGHT);
+    captura(nvt("/nuvio-perfilsel-amb-avatar.bmp"));
+    perfilsel_teste_estado(&e);
+    assert(e.amb_atual == 3 && e.amb_fonte == 2 && e.amb_t == 1.0f);
+  }
+
   tex_encerrar(); txt_encerrar(); gfx_encerrar();
   SDL_GL_DeleteContext(gl); SDL_DestroyWindow(win); SDL_Quit();
-  puts("PASS: capturas em /tmp/nuvio-perfilsel-*.bmp (dados de teste, sem conta real).");
+  printf("PASS: capturas em %s/nuvio-perfilsel-*.bmp (dados de teste, sem conta real).\n", nvt_dir());
   return 0;
 }
