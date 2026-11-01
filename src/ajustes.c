@@ -8194,7 +8194,7 @@ static const char *ajudaOpcaoBase(int op) {
       return "Guarda as miniaturas feitas nesta TV numa pasta oculta do seu Google Drive, para não refazer ao rever. Nada fica na TV. Miniaturas sem uso por 40 dias são apagadas.";
     case AJ_OPENPOOL_SERVIDOR: return "Endereço HTTPS do servidor OpenSeek que guarda os pacotes compartilhados.";
     case AJ_OPENPOOL_PIN: return "Pin SPKI TLS do servidor, obtido pelo dono em um canal confiável. Necessário para autenticar o certificado autoassinado.";
-    case AJ_OPENPOOL_VINCULAR: return "Use o código de convite de uso único do dono para parear esta TV. Ao tocar novamente, revoga e remove o token salvo nesta TV.";
+    case AJ_OPENPOOL_VINCULAR: return "Digite o convite de 16 caracteres (4 grupos) ou o código temporário de 8 caracteres do dono. Ao tocar novamente, revoga o pareamento desta TV.";
     case AJ_OPENPOOL_RECEBER: return "Baixa um pacote de miniaturas do OpenSeek antes de gerar quadros localmente. Não exige conta pareada para leitura pública.";
     case AJ_OPENPOOL_CONTRIBUIR: return "Envia os quadros gerados nesta TV ao pool compartilhado. Exige convite com permissão de contribuição.";
 #else
@@ -10026,7 +10026,7 @@ static void eventoTela(const SDL_Event *e) {
     if (focoOp == AJ_OPENPOOL_VINCULAR) {
       if (minipool_pareado()) { minipool_desvincular(); return; }
       stCampo = focoOp;
-      teclado_abrir_com("Código de convite OpenSeek", "Código de uso único criado pelo dono do servidor.", 32, URL_ALFA, NULL);
+      teclado_abrir_com("Código de convite OpenSeek", "Convite de 16 caracteres ou código temporário de 8 caracteres do dono.", 32, URL_ALFA, NULL);
       return;
     }
 #endif

@@ -166,28 +166,37 @@ static int request(const char *method, const char *url, const char *pin, const c
   return r->status;
 }
 
-static int normalize_code(const char *src, char out[9]) {
+static int normalize_code(const char *src, char code[17], char invite_tag[5]) {
   static const char alphabet[] = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"; size_t n = 0;
+  invite_tag[0] = 0;
   if (!src) return 0;
   for (; *src; src++) {
     unsigned char c = (unsigned char)*src;
     if (c == '-' || isspace(c)) continue;
     c = (unsigned char)toupper(c);
-    if (!strchr(alphabet, c) || n == 8) return 0;
-    out[n++] = (char)c;
+    if (!strchr(alphabet, c) || n == 16) return 0;
+    code[n++] = (char)c;
   }
-  out[n] = 0; return n == 8;
+  code[n] = 0;
+  if (n == 8) return 1;                 // short-lived owner pairing window
+  if (n == 16) {                        // shared invite: four-char tag + twelve-char secret
+    memcpy(invite_tag, code, 4); invite_tag[4] = 0;
+    memmove(code, code + 4, 13);
+    return 1;
+  }
+  return 0;
 }
 
 static int start_pair(const char *url, const char *pin, const char *code, char token_out[96]) {
   RedeResposta start = {0}, claim = {0};
   char endpoint[384], request_body[512], pair_id[40] = "", salt_hex[40] = "", server_pin[64] = "";
   char device[] = "Nuvio TV", client_proof[65], server_proof[80] = "", token_hex[65], expected[65];
-  char code_norm[9] = "", salt[200] = "", returned_token[96] = "", device_id[24] = "";
+  char code_norm[17] = "", invite_tag[5] = "", salt[200] = "", returned_token[96] = "", device_id[24] = "";
   unsigned char key[32] = {0}, mac[32] = {0}, token_hash[32] = {0}; int status, ok = 0;
-  if (!normalize_code(code, code_norm)) goto done;
+  if (!normalize_code(code, code_norm, invite_tag)) goto done;
   snprintf(endpoint, sizeof endpoint, "%s/v1/pair/start", url);
-  snprintf(request_body, sizeof request_body, "{\"invite\":\"%s\"}", code);
+  if (invite_tag[0]) snprintf(request_body, sizeof request_body, "{\"invite\":\"%s\"}", invite_tag);
+  else snprintf(request_body, sizeof request_body, "{\"invite\":null}");
   status = request("POST", endpoint, pin, NULL, "application/json", request_body, strlen(request_body), 16 * 1024, &start);
   if (status != 200 || !start.corpo || !js_texto(start.corpo, NULL, "pair_id", pair_id, sizeof pair_id) ||
       !js_texto(start.corpo, NULL, "salt", salt_hex, sizeof salt_hex) ||
@@ -214,7 +223,7 @@ static int start_pair(const char *url, const char *pin, const char *code, char t
   if (!proof_equal(server_proof, expected)) goto done;
   snprintf(token_out, 96, "%s", returned_token); ok = 1;
 done:
-  wipe(code_norm, sizeof code_norm); wipe(key, sizeof key); wipe(mac, sizeof mac); wipe(token_hash, sizeof token_hash);
+  wipe(code_norm, sizeof code_norm); wipe(invite_tag, sizeof invite_tag); wipe(key, sizeof key); wipe(mac, sizeof mac); wipe(token_hash, sizeof token_hash);
   wipe(returned_token, sizeof returned_token); wipe(token_hex, sizeof token_hex); wipe(expected, sizeof expected);
   wipe(request_body, sizeof request_body); wipe(salt, sizeof salt);
   rede_resposta_limpar(&start); rede_resposta_limpar(&claim); return ok;
