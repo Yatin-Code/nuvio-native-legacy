@@ -35,7 +35,9 @@
 #include "miniplat.h"
 
 #ifdef NV_MINIATURAS
+#include "ajustes.h"
 #include "minidrive.h"
+#include "minipool.h"
 #include "miniatura_motor.h"
 #include "rede.h"
 #include "streams.h"
@@ -318,6 +320,21 @@ static void salvarDrive(Job *j, const MiniMeta *meta, const char *id) {
   free(b);
 }
 
+static void salvarPool(Job *j, const MiniMeta *meta) {
+  size_t n; int c;
+  if (!meta->fp[0] || !ajustes_openseek_pool_contribuir() || !minipool_pareado()) return;
+  pthread_mutex_lock(&mu); int ha = j->novos; pthread_mutex_unlock(&mu);
+  if (!ha) return;
+  unsigned char *b = empacotar(j, &n, &c);
+  if (!b) return;
+  if (minipool_enviar(1, meta, b, n)) {
+    printf("[miniatura] OpenSeek pool: sent %d tile(s)\n", c); fflush(stdout);
+  } else {
+    printf("[miniatura] OpenSeek pool upload unavailable; local thumbnails kept\n"); fflush(stdout);
+  }
+  free(b);
+}
+
 static void *trabalhar(void *u) {
   Trabalho *w = u;
   Job *j = w->j;
@@ -364,8 +381,19 @@ static void *trabalhar(void *u) {
     fflush(stdout);
   }
 
-  // Google Drive first: a saved set means nothing to make.
-  if (minidrive_ligado() && (meta.fp[0] || meta.nk[0]) && !j->parar) {
+  // Shared OpenSeek first, then the personal Drive fallback. A public pool hit
+  // is useful before this TV has ever generated thumbnails for the title.
+  if (meta.fp[0] && ajustes_openseek_pool_receber() && !j->parar) {
+    unsigned char *b = NULL; size_t n = 0; char profile[16] = "";
+    if (minipool_buscar(1, &meta, &b, &n, profile)) {
+      int add = desempacotar(j, b, n, &gradePack);
+      printf("[miniatura] %d tile(s) from OpenSeek (%s, %ld s grid)\n", add, profile, gradePack / 1000); fflush(stdout);
+    }
+    free(b);
+  }
+  pthread_mutex_lock(&mu); int poolCompleto = gradePack == BASE_MS && j->feitos >= j->n; pthread_mutex_unlock(&mu);
+  // Google Drive remains a personal fallback for its own previously saved set.
+  if (!poolCompleto && minidrive_ligado() && (meta.fp[0] || meta.nk[0]) && !j->parar) {
     unsigned char *b = NULL; size_t n = 0;
     if (minidrive_buscar(&meta, &b, &n, id, sizeof id) == 1) {
       int add = desempacotar(j, b, n, &gradePack);
@@ -519,6 +547,7 @@ semPrevia:
 fim:
   if (m) mini_motor_fechar(m);
   fflush(stdout);
+  salvarPool(j, &meta);
   salvarDrive(j, &meta, id);
   free(l);
   pthread_mutex_lock(&mu);
