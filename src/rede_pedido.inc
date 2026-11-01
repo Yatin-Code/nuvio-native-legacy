@@ -259,7 +259,7 @@ int rede_pedir(const RedePedido *p, RedeResposta *r) {
   if (!pedidoMetodo(metodo) || !pedidoOrigem(p->url, origem, sizeof origem, &tls) ||
       c.tetoCorpo > REDE_CORPO_MAXIMO || c.tetoCab > REDE_CAB_MAXIMO ||
       p->prazo_ms > 300000 || (p->n_corpo && !p->corpo) ||
-      p->n_corpo > REDE_CORPO_PADRAO || ((c.head || !strcmp(metodo, "GET")) && p->n_corpo) ||
+      p->n_corpo > REDE_CORPO_MAXIMO || ((c.head || !strcmp(metodo, "GET")) && p->n_corpo) ||
       p->janela_corpo_ms > 60000 || (p->janela_corpo_ms &&
         (strcmp(metodo, "GET") || !p->max_descartado || p->max_descartado > UINT64_C(2147483648))) ||
       !pedidoPinValido(p->tls_pin) || (p->tls_pin && (!tls || p->seguir)) ||
