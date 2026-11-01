@@ -14,6 +14,7 @@ typedef enum {
 
 void minipool_carregar(void);
 const char *minipool_servidor(void);
+int minipool_pin_configurado(void);
 int minipool_servidor_definir(const char *url);
 int minipool_pin_definir(const char *pin);
 int minipool_pareado(void);

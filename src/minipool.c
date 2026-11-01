@@ -45,7 +45,7 @@ static int url_valida(const char *url, char out[256]) {
   if (!url[8] || memchr(url + 8, '/', n - 8) || memchr(url + 8, '\\', n - 8)) return 0;
   memcpy(out, url, n); out[n] = 0; return 1;
 }
-static void limpar_token_locked(void) { wipe(mp_token, sizeof mp_token); mp_token[0] = 0; dados_apagar(MP_TOKEN_FILE); }
+static void limpar_token_memoria_locked(void) { wipe(mp_token, sizeof mp_token); mp_token[0] = 0; }
 
 void minipool_carregar(void) {
   char *s = dados_ler(MP_URL_FILE);
@@ -65,12 +65,14 @@ void minipool_carregar(void) {
 }
 
 const char *minipool_servidor(void) { return mp_url; }
+int minipool_pin_configurado(void) { int ok; pthread_mutex_lock(&mp_mu); ok = mp_pin[0] != 0; pthread_mutex_unlock(&mp_mu); return ok; }
 int minipool_pareado(void) { int ok; pthread_mutex_lock(&mp_mu); ok = mp_token[0] != 0; pthread_mutex_unlock(&mp_mu); return ok; }
 MpoolEstado minipool_estado(void) { MpoolEstado e; pthread_mutex_lock(&mp_mu); e = mp_estado; pthread_mutex_unlock(&mp_mu); return e; }
 const char *minipool_erro(void) { static char copy[128]; pthread_mutex_lock(&mp_mu); snprintf(copy, sizeof copy, "%s", mp_erro); pthread_mutex_unlock(&mp_mu); return copy[0] ? copy : NULL; }
 const char *minipool_estado_texto(void) {
   static char copy[128]; pthread_mutex_lock(&mp_mu);
-  if (mp_token[0]) snprintf(copy, sizeof copy, "%s", "Conectado");
+  if (mp_estado == MPOOL_ERRO && mp_erro[0]) snprintf(copy, sizeof copy, "%s", mp_erro);
+  else if (mp_token[0]) snprintf(copy, sizeof copy, "%s", "Conectado");
   else if (mp_estado == MPOOL_VINCULANDO) snprintf(copy, sizeof copy, "%s", "Vinculando…");
   else if (mp_estado == MPOOL_DESVINCULANDO) snprintf(copy, sizeof copy, "%s", "Desconectando…");
   else if (mp_estado == MPOOL_ERRO && mp_erro[0]) snprintf(copy, sizeof copy, "%s", mp_erro);
@@ -80,18 +82,24 @@ const char *minipool_estado_texto(void) {
 }
 
 int minipool_servidor_definir(const char *url) {
-  char clean[256], line[260]; if (!url_valida(url, clean)) return 0;
+  char clean[256], line[260]; int remove_token = 0;
+  if (!url_valida(url, clean)) return 0;
   pthread_mutex_lock(&mp_mu);
   if (mp_busy) { pthread_mutex_unlock(&mp_mu); return 0; }
-  if (strcmp(mp_url, clean)) { snprintf(mp_url, sizeof mp_url, "%s", clean); limpar_token_locked(); mp_estado = MPOOL_PARADO; }
-  pthread_mutex_unlock(&mp_mu); snprintf(line, sizeof line, "%s\n", clean); return dados_gravar(MP_URL_FILE, line);
+  if (strcmp(mp_url, clean)) { snprintf(mp_url, sizeof mp_url, "%s", clean); limpar_token_memoria_locked(); mp_estado = MPOOL_PARADO; remove_token = 1; }
+  pthread_mutex_unlock(&mp_mu);
+  if (remove_token) dados_apagar(MP_TOKEN_FILE);
+  snprintf(line, sizeof line, "%s\n", clean); return dados_gravar(MP_URL_FILE, line);
 }
 int minipool_pin_definir(const char *pin) {
-  char line[64]; if (!pin_valido(pin)) return 0;
+  char line[64]; int remove_token = 0;
+  if (!pin_valido(pin)) return 0;
   pthread_mutex_lock(&mp_mu);
   if (mp_busy) { pthread_mutex_unlock(&mp_mu); return 0; }
-  if (strcmp(mp_pin, pin)) { snprintf(mp_pin, sizeof mp_pin, "%s", pin); limpar_token_locked(); mp_estado = MPOOL_PARADO; }
-  pthread_mutex_unlock(&mp_mu); snprintf(line, sizeof line, "%s\n", pin); return dados_gravar(MP_PIN_FILE, line);
+  if (strcmp(mp_pin, pin)) { snprintf(mp_pin, sizeof mp_pin, "%s", pin); limpar_token_memoria_locked(); mp_estado = MPOOL_PARADO; remove_token = 1; }
+  pthread_mutex_unlock(&mp_mu);
+  if (remove_token) dados_apagar(MP_TOKEN_FILE);
+  snprintf(line, sizeof line, "%s\n", pin); return dados_gravar(MP_PIN_FILE, line);
 }
 
 static void sha256_bin(const void *data, size_t n, unsigned char out[32]) {
@@ -223,9 +231,13 @@ static void *mp_worker(void *arg) {
     pthread_mutex_unlock(&mp_mu);
   } else {
     snprintf(url, sizeof url, "%s/v1/pair", w->url); RedeResposta r = {0};
-    (void)request("DELETE", url, w->pin, w->token, NULL, NULL, 0, 1024, &r);
+    int status = request("DELETE", url, w->pin, w->token, NULL, NULL, 0, 1024, &r);
     rede_resposta_limpar(&r);
-    pthread_mutex_lock(&mp_mu); limpar_token_locked(); mp_estado = MPOOL_PARADO; mp_erro[0] = 0; pthread_mutex_unlock(&mp_mu);
+    pthread_mutex_lock(&mp_mu);
+    if (status == 204) { limpar_token_memoria_locked(); mp_estado = MPOOL_PARADO; mp_erro[0] = 0; }
+    else { mp_estado = MPOOL_ERRO; snprintf(mp_erro, sizeof mp_erro, "%s", "Não foi possível revogar; tente novamente"); }
+    pthread_mutex_unlock(&mp_mu);
+    if (status == 204) dados_apagar(MP_TOKEN_FILE);
   }
   pthread_mutex_lock(&mp_mu); mp_busy = 0; pthread_mutex_unlock(&mp_mu);
   wipe(new_token, sizeof new_token); wipe(w, sizeof *w); free(w); return NULL;
