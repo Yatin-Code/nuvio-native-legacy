@@ -331,9 +331,10 @@ int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, siz
   for (size_t i = 0; i < sizeof profiles / sizeof *profiles; i++) {
     RedeResposta r = {0}; char duration[32] = "", hash[80] = "", digest[65];
     snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s", base, meta->fp, profiles[i].name);
-    // Pool reads are an optional accelerator; never let an unreachable server
-    // postpone local thumbnail generation for the generic 45-second API limit.
-    int status = request("GET", url, pin, token, NULL, NULL, 0, MP_MAX_PACKAGE, 4000, &r);
+    // The first package fetch may have to reach Telegram (4 MB took ~10 s in a
+    // live check); allow that cold read, but cap each optional lookup well below
+    // the generic API timeout so a dead pool cannot stall local generation.
+    int status = request("GET", url, pin, token, NULL, NULL, 0, MP_MAX_PACKAGE, 15000, &r);
     if (status == 200 && r.corpo && response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", duration, sizeof duration) &&
         response_header(r.cabecalhos, "X-OpenSeek-Sha256", hash, sizeof hash) && atol(duration) == meta->durMs &&
         hex_string(hash, 64) && r.n_corpo <= MP_MAX_PACKAGE && nvmt_ok((unsigned char *)r.corpo, r.n_corpo, meta->durMs, profiles[i].grid)) {
