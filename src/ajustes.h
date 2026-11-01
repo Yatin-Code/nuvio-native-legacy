@@ -753,6 +753,9 @@ int         ajustes_seekr_ligado(void);
 int         ajustes_seekr_habilitado(void); // opcao local, inclusive sem chave
 int         ajustes_seekr_fita(void);       // anterior/atual/seguinte
 int         ajustes_seekr_ajuste_s(void);   // sincronia, em segundos (-60..60)
+// Shared OpenSeek TV cache switches. Local to this TV; both default off.
+int         ajustes_openseek_pool_receber(void);
+int         ajustes_openseek_pool_contribuir(void);
 // `fonte` e um ExFonte de extras.h (trakt, imdb, tmdb, tomatoes, audience,
 // metacritic, letterboxd). 0 = esconder a nota dessa fonte na fileira.
 int         ajustes_mdblist_fonte(int fonte);   // mdblist_show_*

@@ -33,6 +33,11 @@ static const Item TELA[] = {
       OPC(AJ_SEEKR_TESTAR),   // .tpk: thumbnails made on the TV, no key to test
 #endif
       OPC(AJ_SEEKR_FITA),
+#if defined(NV_MINIATURAS) && !defined(NV_TPK40)
+      ROT("Cache compartilhado OpenSeek"),
+      OPC(AJ_OPENPOOL_SERVIDOR), OPC(AJ_OPENPOOL_PIN), OPC(AJ_OPENPOOL_VINCULAR),
+      OPC(AJ_OPENPOOL_RECEBER), OPC(AJ_OPENPOOL_CONTRIBUIR),
+#endif
     MAIS(),
     ROT("Escolha da fonte"),
       // #310: o "Auto-play streams" do oficial (fonteregra.h).
