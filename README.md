@@ -24,6 +24,9 @@ This is an **unofficial fork**. It's not affiliated with NuvioMedia, and all the
 credit for Nuvio itself goes to them. It uses the same account, addons and
 settings as the official app: sign in once and your stuff is there.
 
+Native builds can share locally generated seek-bar thumbnails through an
+OpenSeek pool. See the [OpenSeek setup guide](docs/features/openseek-pool.md).
+
 ---
 
 ## Install
