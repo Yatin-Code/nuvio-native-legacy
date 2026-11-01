@@ -1,6 +1,5 @@
 #define NV_ANDROID 1
 #include "../src/minipool.c"
-#include <openssl/sha.h>
 
 static int flow, calls;
 static const char *start_body =
@@ -16,17 +15,6 @@ static const char *claim_window =
   "{\"device_id\":\"0123456789abcdef\","
   "\"token\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\","
   "\"server_proof\":\"54ccc7c07cd11a6e90f793034e2cff5dc3e484016baaa639715c1d89290291a8\"}";
-
-void admin_sha256_hex(const unsigned char *buf, unsigned long n, char *hex65) {
-  static const char digits[] = "0123456789abcdef";
-  unsigned char digest[SHA256_DIGEST_LENGTH];
-  SHA256(buf, (size_t)n, digest);
-  for (size_t i = 0; i < sizeof digest; i++) {
-    hex65[i * 2] = digits[digest[i] >> 4];
-    hex65[i * 2 + 1] = digits[digest[i] & 15];
-  }
-  hex65[64] = 0;
-}
 
 int rede_pedir(const RedePedido *p, RedeResposta *r) {
   const char *response = NULL;
