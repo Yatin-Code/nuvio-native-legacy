@@ -153,13 +153,13 @@ static int proof_equal(const char *a, const char *b) {
 
 static int request(const char *method, const char *url, const char *pin, const char *token,
                    const char *content_type, const void *body, size_t body_size,
-                   size_t max_response, RedeResposta *r) {
+                   size_t max_response, int prazo_ms, RedeResposta *r) {
   char auth[128], ct[100]; const char *headers[3] = { NULL, NULL, NULL }; unsigned n = 0; RedePedido p;
   if (token && token[0]) { snprintf(auth, sizeof auth, "Authorization: Bearer %s", token); headers[n++] = auth; }
   if (content_type) { snprintf(ct, sizeof ct, "Content-Type: %s", content_type); headers[n++] = ct; }
   headers[n] = NULL; memset(&p, 0, sizeof p);
   p.metodo = method; p.url = url; p.cabecalhos = n ? headers : NULL;
-  p.corpo = body; p.n_corpo = body_size; p.prazo_ms = 45000;
+  p.corpo = body; p.n_corpo = body_size; p.prazo_ms = prazo_ms;
   p.max_bytes = max_response; p.max_cabecalhos = 16 * 1024;
   p.seguir = 0; p.tls_pessoal = 1; p.tls_pin = pin;
   if (!rede_pedir(&p, r) && !r->status) return 0;
@@ -197,7 +197,7 @@ static int start_pair(const char *url, const char *pin, const char *code, char t
   snprintf(endpoint, sizeof endpoint, "%s/v1/pair/start", url);
   if (invite_tag[0]) snprintf(request_body, sizeof request_body, "{\"invite\":\"%s\"}", invite_tag);
   else snprintf(request_body, sizeof request_body, "{\"invite\":null}");
-  status = request("POST", endpoint, pin, NULL, "application/json", request_body, strlen(request_body), 16 * 1024, &start);
+  status = request("POST", endpoint, pin, NULL, "application/json", request_body, strlen(request_body), 16 * 1024, 45000, &start);
   if (status != 200 || !start.corpo || !js_texto(start.corpo, NULL, "pair_id", pair_id, sizeof pair_id) ||
       !js_texto(start.corpo, NULL, "salt", salt_hex, sizeof salt_hex) ||
       !js_texto(start.corpo, NULL, "spki_pin", server_pin, sizeof server_pin)) goto done;
@@ -212,7 +212,7 @@ static int start_pair(const char *url, const char *pin, const char *code, char t
   snprintf(endpoint, sizeof endpoint, "%s/v1/pair/claim", url);
   snprintf(request_body, sizeof request_body,
            "{\"pair_id\":\"%s\",\"device_name\":\"%s\",\"client_proof\":\"%s\"}", pair_id, device, client_proof);
-  status = request("POST", endpoint, pin, NULL, "application/json", request_body, strlen(request_body), 16 * 1024, &claim);
+  status = request("POST", endpoint, pin, NULL, "application/json", request_body, strlen(request_body), 16 * 1024, 45000, &claim);
   if (status != 200 || !claim.corpo || !js_texto(claim.corpo, NULL, "token", returned_token, sizeof returned_token) ||
       !js_texto(claim.corpo, NULL, "device_id", device_id, sizeof device_id) ||
       !js_texto(claim.corpo, NULL, "server_proof", server_proof, sizeof server_proof) ||
@@ -240,7 +240,7 @@ static void *mp_worker(void *arg) {
     pthread_mutex_unlock(&mp_mu);
   } else {
     snprintf(url, sizeof url, "%s/v1/pair", w->url); RedeResposta r = {0};
-    int status = request("DELETE", url, w->pin, w->token, NULL, NULL, 0, 1024, &r);
+    int status = request("DELETE", url, w->pin, w->token, NULL, NULL, 0, 1024, 45000, &r);
     rede_resposta_limpar(&r);
     pthread_mutex_lock(&mp_mu);
     if (status == 204) { limpar_token_memoria_locked(); mp_estado = MPOOL_PARADO; mp_erro[0] = 0; }
@@ -331,7 +331,9 @@ int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, siz
   for (size_t i = 0; i < sizeof profiles / sizeof *profiles; i++) {
     RedeResposta r = {0}; char duration[32] = "", hash[80] = "", digest[65];
     snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s", base, meta->fp, profiles[i].name);
-    int status = request("GET", url, pin, token, NULL, NULL, 0, MP_MAX_PACKAGE, &r);
+    // Pool reads are an optional accelerator; never let an unreachable server
+    // postpone local thumbnail generation for the generic 45-second API limit.
+    int status = request("GET", url, pin, token, NULL, NULL, 0, MP_MAX_PACKAGE, 4000, &r);
     if (status == 200 && r.corpo && response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", duration, sizeof duration) &&
         response_header(r.cabecalhos, "X-OpenSeek-Sha256", hash, sizeof hash) && atol(duration) == meta->durMs &&
         hex_string(hash, 64) && r.n_corpo <= MP_MAX_PACKAGE && nvmt_ok((unsigned char *)r.corpo, r.n_corpo, meta->durMs, profiles[i].grid)) {
@@ -353,7 +355,7 @@ int minipool_enviar(int enabled, const MiniMeta *meta, const unsigned char *data
   pthread_mutex_lock(&mp_mu); snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin); snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
   if (!pin[0] || !token[0]) { wipe(token, sizeof token); return 0; }
   snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld", base, meta->fp, profile, meta->durMs);
-  status = request("PUT", url, pin, token, "application/vnd.openseek.nvmt", data, size, 16 * 1024, &r);
+  status = request("PUT", url, pin, token, "application/vnd.openseek.nvmt", data, size, 16 * 1024, 45000, &r);
   rede_resposta_limpar(&r); wipe(token, sizeof token); return status == 200 || status == 201;
 }
 

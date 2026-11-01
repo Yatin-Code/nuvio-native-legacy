@@ -350,6 +350,7 @@ static void *trabalhar(void *u) {
   long medidas[MEDIDAS] = {0}; int nMedidas = 0;
   Uint32 ultimaPausaLog = 0; int pausasCaladas = 0;
   long gradePack = 0;
+  Uint32 etapaTick = SDL_GetTicks();
   if (!l) goto fim;
   l->j = j;
   snprintf(l->url, sizeof l->url, "%s", w->url);
@@ -363,9 +364,12 @@ static void *trabalhar(void *u) {
   for (int k = 0; k < 30 && !j->parar && !video_pronto(); k++) dormirJ(j, 500);
   dormirJ(j, 500);
   if (j->parar) goto fim;
+  printf("[miniatura] player-ready wait: %u ms, ready=%d\n", SDL_GetTicks() - etapaTick, video_pronto());
+  fflush(stdout);
 
   // Fingerprint: two 64 KiB reads.
   {
+    etapaTick = SDL_GetTicks();
     unsigned char *cab = malloc(65536), *cau = malloc(65536);
     long a = cab && cau ? lerFonte(l, 0, 65535, cab) : -1;
     long b = -1;
@@ -378,14 +382,18 @@ static void *trabalhar(void *u) {
     free(cab); free(cau);
     printf("[miniatura] source: %lld MB, fingerprint %s, file name %s\n", (long long)(l->total / 1048576),
            meta.fp[0] ? "read" : "unreadable", meta.nk[0] ? "known" : "unknown");
+    printf("[miniatura] fingerprint stage: %u ms, range failures=%d\n", SDL_GetTicks() - etapaTick, l->falhas);
     fflush(stdout);
   }
 
   // Shared OpenSeek first, then the personal Drive fallback. A public pool hit
   // is useful before this TV has ever generated thumbnails for the title.
   if (meta.fp[0] && ajustes_openseek_pool_receber() && !j->parar) {
+    etapaTick = SDL_GetTicks();
     unsigned char *b = NULL; size_t n = 0; char profile[16] = "";
-    if (minipool_buscar(1, &meta, &b, &n, profile)) {
+    int hit = minipool_buscar(1, &meta, &b, &n, profile);
+    printf("[miniatura] OpenSeek lookup: %u ms, %s\n", SDL_GetTicks() - etapaTick, hit ? "hit" : "miss/unavailable");
+    if (hit) {
       int add = desempacotar(j, b, n, &gradePack);
       printf("[miniatura] %d tile(s) from OpenSeek (%s, %ld s grid)\n", add, profile, gradePack / 1000); fflush(stdout);
     }
@@ -394,8 +402,11 @@ static void *trabalhar(void *u) {
   pthread_mutex_lock(&mu); int poolCompleto = gradePack == BASE_MS && j->feitos >= j->n; pthread_mutex_unlock(&mu);
   // Google Drive remains a personal fallback for its own previously saved set.
   if (!poolCompleto && minidrive_ligado() && (meta.fp[0] || meta.nk[0]) && !j->parar) {
+    etapaTick = SDL_GetTicks();
     unsigned char *b = NULL; size_t n = 0;
-    if (minidrive_buscar(&meta, &b, &n, id, sizeof id) == 1) {
+    int driveHit = minidrive_buscar(&meta, &b, &n, id, sizeof id) == 1;
+    printf("[miniatura] Google Drive lookup: %u ms, %s\n", SDL_GetTicks() - etapaTick, driveHit ? "hit" : "miss/unavailable");
+    if (driveHit) {
       int add = desempacotar(j, b, n, &gradePack);
       printf("[miniatura] %d tile(s) from Google Drive (%ld s grid)\n", add, gradePack / 1000); fflush(stdout);
       minidrive_tocar(id);
@@ -406,9 +417,11 @@ static void *trabalhar(void *u) {
   // A complete 5 s set: nothing left to make, not even opening the file.
   pthread_mutex_lock(&mu); int completo = gradePack == BASE_MS && j->feitos >= j->n; pthread_mutex_unlock(&mu);
   if (completo || j->parar) goto fim;
-  if (l->total <= 0) { printf("[miniatura] stopped: source size unknown\n"); goto semPrevia; }
+  if (l->total <= 0) { printf("[miniatura] stopped: source size unknown; fingerprint=%s\n", meta.fp[0] ? "read" : "unreadable"); goto semPrevia; }
 
+  etapaTick = SDL_GetTicks();
   m = mini_motor_abrir(lerFonte, l, l->total, erro, sizeof erro);
+  printf("[miniatura] decoder open: %u ms, %s\n", SDL_GetTicks() - etapaTick, m ? "ready" : "failed");
   if (!m) { printf("[miniatura] not made for this file: %s\n", erro); goto semPrevia; }
   {
     const MiniInfo *i = mini_motor_info(m);
@@ -588,7 +601,7 @@ void seekr_pedir(const char *imdb, int t, int e, long durMs) {
   Trabalho *w;
   Job *j;
   pthread_t f;
-  if (!url || !*url) return;
+  if (!url || !*url) { printf("[miniatura] request skipped: empty source URL\n"); fflush(stdout); return; }
   pthread_mutex_lock(&mu);
   batida = SDL_GetTicks();
   // Same title still on screen: only the heartbeat.
@@ -600,6 +613,8 @@ void seekr_pedir(const char *imdb, int t, int e, long durMs) {
   durAtual = durMs;
   batida = SDL_GetTicks();
   if (!strncmp(url, "http://127.0.0.1", 16) || strstr(url, ".m3u8") || durMs < 60000) {
+    printf("[miniatura] request skipped: %s\n", !strncmp(url, "http://127.0.0.1", 16) ? "local proxy source" :
+           strstr(url, ".m3u8") ? "HLS playlist source" : "duration under 60 seconds"); fflush(stdout);
     estado = SEEKR_SEM_PREVIA; pthread_mutex_unlock(&mu); return;
   }
   pthread_mutex_unlock(&mu);
