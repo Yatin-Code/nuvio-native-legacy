@@ -77,6 +77,10 @@ typedef struct {
   /* 1 = media Range read: follow an https->http redirect like the player does
    * (debrid links). Cross-origin hops already drop every caller header. */
   int rebaixar_midia;
+  /* Optional libcurl SPKI pin (for example `sha256//<base64>`). Pinned
+   * requests must use HTTPS and disable redirects; a self-signed endpoint may
+   * also set tls_pessoal, while the pin still authenticates its public key. */
+  const char *tls_pin;
 } RedePedido;
 typedef struct {
   int status, curl_erro;

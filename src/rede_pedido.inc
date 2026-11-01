@@ -17,6 +17,14 @@ typedef struct {
 } PedidoCtx;
 
 static unsigned pedidoMs(uint64_t v) { return v > UINT_MAX ? UINT_MAX : (unsigned)v; }
+static int pedidoPinValido(const char *pin) {
+  size_t i;
+  if (!pin) return 1;
+  if (strlen(pin) != 52 || strncmp(pin, "sha256//", 8) || pin[51] != '=') return 0;
+  for (i = 8; i < 51; i++)
+    if (!isalnum((unsigned char)pin[i]) && pin[i] != '+' && pin[i] != '/') return 0;
+  return 1;
+}
 static int pedidoParar(PedidoCtx *c) {
   RedeErro e = rede_job_estado(c->p->job);
   if (e == REDE_OK && c->p->parar && c->p->parar(c->p->parar_usuario)) e = REDE_CANCELADO;
@@ -254,6 +262,7 @@ int rede_pedir(const RedePedido *p, RedeResposta *r) {
       p->n_corpo > REDE_CORPO_PADRAO || ((c.head || !strcmp(metodo, "GET")) && p->n_corpo) ||
       p->janela_corpo_ms > 60000 || (p->janela_corpo_ms &&
         (strcmp(metodo, "GET") || !p->max_descartado || p->max_descartado > UINT64_C(2147483648))) ||
+      !pedidoPinValido(p->tls_pin) || (p->tls_pin && (!tls || p->seguir)) ||
       !pedidoCabsValidos(p->cabecalhos, c.tetoCab)) {
     r->erro = REDE_ENTRADA; return 0;
   }
@@ -305,6 +314,7 @@ int rede_pedir(const RedePedido *p, RedeResposta *r) {
       PEDIDO_OPT(OPT_SSL_VERIFYPEER, pessoal ? 0L : 1L);
       PEDIDO_OPT(OPT_SSL_VERIFYHOST, pessoal ? 0L : 2L);
     }
+    if (p->tls_pin) PEDIDO_OPT(10230 /* CURLOPT_PINNEDPUBLICKEY */, p->tls_pin);
     if (p->ca_arquivo || discordCa[0]) PEDIDO_OPT(OPT_CAINFO, p->ca_arquivo ? p->ca_arquivo : discordCa);
     PEDIDO_OPT(OPT_USERAGENT, "Nuvio/1.8");
     /* Media diagnostics measure the player's wire body, without transparent
