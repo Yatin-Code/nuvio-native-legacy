@@ -57,6 +57,8 @@
 
 #define BASE_MS 5000L              // one slot every 5 s; the 10 s grid uses every second one
 #define DEZ 2                      // slots per 10 s
+#define POOL_CHECKPOINT_TILES 15
+#define POOL_CHECKPOINT_MS 60000u
 // MEMORY GATE (values from the TV tests of 22-23/10, Tizen 9 / 1774 MB):
 // MemAvailable must cover the floor plus the next tile's cost. A 4K tile costs
 // 35-45 MB of MemAvailable; before one is measured the cost is 60 MB scaled by
@@ -320,19 +322,40 @@ static void salvarDrive(Job *j, const MiniMeta *meta, const char *id) {
   free(b);
 }
 
-static void salvarPool(Job *j, const MiniMeta *meta) {
+static int salvarPool(Job *j, const MiniMeta *meta) {
   size_t n; int c;
-  if (!meta->fp[0] || !ajustes_openseek_pool_contribuir() || !minipool_pareado()) return;
+  Uint32 inicio = SDL_GetTicks();
+  if (!meta->fp[0] || !ajustes_openseek_pool_contribuir() || !minipool_pareado()) return 0;
   pthread_mutex_lock(&mu); int ha = j->novos; pthread_mutex_unlock(&mu);
-  if (!ha) return;
+  if (!ha) return 0;
   unsigned char *b = empacotar(j, &n, &c);
-  if (!b) return;
-  if (minipool_enviar(1, meta, b, n)) {
-    printf("[miniatura] OpenSeek pool: sent %d tile(s)\n", c); fflush(stdout);
+  if (!b) return 0;
+  int ok = minipool_enviar(1, meta, b, n);
+  if (ok) {
+    printf("[miniatura] OpenSeek pool: sent %d tile(s), %zu bytes in %u ms\n", c, n, SDL_GetTicks() - inicio); fflush(stdout);
   } else {
     printf("[miniatura] OpenSeek pool upload unavailable; local thumbnails kept\n"); fflush(stdout);
   }
   free(b);
+  return ok;
+}
+
+// Publish a partial NVMT while playback continues. Keep the same worker thread
+// as the uploader so package snapshots cannot race tile writes. A failed
+// checkpoint is retried after a minute; new frames remain in memory meanwhile.
+static void checkpointPool(Job *j, const MiniMeta *meta, int force,
+                           int *uploadedTiles, Uint32 *lastSuccess, Uint32 *lastAttempt) {
+  int nowTiles;
+  Uint32 now = SDL_GetTicks();
+  pthread_mutex_lock(&mu); nowTiles = j->novos; pthread_mutex_unlock(&mu);
+  if (nowTiles <= *uploadedTiles) return;
+  if (!force) {
+    int due_by_tiles = nowTiles - *uploadedTiles >= POOL_CHECKPOINT_TILES;
+    int due_by_time = now - *lastSuccess >= POOL_CHECKPOINT_MS;
+    if ((!due_by_tiles && !due_by_time) || (*lastAttempt && now - *lastAttempt < POOL_CHECKPOINT_MS)) return;
+  }
+  *lastAttempt = now;
+  if (salvarPool(j, meta)) { *uploadedTiles = nowTiles; *lastSuccess = SDL_GetTicks(); }
 }
 
 static void *trabalhar(void *u) {
@@ -351,6 +374,8 @@ static void *trabalhar(void *u) {
   Uint32 ultimaPausaLog = 0; int pausasCaladas = 0;
   long gradePack = 0;
   Uint32 etapaTick = SDL_GetTicks();
+  Uint32 poolCheckpointAt = 0, poolCheckpointAttempt = 0;
+  int poolUploadedTiles = 0;
   if (!l) goto fim;
   l->j = j;
   snprintf(l->url, sizeof l->url, "%s", w->url);
@@ -435,6 +460,7 @@ static void *trabalhar(void *u) {
            ps == 1 ? "5 s" : "10 s", porque, (j->n + ps - 1) / ps);
     fflush(stdout);
   }
+  poolCheckpointAt = SDL_GetTicks();
 
   while (!j->parar) {
     // Pauses: the player is not showing this title, or is buffering / opening.
@@ -510,7 +536,10 @@ static void *trabalhar(void *u) {
         else irmao = -1;
       }
       pthread_mutex_unlock(&mu);
-      if (irmao >= 0) continue;
+      if (irmao >= 0) {
+        checkpointPool(j, &meta, 0, &poolUploadedTiles, &poolCheckpointAt, &poolCheckpointAttempt);
+        continue;
+      }
     }
 
     unsigned char *jpg = NULL; int nj = 0; MiniQuadro q;
@@ -547,6 +576,7 @@ static void *trabalhar(void *u) {
     fflush(stdout);
     // What this tile really cost (MemAvailable before -> after, decoder open).
     if (antes >= 0 && depois >= 0 && antes > depois) medidas[nMedidas++ % MEDIDAS] = antes - depois;
+    checkpointPool(j, &meta, 0, &poolUploadedTiles, &poolCheckpointAt, &poolCheckpointAttempt);
     dormirJ(j, INTERVALO_MS);
   }
   if (feitosAqui)
@@ -560,7 +590,7 @@ semPrevia:
 fim:
   if (m) mini_motor_fechar(m);
   fflush(stdout);
-  salvarPool(j, &meta);
+  checkpointPool(j, &meta, 1, &poolUploadedTiles, &poolCheckpointAt, &poolCheckpointAttempt);
   salvarDrive(j, &meta, id);
   free(l);
   pthread_mutex_lock(&mu);
