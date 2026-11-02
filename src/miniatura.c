@@ -59,6 +59,9 @@
 #define DEZ 2                      // slots per 10 s
 #define POOL_CHECKPOINT_TILES 15
 #define POOL_CHECKPOINT_MS 60000u
+#define EPISODE_WAIT_MS 180000u
+#define EPISODE_SAMPLE_COUNT 8
+#define EPISODE_SAMPLE_MAX 12
 // MEMORY GATE (values from the TV tests of 22-23/10, Tizen 9 / 1774 MB):
 // MemAvailable must cover the floor plus the next tile's cost. A 4K tile costs
 // 35-45 MB of MemAvailable; before one is measured the cost is 60 MB scaled by
@@ -407,11 +410,14 @@ static int dhashDistance(uint64_t a, uint64_t b) {
 }
 
 static int candidateSampleLayout(Job *j, const MpoolCandidate *c, long playheadMs,
-                                 int localSlots[5], int remoteSlots[5], const char **reason) {
-  static const long offsetsMs[5] = {0, 10000, 20000, 60000, 120000};
+                                 int localSlots[EPISODE_SAMPLE_COUNT],
+                                 int remoteSlots[EPISODE_SAMPLE_COUNT], const char **reason) {
+  static const long offsetsMs[EPISODE_SAMPLE_COUNT] = {
+    0, 10000, 20000, 30000, 60000, 90000, 120000, 180000
+  };
   int step, done, grid = nvmtGrid(c->profile), direction = 1;
   long dur;
-  Uint32 deadline = SDL_GetTicks() + 60000u;
+  Uint32 deadline = SDL_GetTicks() + EPISODE_WAIT_MS;
   if (reason) *reason = "local_grid_unavailable";
   // The pool worker starts before the local decoder opens. A fast candidate
   // response can arrive while passo is still 0; wait for the local grid rather
@@ -425,8 +431,9 @@ static int candidateSampleLayout(Job *j, const MpoolCandidate *c, long playheadM
     dormirJ(j, 200);
   }
   if (!grid || dur <= 0 || c->durationMs <= 0) { if (reason) *reason = "invalid_grid_or_duration"; return 0; }
-  if (playheadMs + offsetsMs[4] >= dur && playheadMs >= offsetsMs[4]) direction = -1;
-  for (int i = 0; i < 5; i++) {
+  if (playheadMs + offsetsMs[EPISODE_SAMPLE_COUNT - 1] >= dur &&
+      playheadMs >= offsetsMs[EPISODE_SAMPLE_COUNT - 1]) direction = -1;
+  for (int i = 0; i < EPISODE_SAMPLE_COUNT; i++) {
     long target = playheadMs + direction * offsetsMs[i];
     int k;
     if (target < 0) target = 0;
@@ -449,7 +456,7 @@ typedef enum {
   EP_VERIFY_REMOTE_COUNT_INVALID,
   EP_VERIFY_LOCAL_GRID_WAIT,
   EP_VERIFY_LOCAL_COMPARISONS_WAIT,
-  EP_VERIFY_LOCAL_ANCHORS_WAIT,
+  EP_VERIFY_LOCAL_COMPARISONS_TOO_FEW,
   EP_VERIFY_VISUAL_MISMATCH,
   EP_VERIFY_ACCEPTED,
   EP_VERIFY_CANCELLED,
@@ -472,7 +479,7 @@ static const char *episodeVerifyReasonText(EpisodeVerifyReason reason) {
     case EP_VERIFY_REMOTE_COUNT_INVALID: return "remote_sample_count_above_12";
     case EP_VERIFY_LOCAL_GRID_WAIT: return "local_grid_not_ready";
     case EP_VERIFY_LOCAL_COMPARISONS_WAIT: return "local_comparisons_below_4";
-    case EP_VERIFY_LOCAL_ANCHORS_WAIT: return "local_anchor_samples_missing";
+    case EP_VERIFY_LOCAL_COMPARISONS_TOO_FEW: return "local_comparisons_below_2";
     case EP_VERIFY_VISUAL_MISMATCH: return "visual_mismatch";
     case EP_VERIFY_ACCEPTED: return "matched";
     case EP_VERIFY_CANCELLED: return "cancelled";
@@ -494,46 +501,77 @@ static const char *episodeSampleFetchText(MpoolSampleStatus status) {
   }
 }
 
-// 1 = visually consistent; 0 = rejected; -1 = waiting for local sample tiles.
-static int verifyEpisodeSamples(Job *j, const unsigned char *b, size_t n,
-                                const MpoolCandidate *c, const int expectedLocal[5],
-                                EpisodeVerifyInfo *info) {
-  size_t pos = 20; int count, tested = 0, matched = 0, step;
-  int expectedUsed[5] = {0}, anchorTested[2] = {0}, anchorMatched[2] = {0};
-  long guestDur;
+typedef struct {
+  long ptsMs;
+  uint64_t dhash;
+  int hashReady;
+} EpisodeSample;
+
+// Decode each remote JPEG once. Local tiles may take minutes to arrive, so the
+// verifier below reuses these hashes while waiting for enough local evidence.
+static int prepareEpisodeSamples(const unsigned char *b, size_t n,
+                                 const MpoolCandidate *c,
+                                 EpisodeSample samples[EPISODE_SAMPLE_MAX], int *sampleCount,
+                                 EpisodeVerifyInfo *info) {
+  size_t pos = 20;
+  uint32_t count;
+  if (sampleCount) *sampleCount = 0;
   if (info) { memset(info, 0, sizeof *info); info->reason = EP_VERIFY_BAD_PACKAGE; }
-  if (!b || n < 20 || memcmp(b, "NVMT", 4) || get32(b + 4) != 1 ||
-      get32(b + 8) != (uint32_t)nvmtGrid(c->profile)) return 0;
-  count = (int)get32(b + 16);
-  if (info) info->remoteSamples = count;
+  if (!b || !c || !sampleCount || n < 20 || memcmp(b, "NVMT", 4) ||
+      get32(b + 4) != 1 || get32(b + 8) != (uint32_t)nvmtGrid(c->profile)) return 0;
+  count = get32(b + 16);
+  if (info) info->remoteSamples = (int)count;
   if (count < 4) {
     if (info) info->reason = EP_VERIFY_REMOTE_TOO_FEW;
     return 0;
   }
-  if (count > 12) {
+  if (count > EPISODE_SAMPLE_MAX) {
     if (info) info->reason = EP_VERIFY_REMOTE_COUNT_INVALID;
     return 0;
   }
-  pthread_mutex_lock(&mu); step = j->passo; guestDur = j->dur; pthread_mutex_unlock(&mu);
+  if (get32(b + 12) == 0 || count > get32(b + 12)) return 0;
+  memset(samples, 0, sizeof(*samples) * EPISODE_SAMPLE_MAX);
+  for (uint32_t i = 0; i < count; i++) {
+    uint32_t slot, rawPts, len;
+    int32_t pts;
+    if (pos + 12 > n) return 0;
+    slot = get32(b + pos); rawPts = get32(b + pos + 4); len = get32(b + pos + 8); pos += 12;
+    pts = (int32_t)rawPts;
+    if (len < 125 || len > 200000 || pos + len > n || pts < 0 ||
+        pts > c->durationMs || slot >= get32(b + 12)) return 0;
+    samples[i].ptsMs = pts;
+    samples[i].hashReady = tileDhash(b + pos, (int)len, &samples[i].dhash);
+    pos += len;
+  }
+  if (pos != n) return 0;
+  *sampleCount = (int)count;
+  return 1;
+}
+
+// 1 = visually consistent; 0 = rejected; -1 = waiting for local sample tiles.
+static int verifyEpisodeSamples(Job *j, const EpisodeSample samples[EPISODE_SAMPLE_MAX], int count,
+                                const MpoolCandidate *c,
+                                const int expectedLocal[EPISODE_SAMPLE_COUNT],
+                                EpisodeVerifyInfo *info) {
+  int tested = 0, matched = 0, step, localDone;
+  int expectedUsed[EPISODE_SAMPLE_COUNT] = {0}, anchorTested[2] = {0}, anchorMatched[2] = {0};
+  long guestDur;
+  if (info) { memset(info, 0, sizeof *info); info->remoteSamples = count; info->reason = EP_VERIFY_BAD_PACKAGE; }
+  pthread_mutex_lock(&mu); step = j->passo; guestDur = j->dur; localDone = j->local_worker_done; pthread_mutex_unlock(&mu);
   if (step <= 0 || c->durationMs <= 0 || guestDur <= 0) {
     if (info) info->reason = EP_VERIFY_LOCAL_GRID_WAIT;
     return -1;
   }
   for (int i = 0; i < count; i++) {
-    uint32_t slot, rawPts, len; int32_t pts; uint64_t remoteHash;
     long mappedMs; int expected = -1, center, best = -1, bestDelta = 0x7fffffff;
     unsigned char *localCopy = NULL; int localN = 0;
-    if (pos + 12 > n) return 0;
-    slot = get32(b + pos); rawPts = get32(b + pos + 4); len = get32(b + pos + 8); pos += 12;
-    pts = (int32_t)rawPts;
-    if (len < 125 || len > 200000 || pos + len > n || pts < 0 || pts > c->durationMs ||
-        slot >= get32(b + 12) || !tileDhash(b + pos, (int)len, &remoteHash)) return 0;
-    mappedMs = (long)((long long)pts * guestDur / c->durationMs);
-    for (int k = 0; k < 5; k++) {
+    if (!samples[i].hashReady) continue;
+    mappedMs = (long)((long long)samples[i].ptsMs * guestDur / c->durationMs);
+    for (int k = 0; k < EPISODE_SAMPLE_COUNT; k++) {
       long delta = labs((long)((long long)expectedLocal[k] * BASE_MS) - mappedMs);
       if (expected < 0 || delta < labs((long)((long long)expectedLocal[expected] * BASE_MS) - mappedMs)) expected = k;
     }
-    if (expected < 0 || expectedUsed[expected]) { pos += len; continue; }
+    if (expected < 0 || expectedUsed[expected]) continue;
     expectedUsed[expected] = 1;
     center = expectedLocal[expected];
     pthread_mutex_lock(&mu);
@@ -552,31 +590,29 @@ static int verifyEpisodeSamples(Job *j, const unsigned char *b, size_t n,
       uint64_t localHash;
       if (tileDhash(localCopy, localN, &localHash)) {
         tested++;
-        if (expected >= 3) anchorTested[expected - 3] = 1;
-        if (dhashDistance(remoteHash, localHash) <= 12) {
+        if (expected >= EPISODE_SAMPLE_COUNT - 2) anchorTested[expected - (EPISODE_SAMPLE_COUNT - 2)] = 1;
+        if (dhashDistance(samples[i].dhash, localHash) <= 12) {
           matched++;
-          if (expected >= 3) anchorMatched[expected - 3] = 1;
+          if (expected >= EPISODE_SAMPLE_COUNT - 2) anchorMatched[expected - (EPISODE_SAMPLE_COUNT - 2)] = 1;
         }
       }
       free(localCopy);
     }
-    pos += len;
   }
-  if (pos != n) return 0;
   if (info) {
     info->tested = tested; info->matched = matched;
     info->anchorsTested = anchorTested[0] + anchorTested[1];
     info->anchorsMatched = anchorMatched[0] + anchorMatched[1];
   }
-  if (tested < 4) {
+  if (tested < 2 && localDone) {
+    if (info) info->reason = EP_VERIFY_LOCAL_COMPARISONS_TOO_FEW;
+    return 0;
+  }
+  if (tested < 4 && !localDone) {
     if (info) info->reason = EP_VERIFY_LOCAL_COMPARISONS_WAIT;
     return -1;
   }
-  if (!anchorTested[0] || !anchorTested[1]) {
-    if (info) info->reason = EP_VERIFY_LOCAL_ANCHORS_WAIT;
-    return -1;
-  }
-  if (matched < 4 || !anchorMatched[0] || !anchorMatched[1]) {
+  if (tested < 2 || matched * 5 < tested * 4) {
     if (info) info->reason = EP_VERIFY_VISUAL_MISMATCH;
     return 0;
   }
@@ -585,11 +621,18 @@ static int verifyEpisodeSamples(Job *j, const unsigned char *b, size_t n,
 }
 
 static int esperarVerificacao(Job *j, const unsigned char *samples, size_t sampleSize,
-                              const MpoolCandidate *c, const int expectedLocal[5],
+                              const MpoolCandidate *c,
+                              const int expectedLocal[EPISODE_SAMPLE_COUNT],
                               EpisodeVerifyInfo *info) {
-  Uint32 deadline = SDL_GetTicks() + 60000u;
+  // Local anchors can arrive well after the remote sample subset, especially
+  // for large files opened through a remote source. Keep verification async
+  // and let the existing stop/cancel path end the wait when playback changes.
+  EpisodeSample decoded[EPISODE_SAMPLE_MAX];
+  int decodedCount = 0;
+  if (!prepareEpisodeSamples(samples, sampleSize, c, decoded, &decodedCount, info)) return 0;
+  Uint32 deadline = SDL_GetTicks() + EPISODE_WAIT_MS;
   for (;;) {
-    int result = verifyEpisodeSamples(j, samples, sampleSize, c, expectedLocal, info);
+    int result = verifyEpisodeSamples(j, decoded, decodedCount, c, expectedLocal, info);
     if (result >= 0) return result;
     pthread_mutex_lock(&mu); int done = j->local_worker_done; pthread_mutex_unlock(&mu);
     if (j->parar) { if (info) info->reason = EP_VERIFY_CANCELLED; return 0; }
@@ -680,7 +723,7 @@ static void *poolLookupWorker(void *arg) {
           printf("[miniatura] episode candidate %.12s skipped: only %d package tile(s)\n", c->fp, c->nTiles); fflush(stdout);
           continue;
         }
-        int localSlots[5], remoteSlots[5];
+        int localSlots[EPISODE_SAMPLE_COUNT], remoteSlots[EPISODE_SAMPLE_COUNT];
         const char *layoutReason = "unknown";
         if (!candidateSampleLayout(j, c, w->playheadMs, localSlots, remoteSlots, &layoutReason)) {
           printf("[miniatura] episode candidate %.12s sample layout unavailable: %s\n", c->fp, layoutReason); fflush(stdout);
@@ -688,9 +731,10 @@ static void *poolLookupWorker(void *arg) {
         }
         size_t sampleSize = 0; unsigned char *samples = NULL;
         MpoolSampleInfo sampleInfo;
-        printf("[miniatura] episode candidate %.12s sample request slots=%d,%d,%d,%d,%d\n",
-               c->fp, remoteSlots[0], remoteSlots[1], remoteSlots[2], remoteSlots[3], remoteSlots[4]); fflush(stdout);
-        if (!minipool_buscar_slots(ajustes_openseek_pool_receber(), c, remoteSlots, 5,
+        printf("[miniatura] episode candidate %.12s sample request slots=%d,%d,%d,%d,%d,%d,%d,%d\n",
+               c->fp, remoteSlots[0], remoteSlots[1], remoteSlots[2], remoteSlots[3],
+               remoteSlots[4], remoteSlots[5], remoteSlots[6], remoteSlots[7]); fflush(stdout);
+        if (!minipool_buscar_slots(ajustes_openseek_pool_receber(), c, remoteSlots, EPISODE_SAMPLE_COUNT,
                                    &samples, &sampleSize, &j->parar, &sampleInfo)) {
           printf("[miniatura] episode candidate %.12s sample fetch failed: http=%d status=%s requested=%d returned=%d bytes=%zu\n",
                  c->fp, sampleInfo.httpStatus, episodeSampleFetchText(sampleInfo.status),
@@ -702,15 +746,20 @@ static void *poolLookupWorker(void *arg) {
                sampleInfo.returnedTiles, sampleInfo.responseBytes); fflush(stdout);
         EpisodeVerifyInfo verifyInfo;
         int accepted = esperarVerificacao(j, samples, sampleSize, c, localSlots, &verifyInfo);
+        printf("[miniatura] episode candidate %.12s verification: %s\n",
+               c->fp, episodeVerifyReasonText(verifyInfo.reason));
+        printf("[miniatura] episode candidate %.12s samples: remote=%d compared=%d matched=%d anchors=%d/2 anchor_matches=%d/2\n",
+               c->fp, verifyInfo.remoteSamples, verifyInfo.tested, verifyInfo.matched,
+               verifyInfo.anchorsTested, verifyInfo.anchorsMatched); fflush(stdout);
+        if (!accepted || j->parar) { free(samples); continue; }
+        int sampleAdded = desempacotarCandidato(j, samples, sampleSize, c->durationMs, &grid);
         free(samples);
-        printf("[miniatura] episode candidate %.12s: verification=%s remote=%d compared=%d matched=%d anchors=%d/2 anchor_matches=%d/2\n",
-               c->fp, episodeVerifyReasonText(verifyInfo.reason), verifyInfo.remoteSamples,
-               verifyInfo.tested, verifyInfo.matched, verifyInfo.anchorsTested,
-               verifyInfo.anchorsMatched); fflush(stdout);
-        if (!accepted || j->parar) continue;
+        printf("[miniatura] OpenSeek episode reuse: %d verified sample tile(s) from %s\n",
+               sampleAdded, c->fp); fflush(stdout);
         if (minipool_buscar_candidato(ajustes_openseek_pool_receber(), c, &b, &n, &j->parar)) {
           int added = desempacotarCandidato(j, b, n, c->durationMs, &grid);
-          printf("[miniatura] OpenSeek episode reuse: %d tile(s) from verified candidate %s\n", added, c->fp); fflush(stdout);
+          printf("[miniatura] OpenSeek episode reuse: %d additional tile(s) from verified candidate %s\n",
+                 added, c->fp); fflush(stdout);
           free(b); b = NULL;
           if (added) break;
         }
@@ -744,7 +793,11 @@ static int salvarPool(Job *j, const MiniMeta *meta) {
   if (ok) {
     printf("[miniatura] OpenSeek pool: sent %d tile(s), %zu bytes in %u ms\n", c, n, SDL_GetTicks() - inicio); fflush(stdout);
   } else {
-    printf("[miniatura] OpenSeek pool upload unavailable; local thumbnails kept\n"); fflush(stdout);
+    if (minipool_contribuicao_recusada())
+      printf("[miniatura] OpenSeek pool upload denied: not_contribute; local thumbnails kept\n");
+    else
+      printf("[miniatura] OpenSeek pool upload unavailable; local thumbnails kept\n");
+    fflush(stdout);
   }
   free(b);
   return ok;
