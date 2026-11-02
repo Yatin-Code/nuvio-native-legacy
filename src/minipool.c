@@ -24,7 +24,7 @@
 static pthread_mutex_t mp_mu = PTHREAD_MUTEX_INITIALIZER;
 static char mp_url[256] = MP_DEFAULT_URL, mp_pin[64], mp_token[96], mp_erro[128];
 static MpoolEstado mp_estado = MPOOL_PARADO;
-static int mp_busy;
+static int mp_busy, mp_contribution_denied;
 
 typedef struct { int mode; char code[32], url[256], pin[64], token[96]; } MpoolWork;
 static void wipe(void *p, size_t n) { volatile unsigned char *q = p; while (n--) *q++ = 0; }
@@ -81,13 +81,21 @@ const char *minipool_estado_texto(void) {
   else snprintf(copy, sizeof copy, "%s", "Vincular com código");
   pthread_mutex_unlock(&mp_mu); return copy;
 }
+int minipool_contribuicao_recusada(void) {
+  int denied;
+  pthread_mutex_lock(&mp_mu); denied = mp_contribution_denied; pthread_mutex_unlock(&mp_mu);
+  return denied;
+}
 
 int minipool_servidor_definir(const char *url) {
   char clean[256], line[260]; int remove_token = 0;
   if (!url_valida(url, clean)) return 0;
   pthread_mutex_lock(&mp_mu);
   if (mp_busy) { pthread_mutex_unlock(&mp_mu); return 0; }
-  if (strcmp(mp_url, clean)) { snprintf(mp_url, sizeof mp_url, "%s", clean); limpar_token_memoria_locked(); mp_estado = MPOOL_PARADO; remove_token = 1; }
+  if (strcmp(mp_url, clean)) {
+    snprintf(mp_url, sizeof mp_url, "%s", clean); limpar_token_memoria_locked();
+    mp_contribution_denied = 0; mp_estado = MPOOL_PARADO; remove_token = 1;
+  }
   pthread_mutex_unlock(&mp_mu);
   if (remove_token) dados_apagar(MP_TOKEN_FILE);
   snprintf(line, sizeof line, "%s\n", clean); return dados_gravar(MP_URL_FILE, line);
@@ -97,7 +105,10 @@ int minipool_pin_definir(const char *pin) {
   if (!pin_valido(pin)) return 0;
   pthread_mutex_lock(&mp_mu);
   if (mp_busy) { pthread_mutex_unlock(&mp_mu); return 0; }
-  if (strcmp(mp_pin, pin)) { snprintf(mp_pin, sizeof mp_pin, "%s", pin); limpar_token_memoria_locked(); mp_estado = MPOOL_PARADO; remove_token = 1; }
+  if (strcmp(mp_pin, pin)) {
+    snprintf(mp_pin, sizeof mp_pin, "%s", pin); limpar_token_memoria_locked();
+    mp_contribution_denied = 0; mp_estado = MPOOL_PARADO; remove_token = 1;
+  }
   pthread_mutex_unlock(&mp_mu);
   if (remove_token) dados_apagar(MP_TOKEN_FILE);
   snprintf(line, sizeof line, "%s\n", pin); return dados_gravar(MP_PIN_FILE, line);
@@ -249,7 +260,10 @@ static void *mp_worker(void *arg) {
     ok = start_pair(w->url, w->pin, w->code, new_token);
     if (ok) { char line[100]; snprintf(line, sizeof line, "%s\n", new_token); if (!dados_gravar(MP_TOKEN_FILE, line)) ok = 0; }
     pthread_mutex_lock(&mp_mu);
-    if (ok) { snprintf(mp_token, sizeof mp_token, "%s", new_token); mp_estado = MPOOL_LIGADO; mp_erro[0] = 0; }
+    if (ok) {
+      snprintf(mp_token, sizeof mp_token, "%s", new_token);
+      mp_contribution_denied = 0; mp_estado = MPOOL_LIGADO; mp_erro[0] = 0;
+    }
     else { mp_estado = MPOOL_ERRO; snprintf(mp_erro, sizeof mp_erro, "%s", "Vinculação falhou; confira código e pin TLS"); }
     pthread_mutex_unlock(&mp_mu);
   } else {
@@ -257,7 +271,10 @@ static void *mp_worker(void *arg) {
     int status = request("DELETE", url, w->pin, w->token, NULL, NULL, 0, 1024, 45000, &r);
     rede_resposta_limpar(&r);
     pthread_mutex_lock(&mp_mu);
-    if (status == 204) { limpar_token_memoria_locked(); mp_estado = MPOOL_PARADO; mp_erro[0] = 0; }
+    if (status == 204) {
+      limpar_token_memoria_locked(); mp_contribution_denied = 0;
+      mp_estado = MPOOL_PARADO; mp_erro[0] = 0;
+    }
     else { mp_estado = MPOOL_ERRO; snprintf(mp_erro, sizeof mp_erro, "%s", "Não foi possível revogar; tente novamente"); }
     pthread_mutex_unlock(&mp_mu);
     if (status == 204) dados_apagar(MP_TOKEN_FILE);
@@ -333,6 +350,12 @@ static int response_header(const char *all, const char *name, char *out, size_t 
     if (!end) break; p = end + 1;
   }
   return 0;
+}
+
+static int response_error(const RedeResposta *r, const char *wanted) {
+  char code[64] = "";
+  return r && r->corpo && wanted && js_texto(r->corpo, NULL, "error", code, sizeof code) &&
+         !strcmp(code, wanted);
 }
 
 int minipool_episode_key(const MiniMeta *meta, char key[65]) {
@@ -514,7 +537,8 @@ int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, siz
 }
 
 int minipool_enviar(int enabled, const MiniMeta *meta, const unsigned char *data, size_t size) {
-  char url[512], base[256], pin[64], token[96], profile[24]; RedeResposta r = {0}; int status, grid;
+  char url[512], base[256], pin[64], token[96], profile[24];
+  RedeResposta r = {0}; int status, grid;
   if (!enabled || !meta || !hex_string(meta->fp, 64) || !data || size > MP_MAX_PACKAGE || !minipool_pareado()) return 0;
   if (size < 20) return 0;
   grid = (int)read32(data + 8); if (grid != 5000 && grid != 10000) return 0;
@@ -525,13 +549,40 @@ int minipool_enviar(int enabled, const MiniMeta *meta, const unsigned char *data
   char episode_key[65] = "";
   int have_episode_key = minipool_episode_key(meta, episode_key);
   if (have_episode_key)
-    snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld&episode_key=%s", base, meta->fp, profile, meta->durMs, episode_key);
+    snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld&episode_key=%s",
+             base, meta->fp, profile, meta->durMs, episode_key);
   else
-    snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld", base, meta->fp, profile, meta->durMs);
+    snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld",
+             base, meta->fp, profile, meta->durMs);
   status = request("PUT", url, pin, token, "application/vnd.openseek.nvmt", data, size, 16 * 1024, 45000, &r);
-  rede_resposta_limpar(&r); wipe(token, sizeof token); return status == 200 || status == 201;
+  if (status == 409 && response_error(&r, "media_metadata_conflict")) {
+    char storedText[32] = "", *end = NULL;
+    if (response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", storedText, sizeof storedText)) {
+      long storedDuration = strtol(storedText, &end, 10);
+      // Retrying only works when the existing duration describes the same NVMT
+      // slot count and every frame timestamp still fits that duration.
+      if (end && *end == 0 && storedDuration > 0 && storedDuration != meta->durMs &&
+          nvmt_ok(data, size, storedDuration, grid)) {
+        rede_resposta_limpar(&r);
+        if (have_episode_key)
+          snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld&episode_key=%s",
+                   base, meta->fp, profile, storedDuration, episode_key);
+        else
+          snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld",
+                   base, meta->fp, profile, storedDuration);
+        status = request("PUT", url, pin, token, "application/vnd.openseek.nvmt",
+                         data, size, 16 * 1024, 45000, &r);
+      }
+    }
+  }
+  int denied = status == 403 && response_error(&r, "not_contribute");
+  if (denied || status == 200 || status == 201) {
+    pthread_mutex_lock(&mp_mu);
+    mp_contribution_denied = denied;
+    pthread_mutex_unlock(&mp_mu);
+  }
+  rede_resposta_limpar(&r); wipe(token, sizeof token);
+  return status == 200 || status == 201;
 }
 
 #endif
-
-

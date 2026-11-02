@@ -10391,6 +10391,10 @@ static const char *textoValor(int op) {
   if(ajIptvGerenciador(op))return i18n("Abrir");
   if(op==AJ_IPTV_CONTA)return ajIptvNome(iptv_conta_indice());
   static char buf[48];
+#ifdef NV_MINIATURAS
+  if (op == AJ_OPENPOOL_CONTRIBUIR && ajustes_openseek_pool_contribuir() &&
+      minipool_contribuicao_recusada()) return i18n("recusada pelo servidor");
+#endif
   if (op == AJ_XTREAM_CONEXOES) return i18n(V_CONEXOES[xtream_conexoes_modo()]);
   if (ajFalhaBackend(op)) {
     int v = ajFalhaValor(op);

@@ -46,6 +46,7 @@ int minipool_pareado(void);
 MpoolEstado minipool_estado(void);
 const char *minipool_estado_texto(void);
 const char *minipool_erro(void);
+int minipool_contribuicao_recusada(void);
 void minipool_vincular(const char *codigo_convite);
 void minipool_desvincular(void);
 
