@@ -5,6 +5,7 @@
 #include "minipool.h"
 #include "admin.h"
 #include "dados.h"
+#include "idbase.h"
 #include "js.h"
 #include "rede.h"
 #include <ctype.h>
@@ -335,13 +336,29 @@ static int response_header(const char *all, const char *name, char *out, size_t 
 }
 
 int minipool_episode_key(const MiniMeta *meta, char key[65]) {
-  char identity[128];
+  char identity[128], imdb[24];
+  int temporada, episodio;
   if (key) key[0] = 0;
-  if (!meta || !key || meta->temporada <= 0 || meta->episodio <= 0 ||
-      strncmp(meta->imdb, "tt", 2) || strlen(meta->imdb) < 7 || strlen(meta->imdb) > 12) return 0;
-  for (const char *p = meta->imdb + 2; *p; p++) if (!isdigit((unsigned char)*p)) return 0;
+  if (!meta || !key) return 0;
+  // Catalog IDs can arrive with an episode suffix (tt1234567:2:4). Pool keys
+  // use the base IMDb ID plus explicit season/episode fields, so normalize the
+  // ID and recover the suffix only when the separate fields are absent.
+  idbase_copiar(meta->imdb, imdb, sizeof imdb);
+  temporada = meta->temporada; episodio = meta->episodio;
+  if (temporada < 0 || episodio <= 0) {
+    int idTemporada = 0, idEpisodio = 0;
+    idbase_episodio(meta->imdb, &idTemporada, &idEpisodio);
+    if (idEpisodio > 0) {
+      if (temporada < 0 || (episodio <= 0 && temporada == 0 && idTemporada > 0))
+        temporada = idTemporada;
+      if (episodio <= 0) episodio = idEpisodio;
+    }
+  }
+  if (temporada < 0 || episodio <= 0 || strncmp(imdb, "tt", 2) ||
+      strlen(imdb) < 7 || strlen(imdb) > 12) return 0;
+  for (const char *p = imdb + 2; *p; p++) if (!isdigit((unsigned char)*p)) return 0;
   int n = snprintf(identity, sizeof identity, "openseek-episode-v1\nimdb:%s\nseason:%d\nepisode:%d",
-                   meta->imdb, meta->temporada, meta->episodio);
+                   imdb, temporada, episodio);
   if (n <= 0 || (size_t)n >= sizeof identity) return 0;
   admin_sha256_hex((const unsigned char *)identity, (unsigned long)n, key);
   wipe(identity, sizeof identity);
@@ -388,6 +405,8 @@ int minipool_episode_candidates(int enabled, const char *key, long durationMs,
       p = js_prox(end);
     }
   }
+  printf("[miniatura] OpenSeek episode candidate index: HTTP %d, %d candidate(s)\n", status, found);
+  fflush(stdout);
   rede_resposta_limpar(&r); wipe(token, sizeof token); *count = found; return found > 0;
 }
 

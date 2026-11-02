@@ -571,7 +571,11 @@ static void *poolLookupWorker(void *arg) {
   }
   if (!j->parar && !exactComplete) {
     char key[65] = ""; MpoolCandidate candidates[8]; int candidateCount = 0;
-    if (!j->parar && minipool_episode_key(&meta, key) &&
+    int haveEpisodeKey = minipool_episode_key(&meta, key);
+    if (!j->parar && !haveEpisodeKey) {
+      printf("[miniatura] OpenSeek episode lookup skipped: no usable episode identity\n"); fflush(stdout);
+    }
+    if (!j->parar && haveEpisodeKey &&
         minipool_episode_candidates(ajustes_openseek_pool_receber(), key, meta.durMs,
                                     candidates, &candidateCount, &j->parar)) {
       for (int ci = 0; ci < candidateCount && ci < 8 && !j->parar; ci++) {
