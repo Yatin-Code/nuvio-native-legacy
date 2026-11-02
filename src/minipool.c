@@ -412,9 +412,15 @@ int minipool_episode_candidates(int enabled, const char *key, long durationMs,
 
 static int minipool_package_get(int enabled, const char *fp, const char *profile,
                                 long durationMs, const int *slots, int nSlots,
-                                unsigned char **data, size_t *size, volatile int *cancelar) {
+                                unsigned char **data, size_t *size, volatile int *cancelar,
+                                MpoolSampleInfo *sampleInfo) {
   char url[1024], base[256], pin[64], token[96], duration[32] = "", hash[80] = "", digest[65];
   int status = 0, grid = candidate_grid(profile); RedeResposta r = {0};
+  if (sampleInfo) {
+    memset(sampleInfo, 0, sizeof *sampleInfo);
+    sampleInfo->status = MPOOL_SAMPLE_NOT_ATTEMPTED;
+    sampleInfo->requestedSlots = slots ? nSlots : 0;
+  }
   if (data) *data = NULL; if (size) *size = 0;
   if (!enabled || !data || !size || !hex_string(fp, 64) || !grid || durationMs <= 0 ||
       (slots && (nSlots < 1 || nSlots > 12)) || (!slots && nSlots != 0)) return 0;
@@ -434,29 +440,47 @@ static int minipool_package_get(int enabled, const char *fp, const char *profile
     }
   } else snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s", base, fp, profile);
   status = request_cancelable("GET", url, pin, token, NULL, NULL, 0, MP_MAX_PACKAGE, 15000, cancelar, &r);
-  if (status == 200 && r.corpo && response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", duration, sizeof duration) &&
-      response_header(r.cabecalhos, "X-OpenSeek-Sha256", hash, sizeof hash) && atol(duration) == durationMs &&
-      hex_string(hash, 64) && r.n_corpo <= MP_MAX_PACKAGE && nvmt_ok((unsigned char *)r.corpo, r.n_corpo, durationMs, grid)) {
-    admin_sha256_hex((const unsigned char *)r.corpo, (unsigned long)r.n_corpo, digest);
-    if (!strcasecmp(digest, hash)) {
-      *data = (unsigned char *)r.corpo; r.corpo = NULL; *size = r.n_corpo; status = 1;
-    } else status = 0;
-  } else status = 0;
+  if (sampleInfo) {
+    sampleInfo->httpStatus = status;
+    sampleInfo->responseBytes = r.n_corpo;
+    if (r.corpo && r.n_corpo >= 20 && !memcmp(r.corpo, "NVMT", 4))
+      sampleInfo->returnedTiles = (int)read32((const unsigned char *)r.corpo + 16);
+  }
+  if (status != 200) {
+    if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_HTTP_ERROR;
+    goto done;
+  }
+  if (!r.corpo || !response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", duration, sizeof duration) ||
+      !response_header(r.cabecalhos, "X-OpenSeek-Sha256", hash, sizeof hash) || atol(duration) != durationMs ||
+      !hex_string(hash, 64) || r.n_corpo > MP_MAX_PACKAGE ||
+      !nvmt_ok((unsigned char *)r.corpo, r.n_corpo, durationMs, grid)) {
+    if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_INVALID_RESPONSE;
+    goto done;
+  }
+  admin_sha256_hex((const unsigned char *)r.corpo, (unsigned long)r.n_corpo, digest);
+  if (strcasecmp(digest, hash)) {
+    if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_CHECKSUM_MISMATCH;
+    goto done;
+  }
+  *data = (unsigned char *)r.corpo; r.corpo = NULL; *size = r.n_corpo;
+  if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_OK;
 done:
-  rede_resposta_limpar(&r); wipe(token, sizeof token); return status == 1;
+  rede_resposta_limpar(&r); wipe(token, sizeof token); return *data != NULL;
 }
 
 int minipool_buscar_slots(int enabled, const MpoolCandidate *candidate,
                           const int *slots, int nSlots, unsigned char **data, size_t *size,
-                          volatile int *cancelar) {
+                          volatile int *cancelar, MpoolSampleInfo *info) {
   return candidate ? minipool_package_get(enabled, candidate->fp, candidate->profile,
-                                           candidate->durationMs, slots, nSlots, data, size, cancelar) : 0;
+                                           candidate->durationMs, slots, nSlots, data, size, cancelar,
+                                           info) : 0;
 }
 
 int minipool_buscar_candidato(int enabled, const MpoolCandidate *candidate,
                               unsigned char **data, size_t *size, volatile int *cancelar) {
   return candidate ? minipool_package_get(enabled, candidate->fp, candidate->profile,
-                                           candidate->durationMs, NULL, 0, data, size, cancelar) : 0;
+                                           candidate->durationMs, NULL, 0, data, size, cancelar,
+                                           NULL) : 0;
 }
 
 int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, size_t *size,

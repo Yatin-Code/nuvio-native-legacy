@@ -3,6 +3,7 @@
 #define NV_MINIPOOL_H
 
 #include "minidrive.h"
+#include <stddef.h>
 
 typedef enum {
   MPOOL_PARADO = 0,
@@ -19,6 +20,22 @@ typedef struct {
   int nSlots;
   int nTiles;
 } MpoolCandidate;
+
+typedef enum {
+  MPOOL_SAMPLE_NOT_ATTEMPTED = 0,
+  MPOOL_SAMPLE_HTTP_ERROR,
+  MPOOL_SAMPLE_INVALID_RESPONSE,
+  MPOOL_SAMPLE_CHECKSUM_MISMATCH,
+  MPOOL_SAMPLE_OK
+} MpoolSampleStatus;
+
+typedef struct {
+  MpoolSampleStatus status;
+  int httpStatus;
+  int requestedSlots;
+  int returnedTiles;
+  size_t responseBytes;
+} MpoolSampleInfo;
 
 void minipool_carregar(void);
 const char *minipool_servidor(void);
@@ -43,7 +60,8 @@ int minipool_episode_candidates(int enabled, const char *key, long durationMs,
                                 MpoolCandidate out[8], int *count, volatile int *cancelar);
 int minipool_buscar_slots(int enabled, const MpoolCandidate *candidate,
                           const int *slots, int nSlots,
-                          unsigned char **data, size_t *size, volatile int *cancelar);
+                          unsigned char **data, size_t *size, volatile int *cancelar,
+                          MpoolSampleInfo *info);
 int minipool_buscar_candidato(int enabled, const MpoolCandidate *candidate,
                               unsigned char **data, size_t *size, volatile int *cancelar);
 // Blocking; uploads one NVMT package only when enabled and paired.
