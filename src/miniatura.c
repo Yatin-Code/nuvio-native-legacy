@@ -409,10 +409,19 @@ static int dhashDistance(uint64_t a, uint64_t b) {
 static int candidateSampleLayout(Job *j, const MpoolCandidate *c, long playheadMs,
                                  int localSlots[5], int remoteSlots[5]) {
   static const long offsetsMs[5] = {0, 10000, 20000, 60000, 120000};
-  int step, grid = nvmtGrid(c->profile), direction = 1;
+  int step, done, grid = nvmtGrid(c->profile), direction = 1;
   long dur;
-  pthread_mutex_lock(&mu); step = j->passo; dur = j->dur; pthread_mutex_unlock(&mu);
-  if (step <= 0 || !grid || dur <= 0 || c->durationMs <= 0) return 0;
+  Uint32 deadline = SDL_GetTicks() + 60000u;
+  // The pool worker starts before the local decoder opens. A fast candidate
+  // response can arrive while passo is still 0; wait for the local grid rather
+  // than silently dropping this cross-encode candidate.
+  for (;;) {
+    pthread_mutex_lock(&mu); step = j->passo; dur = j->dur; done = j->local_worker_done; pthread_mutex_unlock(&mu);
+    if (step > 0) break;
+    if (j->parar || done || (Sint32)(SDL_GetTicks() - deadline) >= 0) return 0;
+    dormirJ(j, 200);
+  }
+  if (!grid || dur <= 0 || c->durationMs <= 0) return 0;
   if (playheadMs + offsetsMs[4] >= dur && playheadMs >= offsetsMs[4]) direction = -1;
   for (int i = 0; i < 5; i++) {
     long target = playheadMs + direction * offsetsMs[i];
