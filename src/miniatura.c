@@ -547,17 +547,29 @@ static int desempacotarCandidato(Job *j, const unsigned char *b, size_t n,
   return added;
 }
 
+static int nvmtCompleto(const unsigned char *b, size_t n) {
+  if (!b || n < 20 || memcmp(b, "NVMT", 4) || get32(b + 4) != 1) return 0;
+  uint32_t slots = get32(b + 12), count = get32(b + 16);
+  // minipool validates that every record has a unique, in-range slot.
+  return slots > 0 && count == slots;
+}
+
 static void *poolLookupWorker(void *arg) {
   PoolLookup *w = arg; Job *j = w->j; MiniMeta meta = w->meta;
   Uint32 start = SDL_GetTicks(); unsigned char *b = NULL; size_t n = 0; char profile[16] = "";
-  long grid = 0; int hit = minipool_buscar(ajustes_openseek_pool_receber(), &meta, &b, &n, profile, &j->parar);
+  long grid = 0; int exactComplete = 0;
+  int hit = minipool_buscar(ajustes_openseek_pool_receber(), &meta, &b, &n, profile, &j->parar);
   if (hit && !j->parar) {
+    exactComplete = nvmtCompleto(b, n);
     int add = desempacotar(j, b, n, &grid);
     printf("[miniatura] OpenSeek exact lookup: %u ms, %d tile(s) (%s)\n", SDL_GetTicks() - start, add, profile); fflush(stdout);
+    if (!exactComplete) { printf("[miniatura] exact pool package is partial; checking episode variants\n"); fflush(stdout); }
     free(b); b = NULL;
   } else {
     free(b); b = NULL;
     printf("[miniatura] OpenSeek exact lookup: %u ms, %s\n", SDL_GetTicks() - start, j->parar ? "cancelled" : "miss/unavailable"); fflush(stdout);
+  }
+  if (!j->parar && !exactComplete) {
     char key[65] = ""; MpoolCandidate candidates[8]; int candidateCount = 0;
     if (!j->parar && minipool_episode_key(&meta, key) &&
         minipool_episode_candidates(ajustes_openseek_pool_receber(), key, meta.durMs,
