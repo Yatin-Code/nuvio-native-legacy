@@ -27,8 +27,8 @@
 // ~20% faster) and is closed while paused. The tiles stay compressed in RAM
 // (~8 KB each); only the few on screen become textures.
 //
-// Nothing is kept on the device: with Google Drive linked (minidrive.c) the set
-// is looked up before anything is made and saved when the title stops.
+// Nothing is kept on the device: OpenSeek and Google Drive lookups run beside
+// local extraction, so a slow remote read does not delay the first local tiles.
 //
 // Logs `[miniatura]`, never URLs or keys.
 #include "seekr.h"
@@ -93,7 +93,9 @@ typedef struct {
   int feitos, novos;
   long dur;
   volatile int parar;
-  int vivo;                  // the worker thread is running
+  int vivo, local_worker_done; // local decoder status; async pool lookups hold a separate reference
+  int drive_lookup_pending, drive_save_started;
+  char drive_id[128];
 } Job;
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -322,6 +324,276 @@ static void salvarDrive(Job *j, const MiniMeta *meta, const char *id) {
   free(b);
 }
 
+typedef struct { Job *j; MiniMeta meta; } DriveLookup;
+
+static void maybeSalvarDrive(Job *j, const MiniMeta *meta) {
+  char id[128]; int ready = 0;
+  pthread_mutex_lock(&mu);
+  if (j->local_worker_done && !j->drive_lookup_pending && !j->drive_save_started) {
+    j->drive_save_started = 1;
+    snprintf(id, sizeof id, "%s", j->drive_id);
+    ready = 1;
+  }
+  pthread_mutex_unlock(&mu);
+  if (ready) salvarDrive(j, meta, id);
+}
+
+static void *driveLookupWorker(void *arg) {
+  DriveLookup *w = arg; Job *j = w->j; MiniMeta meta = w->meta;
+  unsigned char *b = NULL; size_t n = 0; char id[128] = "";
+  Uint32 start = SDL_GetTicks();
+  int found = minidrive_buscar(&meta, &b, &n, id, sizeof id) == 1;
+  if (found) {
+    long grid = 0; int add = desempacotar(j, b, n, &grid);
+    minidrive_tocar(id);
+    pthread_mutex_lock(&mu); snprintf(j->drive_id, sizeof j->drive_id, "%s", id); pthread_mutex_unlock(&mu);
+    printf("[miniatura] Google Drive lookup: %u ms, hit; %d tile(s)\n", SDL_GetTicks() - start, add); fflush(stdout);
+  } else {
+    printf("[miniatura] Google Drive lookup: %u ms, miss/unavailable\n", SDL_GetTicks() - start); fflush(stdout);
+  }
+  free(b);
+  minidrive_limpeza();
+  pthread_mutex_lock(&mu); j->drive_lookup_pending = 0; pthread_mutex_unlock(&mu);
+  maybeSalvarDrive(j, &meta);
+  pthread_mutex_lock(&mu); soltarJob(j); pthread_mutex_unlock(&mu);
+  free(w); return NULL;
+}
+
+static void startDriveLookup(Job *j, const MiniMeta *meta) {
+  DriveLookup *w; pthread_t thread;
+  if (!minidrive_ligado() || (!meta->fp[0] && !meta->nk[0]) || j->parar) return;
+  w = calloc(1, sizeof *w); if (!w) return;
+  w->j = j; w->meta = *meta;
+  pthread_mutex_lock(&mu); j->refs++; j->drive_lookup_pending = 1; pthread_mutex_unlock(&mu);
+  if (pthread_create(&thread, NULL, driveLookupWorker, w) == 0) pthread_detach(thread);
+  else {
+    pthread_mutex_lock(&mu); j->drive_lookup_pending = 0; soltarJob(j); pthread_mutex_unlock(&mu);
+    free(w);
+  }
+}
+
+typedef struct { Job *j; MiniMeta meta; long playheadMs; } PoolLookup;
+
+static int nvmtGrid(const char *profile) {
+  return !strcmp(profile, "nvmt-v1-g5") ? 5000 : !strcmp(profile, "nvmt-v1-g10") ? 10000 : 0;
+}
+
+static int tileDhash(const unsigned char *jpg, int n, uint64_t *out) {
+  SDL_RWops *rw; SDL_Surface *s; uint8_t gray[8][9]; uint64_t hash = 0;
+  if (!jpg || n <= 0 || !out) return 0;
+  rw = SDL_RWFromConstMem(jpg, n); if (!rw) return 0;
+  s = IMG_Load_RW(rw, 1); if (!s) return 0;
+  if (s->w < 9 || s->h < 8 || s->format->BytesPerPixel < 1 || s->format->BytesPerPixel > 4 ||
+      (SDL_MUSTLOCK(s) && SDL_LockSurface(s) < 0)) { SDL_FreeSurface(s); return 0; }
+  for (int y = 0; y < 8; y++) for (int x = 0; x < 9; x++) {
+    int sx = (x * s->w) / 9, sy = (y * s->h) / 8;
+    unsigned char *p = (unsigned char *)s->pixels + sy * s->pitch + sx * s->format->BytesPerPixel;
+    Uint32 pixel = 0; Uint8 r = 0, g = 0, b = 0;
+    memcpy(&pixel, p, (size_t)s->format->BytesPerPixel);
+    SDL_GetRGB(pixel, s->format, &r, &g, &b);
+    gray[y][x] = (uint8_t)((77u * r + 150u * g + 29u * b) >> 8);
+  }
+  for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) {
+    hash <<= 1; if (gray[y][x] > gray[y][x + 1]) hash |= 1;
+  }
+  if (SDL_MUSTLOCK(s)) SDL_UnlockSurface(s);
+  SDL_FreeSurface(s); *out = hash; return 1;
+}
+
+static int dhashDistance(uint64_t a, uint64_t b) {
+  uint64_t x = a ^ b; int n = 0;
+  while (x) { x &= x - 1; n++; }
+  return n;
+}
+
+static int candidateSampleLayout(Job *j, const MpoolCandidate *c, long playheadMs,
+                                 int localSlots[5], int remoteSlots[5]) {
+  static const long offsetsMs[5] = {0, 10000, 20000, 60000, 120000};
+  int step, grid = nvmtGrid(c->profile), direction = 1;
+  long dur;
+  pthread_mutex_lock(&mu); step = j->passo; dur = j->dur; pthread_mutex_unlock(&mu);
+  if (step <= 0 || !grid || dur <= 0 || c->durationMs <= 0) return 0;
+  if (playheadMs + offsetsMs[4] >= dur && playheadMs >= offsetsMs[4]) direction = -1;
+  for (int i = 0; i < 5; i++) {
+    long target = playheadMs + direction * offsetsMs[i];
+    int k;
+    if (target < 0) target = 0;
+    if (target >= dur) target = dur - 1;
+    k = (int)((target + (long)BASE_MS * step / 2) / ((long)BASE_MS * step)) * step;
+    if (k >= j->n) k = j->n - 1 - (j->n - 1) % step;
+    if (k < 0) k = 0;
+    localSlots[i] = k;
+    long mappedMs = (long)((long long)k * BASE_MS * c->durationMs / dur);
+    remoteSlots[i] = (int)((mappedMs + grid / 2) / grid);
+    if (remoteSlots[i] >= c->nSlots) remoteSlots[i] = c->nSlots - 1;
+  }
+  return 1;
+}
+
+// 1 = visually consistent; 0 = rejected; -1 = waiting for local sample tiles.
+static int verifyEpisodeSamples(Job *j, const unsigned char *b, size_t n,
+                                const MpoolCandidate *c, const int expectedLocal[5],
+                                int *testedOut, int *matchedOut) {
+  size_t pos = 20; int count, tested = 0, matched = 0, step;
+  int expectedUsed[5] = {0}, anchorTested[2] = {0}, anchorMatched[2] = {0};
+  long guestDur;
+  if (testedOut) *testedOut = 0; if (matchedOut) *matchedOut = 0;
+  if (!b || n < 20 || memcmp(b, "NVMT", 4) || get32(b + 4) != 1 ||
+      get32(b + 8) != (uint32_t)nvmtGrid(c->profile)) return 0;
+  count = (int)get32(b + 16);
+  if (count < 4 || count > 12) return 0;
+  pthread_mutex_lock(&mu); step = j->passo; guestDur = j->dur; pthread_mutex_unlock(&mu);
+  if (step <= 0 || c->durationMs <= 0 || guestDur <= 0) return -1;
+  for (int i = 0; i < count; i++) {
+    uint32_t slot, rawPts, len; int32_t pts; uint64_t remoteHash;
+    long mappedMs; int expected = -1, center, best = -1, bestDelta = 0x7fffffff;
+    unsigned char *localCopy = NULL; int localN = 0;
+    if (pos + 12 > n) return 0;
+    slot = get32(b + pos); rawPts = get32(b + pos + 4); len = get32(b + pos + 8); pos += 12;
+    pts = (int32_t)rawPts;
+    if (len < 125 || len > 200000 || pos + len > n || pts < 0 || pts > c->durationMs ||
+        slot >= get32(b + 12) || !tileDhash(b + pos, (int)len, &remoteHash)) return 0;
+    mappedMs = (long)((long long)pts * guestDur / c->durationMs);
+    for (int k = 0; k < 5; k++) {
+      long delta = labs((long)((long long)expectedLocal[k] * BASE_MS) - mappedMs);
+      if (expected < 0 || delta < labs((long)((long long)expectedLocal[expected] * BASE_MS) - mappedMs)) expected = k;
+    }
+    if (expected < 0 || expectedUsed[expected]) { pos += len; continue; }
+    expectedUsed[expected] = 1;
+    center = expectedLocal[expected];
+    pthread_mutex_lock(&mu);
+    for (int d = -1; d <= 1; d++) {
+      int k = center + d * step;
+      if (k < 0 || k >= j->n || !j->tiles[k].jpg) continue;
+      int deltaMs = (int)labs(j->tiles[k].pts - mappedMs);
+      if (deltaMs < bestDelta) { best = k; bestDelta = deltaMs; }
+    }
+    if (best >= 0) {
+      localCopy = malloc((size_t)j->tiles[best].n);
+      if (localCopy) { memcpy(localCopy, j->tiles[best].jpg, (size_t)j->tiles[best].n); localN = j->tiles[best].n; }
+    }
+    pthread_mutex_unlock(&mu);
+    if (localCopy) {
+      uint64_t localHash;
+      if (tileDhash(localCopy, localN, &localHash)) {
+        tested++;
+        if (expected >= 3) anchorTested[expected - 3] = 1;
+        if (dhashDistance(remoteHash, localHash) <= 12) {
+          matched++;
+          if (expected >= 3) anchorMatched[expected - 3] = 1;
+        }
+      }
+      free(localCopy);
+    }
+    pos += len;
+  }
+  if (pos != n) return 0;
+  if (testedOut) *testedOut = tested; if (matchedOut) *matchedOut = matched;
+  if (tested < 4 || !anchorTested[0] || !anchorTested[1]) return -1;
+  return matched >= 4 && anchorMatched[0] && anchorMatched[1];
+}
+
+static int esperarVerificacao(Job *j, const unsigned char *samples, size_t sampleSize,
+                              const MpoolCandidate *c, const int expectedLocal[5],
+                              int *tested, int *matched) {
+  Uint32 deadline = SDL_GetTicks() + 60000u;
+  for (;;) {
+    int result = verifyEpisodeSamples(j, samples, sampleSize, c, expectedLocal, tested, matched);
+    if (result >= 0) return result;
+    pthread_mutex_lock(&mu); int done = j->local_worker_done; pthread_mutex_unlock(&mu);
+    if (j->parar || done || (Sint32)(SDL_GetTicks() - deadline) >= 0) return 0;
+    dormirJ(j, 200);
+  }
+}
+
+static int desempacotarCandidato(Job *j, const unsigned char *b, size_t n,
+                                 long sourceDuration, long *grade) {
+  uint32_t grid, count; size_t pos = 20; int added = 0, step;
+  if (grade) *grade = 0;
+  if (!b || n < 20 || memcmp(b, "NVMT", 4) || get32(b + 4) != 1 || sourceDuration <= 0) return 0;
+  grid = get32(b + 8); count = get32(b + 16);
+  if ((grid != 5000 && grid != 10000) || count == 0 || count > get32(b + 12)) return 0;
+  pthread_mutex_lock(&mu); step = j->passo; pthread_mutex_unlock(&mu);
+  if (step <= 0) return 0;
+  if (grade) *grade = (long)grid;
+  for (uint32_t i = 0; i < count; i++) {
+    uint32_t slot, ptsRaw, len; long pts, mapped; int k;
+    if (pos + 12 > n) break;
+    slot = get32(b + pos); ptsRaw = get32(b + pos + 4); len = get32(b + pos + 8); pos += 12;
+    pts = (long)(int32_t)ptsRaw;
+    if (slot >= get32(b + 12) || pts < 0 || pts > sourceDuration || len < 125 || len > 200000 || pos + len > n) break;
+    mapped = (long)((long long)pts * j->dur / sourceDuration);
+    k = (int)((mapped + BASE_MS * step / 2) / (BASE_MS * step)) * step;
+    if (k >= 0 && k < j->n && b[pos] == 0xff && b[pos + 1] == 0xd8 &&
+        b[pos + len - 2] == 0xff && b[pos + len - 1] == 0xd9) {
+      pthread_mutex_lock(&mu);
+      if (!j->tiles[k].jpg) {
+        unsigned char *jpg = malloc(len);
+        if (jpg) { memcpy(jpg, b + pos, len); j->tiles[k] = (Tile){ jpg, (int)len, mapped }; j->feitos++; added++; if (j == job) estado = SEEKR_PRONTO; }
+      }
+      pthread_mutex_unlock(&mu);
+    }
+    pos += len;
+  }
+  return added;
+}
+
+static void *poolLookupWorker(void *arg) {
+  PoolLookup *w = arg; Job *j = w->j; MiniMeta meta = w->meta;
+  Uint32 start = SDL_GetTicks(); unsigned char *b = NULL; size_t n = 0; char profile[16] = "";
+  long grid = 0; int hit = minipool_buscar(ajustes_openseek_pool_receber(), &meta, &b, &n, profile, &j->parar);
+  if (hit && !j->parar) {
+    int add = desempacotar(j, b, n, &grid);
+    printf("[miniatura] OpenSeek exact lookup: %u ms, %d tile(s) (%s)\n", SDL_GetTicks() - start, add, profile); fflush(stdout);
+    free(b); b = NULL;
+  } else {
+    free(b); b = NULL;
+    printf("[miniatura] OpenSeek exact lookup: %u ms, %s\n", SDL_GetTicks() - start, j->parar ? "cancelled" : "miss/unavailable"); fflush(stdout);
+    char key[65] = ""; MpoolCandidate candidates[8]; int candidateCount = 0;
+    if (!j->parar && minipool_episode_key(&meta, key) &&
+        minipool_episode_candidates(ajustes_openseek_pool_receber(), key, meta.durMs,
+                                    candidates, &candidateCount, &j->parar)) {
+      for (int ci = 0; ci < candidateCount && ci < 8 && !j->parar; ci++) {
+        MpoolCandidate *c = &candidates[ci];
+        long delta = labs(c->durationMs - meta.durMs);
+        long tolerance = meta.durMs / 100;
+        if (tolerance < 30000) tolerance = 30000;
+        if (!strcmp(c->fp, meta.fp) || delta > tolerance || c->nTiles < 4) continue;
+        int localSlots[5], remoteSlots[5];
+        if (!candidateSampleLayout(j, c, w->playheadMs, localSlots, remoteSlots)) continue;
+        size_t sampleSize = 0; unsigned char *samples = NULL;
+        if (!minipool_buscar_slots(ajustes_openseek_pool_receber(), c, remoteSlots, 5,
+                                   &samples, &sampleSize, &j->parar)) continue;
+        int tested = 0, matched = 0;
+        int accepted = esperarVerificacao(j, samples, sampleSize, c, localSlots, &tested, &matched);
+        free(samples);
+        printf("[miniatura] episode candidate %s: visual check %d/%d matching samples\n",
+               c->fp, matched, tested); fflush(stdout);
+        if (!accepted || j->parar) continue;
+        if (minipool_buscar_candidato(ajustes_openseek_pool_receber(), c, &b, &n, &j->parar)) {
+          int added = desempacotarCandidato(j, b, n, c->durationMs, &grid);
+          printf("[miniatura] OpenSeek episode reuse: %d tile(s) from verified candidate %s\n", added, c->fp); fflush(stdout);
+          free(b); b = NULL;
+          if (added) break;
+        }
+      }
+    }
+  }
+  free(b);
+  pthread_mutex_lock(&mu); soltarJob(j); pthread_mutex_unlock(&mu);
+  free(w); return NULL;
+}
+
+static void startPoolLookup(Job *j, const MiniMeta *meta, long playheadMs) {
+  PoolLookup *w; pthread_t thread;
+  if (!ajustes_openseek_pool_receber() || !minipool_pin_configurado() || j->parar) return;
+  w = calloc(1, sizeof *w); if (!w) return;
+  w->j = j; w->meta = *meta; w->playheadMs = playheadMs;
+  pthread_mutex_lock(&mu); j->refs++; pthread_mutex_unlock(&mu);
+  if (pthread_create(&thread, NULL, poolLookupWorker, w) == 0) pthread_detach(thread);
+  else { pthread_mutex_lock(&mu); soltarJob(j); pthread_mutex_unlock(&mu); free(w); }
+}
+
 static int salvarPool(Job *j, const MiniMeta *meta) {
   size_t n; int c;
   Uint32 inicio = SDL_GetTicks();
@@ -364,7 +636,7 @@ static void *trabalhar(void *u) {
   Leitor *l = calloc(1, sizeof *l);
   MiniMotor *m = NULL;
   MiniMeta meta; memset(&meta, 0, sizeof meta);
-  char id[128] = "", erro[128] = "";
+  char erro[128] = "";
   // One decoding thread: on the TV 2-3 threads were no faster while the player
   // decodes 4K (tests 22/10) and cost more memory.
   const int threads = 1;
@@ -372,7 +644,6 @@ static void *trabalhar(void *u) {
   unsigned long somaMs = 0;
   long medidas[MEDIDAS] = {0}; int nMedidas = 0;
   Uint32 ultimaPausaLog = 0; int pausasCaladas = 0;
-  long gradePack = 0;
   Uint32 etapaTick = SDL_GetTicks();
   Uint32 poolCheckpointAt = 0, poolCheckpointAttempt = 0;
   int poolUploadedTiles = 0;
@@ -411,37 +682,13 @@ static void *trabalhar(void *u) {
     fflush(stdout);
   }
 
-  // Shared OpenSeek first, then the personal Drive fallback. A public pool hit
-  // is useful before this TV has ever generated thumbnails for the title.
-  if (meta.fp[0] && ajustes_openseek_pool_receber() && !j->parar) {
-    etapaTick = SDL_GetTicks();
-    unsigned char *b = NULL; size_t n = 0; char profile[16] = "";
-    int hit = minipool_buscar(1, &meta, &b, &n, profile);
-    printf("[miniatura] OpenSeek lookup: %u ms, %s\n", SDL_GetTicks() - etapaTick, hit ? "hit" : "miss/unavailable");
-    if (hit) {
-      int add = desempacotar(j, b, n, &gradePack);
-      printf("[miniatura] %d tile(s) from OpenSeek (%s, %ld s grid)\n", add, profile, gradePack / 1000); fflush(stdout);
-    }
-    free(b);
-  }
-  pthread_mutex_lock(&mu); int poolCompleto = gradePack == BASE_MS && j->feitos >= j->n; pthread_mutex_unlock(&mu);
-  // Google Drive remains a personal fallback for its own previously saved set.
-  if (!poolCompleto && minidrive_ligado() && (meta.fp[0] || meta.nk[0]) && !j->parar) {
-    etapaTick = SDL_GetTicks();
-    unsigned char *b = NULL; size_t n = 0;
-    int driveHit = minidrive_buscar(&meta, &b, &n, id, sizeof id) == 1;
-    printf("[miniatura] Google Drive lookup: %u ms, %s\n", SDL_GetTicks() - etapaTick, driveHit ? "hit" : "miss/unavailable");
-    if (driveHit) {
-      int add = desempacotar(j, b, n, &gradePack);
-      printf("[miniatura] %d tile(s) from Google Drive (%ld s grid)\n", add, gradePack / 1000); fflush(stdout);
-      minidrive_tocar(id);
-    }
-    free(b);
-    minidrive_limpeza();
-  }
-  // A complete 5 s set: nothing left to make, not even opening the file.
-  pthread_mutex_lock(&mu); int completo = gradePack == BASE_MS && j->feitos >= j->n; pthread_mutex_unlock(&mu);
-  if (completo || j->parar) goto fim;
+  startPoolLookup(j, &meta, (long)(video_pos() * 1000.0));
+  startDriveLookup(j, &meta);
+
+  // Pool and personal Drive lookups are started after fingerprinting but run
+  // beside local decoding. A slow Telegram/Drive read must not hold the TV
+  // without local seek thumbnails.
+  if (j->parar) goto fim;
   if (l->total <= 0) { printf("[miniatura] stopped: source size unknown; fingerprint=%s\n", meta.fp[0] ? "read" : "unreadable"); goto semPrevia; }
 
   etapaTick = SDL_GetTicks();
@@ -459,6 +706,13 @@ static void *trabalhar(void *u) {
            i->formato, i->codec, i->largura, i->altura, i->bits, i->hdr ? " HDR" : "", i->chaves,
            ps == 1 ? "5 s" : "10 s", porque, (j->n + ps - 1) / ps);
     fflush(stdout);
+  }
+  pthread_mutex_lock(&mu);
+  int setCompleto = j->feitos >= (j->n + j->passo - 1) / j->passo;
+  pthread_mutex_unlock(&mu);
+  if (setCompleto) {
+    printf("[miniatura] full shared set arrived before local extraction\n"); fflush(stdout);
+    goto fim;
   }
   poolCheckpointAt = SDL_GetTicks();
 
@@ -590,8 +844,9 @@ semPrevia:
 fim:
   if (m) mini_motor_fechar(m);
   fflush(stdout);
+  pthread_mutex_lock(&mu); j->local_worker_done = 1; pthread_mutex_unlock(&mu);
   checkpointPool(j, &meta, 1, &poolUploadedTiles, &poolCheckpointAt, &poolCheckpointAttempt);
-  salvarDrive(j, &meta, id);
+  maybeSalvarDrive(j, &meta);
   free(l);
   pthread_mutex_lock(&mu);
   j->vivo = 0;

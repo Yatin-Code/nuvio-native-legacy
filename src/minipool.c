@@ -151,10 +151,14 @@ static int proof_equal(const char *a, const char *b) {
   return diff == 0;
 }
 
-static int request(const char *method, const char *url, const char *pin, const char *token,
-                   const char *content_type, const void *body, size_t body_size,
-                   size_t max_response, int prazo_ms, RedeResposta *r) {
+typedef struct { volatile int *flag; } MpCancel;
+static int mp_cancelar(void *u) { MpCancel *c = u; return c && c->flag && *c->flag; }
+
+static int request_cancelable(const char *method, const char *url, const char *pin, const char *token,
+                              const char *content_type, const void *body, size_t body_size,
+                              size_t max_response, int prazo_ms, volatile int *cancelar, RedeResposta *r) {
   char auth[128], ct[100]; const char *headers[3] = { NULL, NULL, NULL }; unsigned n = 0; RedePedido p;
+  MpCancel cancel_ctx = { cancelar };
   if (token && token[0]) { snprintf(auth, sizeof auth, "Authorization: Bearer %s", token); headers[n++] = auth; }
   if (content_type) { snprintf(ct, sizeof ct, "Content-Type: %s", content_type); headers[n++] = ct; }
   headers[n] = NULL; memset(&p, 0, sizeof p);
@@ -162,8 +166,17 @@ static int request(const char *method, const char *url, const char *pin, const c
   p.corpo = body; p.n_corpo = body_size; p.prazo_ms = prazo_ms;
   p.max_bytes = max_response; p.max_cabecalhos = 16 * 1024;
   p.seguir = 0; p.tls_pessoal = 1; p.tls_pin = pin;
+  p.parar = cancelar ? mp_cancelar : NULL;
+  p.parar_usuario = cancelar ? &cancel_ctx : NULL;
   if (!rede_pedir(&p, r) && !r->status) return 0;
   return r->status;
+}
+
+static int request(const char *method, const char *url, const char *pin, const char *token,
+                   const char *content_type, const void *body, size_t body_size,
+                   size_t max_response, int prazo_ms, RedeResposta *r) {
+  return request_cancelable(method, url, pin, token, content_type, body, body_size,
+                            max_response, prazo_ms, NULL, r);
 }
 
 static int normalize_code(const char *src, char code[17], char invite_tag[5]) {
@@ -321,20 +334,131 @@ static int response_header(const char *all, const char *name, char *out, size_t 
   return 0;
 }
 
-int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, size_t *size, char profile[16]) {
+int minipool_episode_key(const MiniMeta *meta, char key[65]) {
+  char identity[128];
+  if (key) key[0] = 0;
+  if (!meta || !key || meta->temporada <= 0 || meta->episodio <= 0 ||
+      strncmp(meta->imdb, "tt", 2) || strlen(meta->imdb) < 7 || strlen(meta->imdb) > 12) return 0;
+  for (const char *p = meta->imdb + 2; *p; p++) if (!isdigit((unsigned char)*p)) return 0;
+  int n = snprintf(identity, sizeof identity, "openseek-episode-v1\nimdb:%s\nseason:%d\nepisode:%d",
+                   meta->imdb, meta->temporada, meta->episodio);
+  if (n <= 0 || (size_t)n >= sizeof identity) return 0;
+  admin_sha256_hex((const unsigned char *)identity, (unsigned long)n, key);
+  wipe(identity, sizeof identity);
+  return hex_string(key, 64);
+}
+
+static int candidate_grid(const char *profile) {
+  if (!strcmp(profile, "nvmt-v1-g5")) return 5000;
+  if (!strcmp(profile, "nvmt-v1-g10")) return 10000;
+  return 0;
+}
+
+int minipool_episode_candidates(int enabled, const char *key, long durationMs,
+                                MpoolCandidate out[8], int *count, volatile int *cancelar) {
+  char url[512], base[256], pin[64], token[96];
+  RedeResposta r = {0}; int status, found = 0;
+  if (count) *count = 0;
+  if (out) memset(out, 0, sizeof(MpoolCandidate) * 8);
+  if (!enabled || !out || !count || !key || !hex_string(key, 64) || durationMs <= 0) return 0;
+  pthread_mutex_lock(&mp_mu);
+  snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin);
+  snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
+  if (!pin[0]) { wipe(token, sizeof token); return 0; }
+  snprintf(url, sizeof url, "%s/v1/pool/episodes/%s?duration_ms=%ld", base, key, durationMs);
+  status = request_cancelable("GET", url, pin, token, NULL, NULL, 0, 16 * 1024, 2500, cancelar, &r);
+  if (status == 200 && r.corpo) {
+    const char *p = js_array(r.corpo, NULL, "candidates");
+    while (p && found < 8) {
+      const char *end = js_fim(p); char fp[65] = "", profile[16] = "";
+      long dur; int slots, tiles, grid;
+      if (!end || end <= p) break;
+      if (js_texto(p, end, "fp", fp, sizeof fp) && hex_string(fp, 64) &&
+          js_texto(p, end, "profile", profile, sizeof profile) && (grid = candidate_grid(profile)) != 0) {
+        dur = (long)js_num(p, end, "duration_ms", 0);
+        slots = (int)js_num(p, end, "n_slots", 0); tiles = (int)js_num(p, end, "n_tiles", 0);
+        if (dur > 0 && slots > 0 && slots <= 8640 && tiles > 0 && tiles <= slots &&
+            slots == (int)(((long long)dur + grid - 1) / grid)) {
+          snprintf(out[found].fp, sizeof out[found].fp, "%s", fp);
+          snprintf(out[found].profile, sizeof out[found].profile, "%s", profile);
+          out[found].durationMs = dur; out[found].nSlots = slots; out[found].nTiles = tiles;
+          found++;
+        }
+      }
+      p = js_prox(end);
+    }
+  }
+  rede_resposta_limpar(&r); wipe(token, sizeof token); *count = found; return found > 0;
+}
+
+static int minipool_package_get(int enabled, const char *fp, const char *profile,
+                                long durationMs, const int *slots, int nSlots,
+                                unsigned char **data, size_t *size, volatile int *cancelar) {
+  char url[1024], base[256], pin[64], token[96], duration[32] = "", hash[80] = "", digest[65];
+  int status = 0, grid = candidate_grid(profile); RedeResposta r = {0};
+  if (data) *data = NULL; if (size) *size = 0;
+  if (!enabled || !data || !size || !hex_string(fp, 64) || !grid || durationMs <= 0 ||
+      (slots && (nSlots < 1 || nSlots > 12)) || (!slots && nSlots != 0)) return 0;
+  pthread_mutex_lock(&mp_mu);
+  snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin);
+  snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
+  if (!pin[0]) { wipe(token, sizeof token); return 0; }
+  if (slots) {
+    size_t used;
+    int n = snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&slots=", base, fp, profile);
+    if (n <= 0 || (size_t)n >= sizeof url) goto done;
+    used = (size_t)n;
+    for (int i = 0; i < nSlots; i++) {
+      n = snprintf(url + used, sizeof url - used, "%s%d", i ? "," : "", slots[i]);
+      if (n <= 0 || (size_t)n >= sizeof url - used) goto done;
+      used += (size_t)n;
+    }
+  } else snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s", base, fp, profile);
+  status = request_cancelable("GET", url, pin, token, NULL, NULL, 0, MP_MAX_PACKAGE, 15000, cancelar, &r);
+  if (status == 200 && r.corpo && response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", duration, sizeof duration) &&
+      response_header(r.cabecalhos, "X-OpenSeek-Sha256", hash, sizeof hash) && atol(duration) == durationMs &&
+      hex_string(hash, 64) && r.n_corpo <= MP_MAX_PACKAGE && nvmt_ok((unsigned char *)r.corpo, r.n_corpo, durationMs, grid)) {
+    admin_sha256_hex((const unsigned char *)r.corpo, (unsigned long)r.n_corpo, digest);
+    if (!strcasecmp(digest, hash)) {
+      *data = (unsigned char *)r.corpo; r.corpo = NULL; *size = r.n_corpo; status = 1;
+    } else status = 0;
+  } else status = 0;
+done:
+  rede_resposta_limpar(&r); wipe(token, sizeof token); return status == 1;
+}
+
+int minipool_buscar_slots(int enabled, const MpoolCandidate *candidate,
+                          const int *slots, int nSlots, unsigned char **data, size_t *size,
+                          volatile int *cancelar) {
+  return candidate ? minipool_package_get(enabled, candidate->fp, candidate->profile,
+                                           candidate->durationMs, slots, nSlots, data, size, cancelar) : 0;
+}
+
+int minipool_buscar_candidato(int enabled, const MpoolCandidate *candidate,
+                              unsigned char **data, size_t *size, volatile int *cancelar) {
+  return candidate ? minipool_package_get(enabled, candidate->fp, candidate->profile,
+                                           candidate->durationMs, NULL, 0, data, size, cancelar) : 0;
+}
+
+int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, size_t *size,
+                    char profile[16], volatile int *cancelar) {
   static const struct { const char *name; int grid; } profiles[] = { {"nvmt-v1-g5", 5000}, {"nvmt-v1-g10", 10000} };
-  char url[512], base[256], pin[64], token[96]; int found = 0;
+  char url[512], base[256], pin[64], token[96], episode_key[65] = ""; int found = 0;
   if (data) *data = NULL; if (size) *size = 0; if (profile) profile[0] = 0;
   if (!enabled || !meta || !data || !size || !profile || !hex_string(meta->fp, 64)) return 0;
+  int have_episode_key = minipool_episode_key(meta, episode_key);
   pthread_mutex_lock(&mp_mu); snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin); snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
   if (!pin[0]) return 0;
   for (size_t i = 0; i < sizeof profiles / sizeof *profiles; i++) {
+    if (cancelar && *cancelar) break;
     RedeResposta r = {0}; char duration[32] = "", hash[80] = "", digest[65];
-    snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s", base, meta->fp, profiles[i].name);
-    // The first package fetch may have to reach Telegram (4 MB took ~10 s in a
-    // live check); allow that cold read, but cap each optional lookup well below
-    // the generic API timeout so a dead pool cannot stall local generation.
-    int status = request("GET", url, pin, token, NULL, NULL, 0, MP_MAX_PACKAGE, 15000, &r);
+    if (have_episode_key)
+      snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&episode_key=%s", base, meta->fp, profiles[i].name, episode_key);
+    else
+      snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s", base, meta->fp, profiles[i].name);
+    // This runs beside local decoding. Keep the cold Telegram read allowance,
+    // but make every request cancellable when the TV switches sources.
+    int status = request_cancelable("GET", url, pin, token, NULL, NULL, 0, MP_MAX_PACKAGE, 15000, cancelar, &r);
     if (status == 200 && r.corpo && response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", duration, sizeof duration) &&
         response_header(r.cabecalhos, "X-OpenSeek-Sha256", hash, sizeof hash) && atol(duration) == meta->durMs &&
         hex_string(hash, 64) && r.n_corpo <= MP_MAX_PACKAGE && nvmt_ok((unsigned char *)r.corpo, r.n_corpo, meta->durMs, profiles[i].grid)) {
@@ -355,7 +479,12 @@ int minipool_enviar(int enabled, const MiniMeta *meta, const unsigned char *data
   if (!nvmt_ok(data, size, meta->durMs, grid)) return 0;
   pthread_mutex_lock(&mp_mu); snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin); snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
   if (!pin[0] || !token[0]) { wipe(token, sizeof token); return 0; }
-  snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld", base, meta->fp, profile, meta->durMs);
+  char episode_key[65] = "";
+  int have_episode_key = minipool_episode_key(meta, episode_key);
+  if (have_episode_key)
+    snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld&episode_key=%s", base, meta->fp, profile, meta->durMs, episode_key);
+  else
+    snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld", base, meta->fp, profile, meta->durMs);
   status = request("PUT", url, pin, token, "application/vnd.openseek.nvmt", data, size, 16 * 1024, 45000, &r);
   rede_resposta_limpar(&r); wipe(token, sizeof token); return status == 200 || status == 201;
 }
