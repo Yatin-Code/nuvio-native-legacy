@@ -708,7 +708,8 @@ static void *trabalhar(void *u) {
     fflush(stdout);
   }
   pthread_mutex_lock(&mu);
-  int setCompleto = j->feitos >= (j->n + j->passo - 1) / j->passo;
+  int setCompleto = 1;
+  for (int k = 0; k < j->n; k += j->passo) if (!j->tiles[k].jpg) { setCompleto = 0; break; }
   pthread_mutex_unlock(&mu);
   if (setCompleto) {
     printf("[miniatura] full shared set arrived before local extraction\n"); fflush(stdout);
