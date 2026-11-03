@@ -343,6 +343,7 @@ static int   barraFoco = 0;
 // The pool correction sub-menu is opened from its visible OSD action. It uses
 // the same left/right/OK/Back model as the rest of the TV player.
 static int poolCorrectionMenu = -1;
+static Uint32 poolCorrectionMenuAte;
 static int   visivel = 0;          // alvo dos controles (1 = em pe)
 static float anim = 0.0f;          // 0..1 seguindo `visivel`, por mola
 // SO A BARRA (#128). A busca que comeca com os controles escondidos (#121)
@@ -1886,7 +1887,9 @@ void player_abrir(int indiceCatalogo, const char *url) {
   // nao ha cards de episodios nem "Up next". Idempotente com o roteador de app.c.
   desc_episodios_garantir(idx);
   fonteAcaoInvalidar();
+  if (poolCorrectionMenu >= 0) { toastTexto[0] = 0; toastAte = 0; }
   aberto = 1; saindo = 0; pediuSair = 0; barraFoco = 0;
+  poolCorrectionMenu = -1; poolCorrectionMenuAte = 0;
   // Titulo novo: um avanco em curso do anterior mandaria a posicao velha ao
   // pipeline novo assim que o silencio vencesse.
   scrubbing = 0; scrubPassos = 0; scrubTocava = 0; scrubDir = 0; scrubToque = 0; scrubInicio = 0.0;
@@ -2873,6 +2876,8 @@ static void fecharSessao(int manter, int trocaFonte) {
   retido = manter; if (!manter) retidoVoo = 0;
   prepararRetencao = 0; saidaIlhaDesde = 0;
   esperandoFonte = 0; aberto = 0; saindo = 0; pediuSair = 0;
+  if (poolCorrectionMenu >= 0) { toastTexto[0] = 0; toastAte = 0; }
+  poolCorrectionMenu = -1; poolCorrectionMenuAte = 0;
   cinemaArteIniciar(NULL);
   pedProxT = pedProxE = trocaEpisodio = pedRecarregar = 0;
   scrubbing = scrubToque = 0; scrubInicio = 0.0;
@@ -3396,7 +3401,9 @@ static int transporteDuasLinhas(void) {
 static int transportePrimeiraLinha(void) {
   if (transporteSerie()) return 4;
   PlrAcao a[PLR_NBTNS]; int n = transporteAcoes(a);
-  return n > 6 ? (n + 1) / 2 : 2;
+  for (int i = 0; i < n; i++)
+    if (a[i].id == PLR_CORRECAO) return n > 6 ? (n + 1) / 2 : 2;
+  return 2;
 }
 static float transporteCelulaH(void) { return PLR_TOQUE_CELULA / gfx_escala_ui(); }
 static float transporteBarraY(void) {
@@ -4190,15 +4197,22 @@ static void poolCorrectionMenuMostrar(void) {
     "+2,5 s. Setas: escolher. OK: aplicar. Voltar: fechar.",
     "Recusar prévia. Setas: escolher. OK: aplicar. Voltar: fechar."
   };
-  if (poolCorrectionMenu >= 0 && poolCorrectionMenu < 3)
+  if (poolCorrectionMenu >= 0 && poolCorrectionMenu < 3) {
+    poolCorrectionMenuAte = SDL_GetTicks() + 5000u;
     player_toast_ex(i18n(mensagem[poolCorrectionMenu]), 5000, "pl_triangle-alert", 0);
+  }
 }
 
 static int poolCorrectionMenuEvento(const SDL_Event *e) {
-  if (poolCorrectionMenu < 0 || e->type != SDL_KEYDOWN) return 0;
+  if (poolCorrectionMenu < 0) return 0;
+  if ((Sint32)(SDL_GetTicks() - poolCorrectionMenuAte) >= 0) {
+    poolCorrectionMenu = -1; poolCorrectionMenuAte = 0;
+    return 1;
+  }
+  if (e->type != SDL_KEYDOWN) return 0;
   SDL_Keycode k = e->key.keysym.sym;
   if (k == SDLK_ESCAPE || k == SDLK_AC_BACK || k == SDLK_BACKSPACE || k == SDLK_DELETE) {
-    poolCorrectionMenu = -1;
+    poolCorrectionMenu = -1; poolCorrectionMenuAte = 0;
     toastTexto[0] = 0; toastAte = 0;
     return 1;
   }
@@ -4209,7 +4223,7 @@ static int poolCorrectionMenuEvento(const SDL_Event *e) {
   }
   if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) {
     int action = poolCorrectionMenu;
-    poolCorrectionMenu = -1;
+    poolCorrectionMenu = -1; poolCorrectionMenuAte = 0;
     confirmacaoTransporteRetida = 1;
     if (seekr_pool_correction_start(action)) {
       player_toast_ex(i18n("Aplicando correção..."), 5000, "pl_triangle-alert", 0);
@@ -4219,7 +4233,7 @@ static int poolCorrectionMenuEvento(const SDL_Event *e) {
     return 1;
   }
   // An unrelated key dismisses the sub-menu, then follows its usual player path.
-  poolCorrectionMenu = -1;
+  poolCorrectionMenu = -1; poolCorrectionMenuAte = 0;
   return 0;
 }
 
@@ -4308,7 +4322,7 @@ void player_evento(const SDL_Event *e) {
       pausao_activity(); break;
     default: break;
   }
-  if (!aberto || saindo) poolCorrectionMenu = -1;
+  if (!aberto || saindo) { poolCorrectionMenu = -1; poolCorrectionMenuAte = 0; }
   if (poolCorrectionMenuEvento(e)) return;
   if (e->type == SDL_KEYUP && (e->key.keysym.sym == SDLK_RETURN ||
       e->key.keysym.sym == SDLK_KP_ENTER || e->key.keysym.sym == SDLK_SPACE))
@@ -4629,6 +4643,9 @@ void player_atualizar(float dt, Uint32 agora) {
 #ifdef NV_TOUCH_UI
   playerTelaAtualizar();
 #endif
+  if (poolCorrectionMenu >= 0 && (Sint32)(agora - poolCorrectionMenuAte) >= 0) {
+    poolCorrectionMenu = -1; poolCorrectionMenuAte = 0;
+  }
   poolCorrectionResultadoAtualizar();
   if (retido) { player_validar_retido(agora); return; }
   if (aberto || mini) atualizarIdentidade();
@@ -4719,7 +4736,11 @@ void player_atualizar(float dt, Uint32 agora) {
     fflush(stdout);
     entrada = 0.0f;
   }
-  if (saindo && entrada < 0.02f) { aberto = 0; saindo = 0; entrada = 0.0f; saidaIlhaDesde = 0; avisarCascaAberto(0); return; }
+  if (saindo && entrada < 0.02f) {
+    aberto = 0; saindo = 0; entrada = 0.0f; saidaIlhaDesde = 0;
+    poolCorrectionMenu = -1; poolCorrectionMenuAte = 0;
+    avisarCascaAberto(0); return;
+  }
 
   // Havendo pipeline, posicao e duracao vem DELE; o dt so serve para as
   // animacoes. O relogio somado continua existindo para quando nao ha video
