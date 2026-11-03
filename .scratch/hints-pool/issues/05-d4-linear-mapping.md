@@ -1,6 +1,6 @@
 # D4 — Apply linear timing mapping
 
-Status: ready-for-agent
+Status: completed (commit `56e1dee1`)
 Blocked by: 04
 External: none
 Size: M
@@ -14,3 +14,5 @@ Part of: ../spec.md
 **Depends:** D3.
 
 ## Comments
+
+- 2026-11-04: Added linear timing mapping and bounds handling in commit `56e1dee1`.

@@ -1,6 +1,6 @@
 # D1 — Work key for movies (the actual bug)
 
-Status: ready-for-agent
+Status: completed (commit `2a76cfa9`)
 Blocked by: 01
 External: none
 Size: S
@@ -14,3 +14,5 @@ Part of: ../spec.md
 **Depends:** D0.
 
 ## Comments
+
+- 2026-11-04: Implemented the movie work key and its test coverage in commit `2a76cfa9`.

@@ -1,6 +1,6 @@
 # D6 — Client test harness
 
-Status: ready-for-agent
+Status: completed (commit `50c7f33d`)
 Blocked by: 02, 03
 External: none
 Size: M
@@ -13,3 +13,5 @@ Part of: ../spec.md
 **Depends:** D1, D2.
 
 ## Comments
+
+- 2026-11-04: Added the host-side `make test-minipool` harness in commit `50c7f33d`; it passes on the integration branch.

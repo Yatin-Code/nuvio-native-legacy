@@ -1,6 +1,6 @@
 # D2 — Send raw hints on lookup and upload
 
-Status: ready-for-agent
+Status: completed (commit `bbe8ac1e`)
 Blocked by: 02
 External: openseek-telegram#2 (A1 — v2 hint manifest / wire encoding)
 Size: M
@@ -20,3 +20,5 @@ Part of: ../spec.md
 **Depends:** D1; external A1.
 
 ## Comments
+
+- 2026-11-04: Added raw hints to candidate and upload requests, with request capture coverage, in commit `bbe8ac1e`.

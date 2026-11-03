@@ -1,6 +1,6 @@
 # D7 — Handle read-only channel contributions
 
-Status: ready-for-agent
+Status: waiting-external (OpenSeek #13 is open; blocked by #8 and #11)
 Blocked by: 03
 External: openseek-telegram#13 (B7 — read-only channel routing)
 Size: M
@@ -19,3 +19,5 @@ Part of: ../spec.md
 **Depends:** D2; external B7.
 
 ## Comments
+
+- 2026-11-04: Client prerequisites are complete. Waiting for OpenSeek B7 (#13), which remains open and is blocked by server issues #8 and #11. Resume D7 once the server contract is implemented.

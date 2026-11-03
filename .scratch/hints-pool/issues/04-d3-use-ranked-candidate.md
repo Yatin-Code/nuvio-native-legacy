@@ -1,6 +1,6 @@
 # D3 — Accept the ranked candidate without sample verification
 
-Status: ready-for-agent
+Status: completed (commit `e8854871`)
 Blocked by: 03
 External: openseek-telegram#5 (A4 — candidate ranking)
 Size: L
@@ -20,3 +20,5 @@ Part of: ../spec.md
 **Depends:** D2; external A4.
 
 ## Comments
+
+- 2026-11-04: Switched candidate handling to ranked results and removed request-time sample verification in commit `e8854871`.
