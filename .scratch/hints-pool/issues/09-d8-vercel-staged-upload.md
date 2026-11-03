@@ -1,6 +1,6 @@
 # D8 — Vercel staged upload and Telegram acceptance polling
 
-Status: waiting-external (OpenSeek #20 is open; blocked by #7 and #8)
+Status: waiting-external (OpenSeek F1/#20 is open; its B1/B2 prerequisites are complete)
 Blocked by: 03
 External: openseek-telegram#20 (F1 — Vercel deployment profile)
 Size: L
@@ -20,4 +20,4 @@ Part of: `../spec.md`
 
 ## Comments
 
-- 2026-11-04: Client prerequisites are complete. Waiting for OpenSeek F1 (#20), which remains open and is blocked by server issues #7 and #8. Resume D8 once the signed staging and polling contract is implemented.
+- 2026-11-04: OpenSeek B1/B2 are complete. D8 still waits on OpenSeek F1 (#20), which must define the signed staging and acceptance polling contract.

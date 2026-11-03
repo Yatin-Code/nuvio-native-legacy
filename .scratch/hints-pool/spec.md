@@ -1,6 +1,6 @@
 # Spec: hint-based shared pool — Nuvio client (epic D)
 
-Status: in progress — D0–D6 complete; D7 waits on OpenSeek B7 (#13), and D8 waits on F1 (#20).
+Status: in progress — D0–D6 complete; D7 is ready after OpenSeek B7 (#13), and D8 waits on F1 (#20).
 Scope: the native client in this repo (`src/minipool.c`, `src/minipool.h`, `src/miniatura.c`, `src/minidrive.h`, UI strings).
 Server spec: `Yatin-Code/openseek-telegram` GitHub issue #1; source ticket text `docs/TICKETS-HINTS-POOL.md` on `integration/hints-pool`.
 
@@ -110,4 +110,4 @@ If the node is read-only, the package reaches the configured `contribute_url` ex
 
 ## Comments
 
-- 2026-11-04: D0–D6 are implemented and committed on `integration/hints-pool`. D7 and D8 remain dependent on server-side channel and Vercel work; see issues 08 and 09.
+- 2026-11-04: D0–D6 are implemented and committed on `integration/hints-pool`. OpenSeek B7 is complete, so D7 is ready; D8 still waits on F1. See issues 08 and 09.
