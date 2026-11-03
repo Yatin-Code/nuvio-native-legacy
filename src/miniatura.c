@@ -381,6 +381,7 @@ static int nvmtGrid(const char *profile) {
   return !strcmp(profile, "nvmt-v1-g5") ? 5000 : !strcmp(profile, "nvmt-v1-g10") ? 10000 : 0;
 }
 
+#ifdef NV_MINIATURAS_DEBUG_SAMPLE_VERIFY
 static int tileDhash(const unsigned char *jpg, int n, uint64_t *out) {
   SDL_RWops *rw; SDL_Surface *s; uint8_t gray[8][9]; uint64_t hash = 0;
   if (!jpg || n <= 0 || !out) return 0;
@@ -641,6 +642,7 @@ static int esperarVerificacao(Job *j, const unsigned char *samples, size_t sampl
     dormirJ(j, 200);
   }
 }
+#endif
 
 static int desempacotarCandidato(Job *j, const unsigned char *b, size_t n,
                                  long sourceDuration, long *grade) {
@@ -701,24 +703,9 @@ static void *poolLookupWorker(void *arg) {
     if (!j->parar &&
         minipool_candidates(ajustes_openseek_pool_receber(), &meta, w->filename, w->sizeBytes,
                             candidates, &candidateCount, &j->parar)) {
-      for (int ci = 0; ci < candidateCount && ci < 8 && !j->parar; ci++) {
+      for (int ci = 0; ci < candidateCount && ci < 2 && !j->parar; ci++) {
         MpoolCandidate *c = &candidates[ci];
-        long delta = labs(c->durationMs - meta.durMs);
-        long tolerance = meta.durMs / 100;
-        if (tolerance < 30000) tolerance = 30000;
-        if (!strcmp(c->fp, meta.fp)) {
-          printf("[miniatura] episode candidate %.12s skipped: same fingerprint\n", c->fp); fflush(stdout);
-          continue;
-        }
-        if (delta > tolerance) {
-          printf("[miniatura] episode candidate %.12s skipped: duration difference %ld ms exceeds %ld ms\n",
-                 c->fp, delta, tolerance); fflush(stdout);
-          continue;
-        }
-        if (c->nTiles < 4) {
-          printf("[miniatura] episode candidate %.12s skipped: only %d package tile(s)\n", c->fp, c->nTiles); fflush(stdout);
-          continue;
-        }
+#ifdef NV_MINIATURAS_DEBUG_SAMPLE_VERIFY
         int localSlots[EPISODE_SAMPLE_COUNT], remoteSlots[EPISODE_SAMPLE_COUNT];
         const char *layoutReason = "unknown";
         if (!candidateSampleLayout(j, c, w->playheadMs, localSlots, remoteSlots, &layoutReason)) {
@@ -750,15 +737,26 @@ static void *poolLookupWorker(void *arg) {
         if (!accepted || j->parar) { free(samples); continue; }
         int sampleAdded = desempacotarCandidato(j, samples, sampleSize, c->durationMs, &grid);
         free(samples);
-        printf("[miniatura] SeekDB episode reuse: %d verified sample tile(s) from %s\n",
-               sampleAdded, c->fp); fflush(stdout);
+        if (!sampleAdded) continue;
         if (minipool_buscar_candidato(ajustes_openseek_pool_receber(), c, &b, &n, &j->parar)) {
           int added = desempacotarCandidato(j, b, n, c->durationMs, &grid);
-          printf("[miniatura] SeekDB episode reuse: %d additional tile(s) from verified candidate %s\n",
-                 added, c->fp); fflush(stdout);
           free(b); b = NULL;
-          if (added) break;
+          if (added) {
+            printf("[miniatura] hint hit fp=%.64s score=%d relation=%s\n", c->fp, c->score, c->relation);
+            fflush(stdout);
+            break;
+          }
         }
+#else
+        if (!minipool_buscar_candidato(ajustes_openseek_pool_receber(), c, &b, &n, &j->parar))
+          continue;
+        int added = desempacotarCandidato(j, b, n, c->durationMs, &grid);
+        free(b); b = NULL;
+        if (!added) continue;
+        printf("[miniatura] hint hit fp=%.64s score=%d relation=%s\n", c->fp, c->score, c->relation);
+        fflush(stdout);
+        break;
+#endif
       }
     }
   }

@@ -19,6 +19,8 @@ typedef struct {
   long durationMs;
   int nSlots;
   int nTiles;
+  int score;
+  char relation[32];
 } MpoolCandidate;
 
 typedef enum {

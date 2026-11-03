@@ -523,7 +523,7 @@ int minipool_candidates(int enabled, const MiniMeta *meta, const char *filename,
   if (!pin[0]) { wipe(token, sizeof token); return 0; }
   if (!candidate_url(url, base, meta, filename, sizeBytes)) { wipe(token, sizeof token); return 0; }
   status = request_cancelable("GET", url, pin, token, NULL, NULL, 0, 16 * 1024, 2500, cancelar, &r);
-  if ((status == 400 || status == 404) && legacy_episode_url(legacyUrl, base, meta)) {
+  if (status == 400 && legacy_episode_url(legacyUrl, base, meta)) {
     rede_resposta_limpar(&r);
     status = request_cancelable("GET", legacyUrl, pin, token, NULL, NULL, 0,
                                 16 * 1024, 2500, cancelar, &r);
@@ -531,9 +531,15 @@ int minipool_candidates(int enabled, const MiniMeta *meta, const char *filename,
   if (status == 200 && r.corpo) {
     const char *p = js_array(r.corpo, NULL, "candidates");
     while (p && found < 8) {
-      const char *end = js_fim(p); char fp[65] = "", profile[16] = "";
-      long dur; int slots, tiles, grid;
+      const char *end = js_fim(p); char fp[65] = "", profile[16] = "", relation[32] = "";
+      long dur; int slots, tiles, grid, score;
       if (!end || end <= p) break;
+      score = (int)js_num(p, end, "score", -1);
+      if (!js_texto(p, end, "relation", relation, sizeof relation) || score < 60 ||
+          !strcmp(relation, "length_differs")) {
+        // The response is ranked. An ineligible best candidate ends this lookup.
+        break;
+      }
       if (js_texto(p, end, "fp", fp, sizeof fp) && hex_string(fp, 64) &&
           js_texto(p, end, "profile", profile, sizeof profile) && (grid = candidate_grid(profile)) != 0) {
         dur = (long)js_num(p, end, "duration_ms", 0);
@@ -543,6 +549,8 @@ int minipool_candidates(int enabled, const MiniMeta *meta, const char *filename,
           snprintf(out[found].fp, sizeof out[found].fp, "%s", fp);
           snprintf(out[found].profile, sizeof out[found].profile, "%s", profile);
           out[found].durationMs = dur; out[found].nSlots = slots; out[found].nTiles = tiles;
+          out[found].score = score;
+          snprintf(out[found].relation, sizeof out[found].relation, "%s", relation);
           found++;
         }
       }
@@ -622,9 +630,14 @@ int minipool_buscar_slots(int enabled, const MpoolCandidate *candidate,
 
 int minipool_buscar_candidato(int enabled, const MpoolCandidate *candidate,
                               unsigned char **data, size_t *size, volatile int *cancelar) {
-  return candidate ? minipool_package_get(enabled, candidate->fp, candidate->profile,
+  if (!candidate || !minipool_package_get(enabled, candidate->fp, candidate->profile,
                                            candidate->durationMs, NULL, 0, data, size, cancelar,
-                                           NULL) : 0;
+                                           NULL)) return 0;
+  if (!*data || *size < 20 || read32(*data + 12) != (uint32_t)candidate->nSlots ||
+      read32(*data + 16) != (uint32_t)candidate->nTiles) {
+    free(*data); *data = NULL; *size = 0; return 0;
+  }
+  return 1;
 }
 
 int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, size_t *size,
