@@ -53,6 +53,15 @@ int seekr_horario_local(long long utc, char *saida, size_t tamanho);
 // Explicit retry/refresh still reserves another call. No automatic request
 // occurs while the provider's Retry-After is active.
 void seekr_tentar_novamente(void);
+// Shared-pool correction controls for the currently displayed hint candidate.
+// Shift values are milliseconds; unavailable/offline corrections return 0.
+// Queue a correction without blocking the player thread: action 0 shifts
+// -2500 ms, 1 shifts +2500 ms, and 2 rejects the source.
+int seekr_pool_correction_start(int action);
+// 1 = pending, 2 = offset saved, 3 = source rejected, -1 = no HTTP response,
+// -2 = server/local error, 0 = no new result.
+int seekr_pool_correction_status(void);
+int seekr_pool_correction_available(void);
 
 // Chave lida/gravada pelos Ajustes. "" apaga.
 void seekr_definir_chave(const char *chave);

@@ -614,6 +614,9 @@ int seekr_validar(const char *c) {
   free(corpo);
   return r;
 }
+int seekr_pool_correction_start(int action) { (void)action; return 0; }
+int seekr_pool_correction_status(void) { return 0; }
+int seekr_pool_correction_available(void) { return 0; }
 #else
 typedef int seekr_fora_daqui;   // ISO C: a translation unit must not be empty
 #endif

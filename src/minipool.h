@@ -74,6 +74,10 @@ int minipool_buscar_slots(int enabled, const MpoolCandidate *candidate,
                           MpoolSampleInfo *info);
 int minipool_buscar_candidato(int enabled, const MpoolCandidate *candidate,
                               unsigned char **data, size_t *size, volatile int *cancelar);
+// Authenticated, per-device corrections. Return 1 on a 2xx response, -1 when
+// the network request has no HTTP response, and 0 when unavailable or rejected.
+int minipool_candidato_offset(const char *work_key, const char *fp, int64_t b_ms);
+int minipool_candidato_rejeitar(const char *work_key, const char *fp);
 // Blocking; uploads one NVMT package only when enabled and paired.
 int minipool_enviar(int enabled, const MiniMeta *meta, const char *filename,
                     uint64_t sizeBytes, const unsigned char *data, size_t size);

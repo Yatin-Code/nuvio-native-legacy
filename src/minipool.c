@@ -483,7 +483,7 @@ static int url_append_number(char *url, size_t cap, size_t *used,
 
 static int candidate_url(char url[2048], const char *base, const MiniMeta *meta,
                          const char *filename, uint64_t sizeBytes) {
-  size_t used = 0;
+  size_t used = 0; char key[65] = "";
   int n = snprintf(url, 2048, "%s/v1/pool/candidates", base);
   if (n <= 0 || n >= 2048) return 0;
   used = (size_t)n;
@@ -493,6 +493,9 @@ static int candidate_url(char url[2048], const char *base, const MiniMeta *meta,
       !url_append_number(url, 2048, &used, "duration_ms", (unsigned long long)(meta->durMs > 0 ? meta->durMs : 0)) ||
       (sizeBytes && !url_append_number(url, 2048, &used, "size_bytes", sizeBytes)) ||
       (filename && filename[0] && !url_append_param(url, 2048, &used, "filename", filename, 200))) return 0;
+  // Authenticated reads use this stable work identity so C3 applies only this
+  // device's saved offsets and rejections. Public/read-key queries still work.
+  if (minipool_work_key(meta, key) && !url_append_param(url, 2048, &used, "work_key", key, 64)) return 0;
   return 1;
 }
 
@@ -673,6 +676,37 @@ int minipool_buscar_candidato(int enabled, const MpoolCandidate *candidate,
     free(*data); *data = NULL; *size = 0; return 0;
   }
   return 1;
+}
+
+static int minipool_correction(const char *work_key, const char *fp,
+                               const char *kind, int64_t b_ms) {
+  char base[256], pin[64], token[96], url[512], body[160];
+  RedeResposta r = {0};
+  if (!hex_string(work_key, 64) || !hex_string(fp, 64) || !minipool_pareado()) return 0;
+  pthread_mutex_lock(&mp_mu);
+  snprintf(base, sizeof base, "%s", mp_url);
+  snprintf(pin, sizeof pin, "%s", mp_pin);
+  snprintf(token, sizeof token, "%s", mp_token);
+  pthread_mutex_unlock(&mp_mu);
+  if (!pin[0] || !token[0]) { wipe(token, sizeof token); return 0; }
+  snprintf(url, sizeof url, "%s/v1/pool/candidates/%s/%s", base, fp, kind);
+  if (!strcmp(kind, "offset"))
+    snprintf(body, sizeof body, "{\"work_key\":\"%s\",\"b_ms\":%lld}", work_key, (long long)b_ms);
+  else snprintf(body, sizeof body, "{\"work_key\":\"%s\",\"days\":30}", work_key);
+  int status = request("PUT", url, pin, token, "application/json", body, strlen(body), 4096, 2500, &r);
+  rede_resposta_limpar(&r); wipe(token, sizeof token);
+  if (!status) return -1;
+  return status >= 200 && status < 300 ? 1 : 0;
+}
+
+int minipool_candidato_offset(const char *work_key, const char *fp, int64_t b_ms) {
+  if (!hex_string(work_key, 64) || !hex_string(fp, 64) ||
+      b_ms < -86400000LL || b_ms > 86400000LL) return 0;
+  return minipool_correction(work_key, fp, "offset", b_ms);
+}
+
+int minipool_candidato_rejeitar(const char *work_key, const char *fp) {
+  return minipool_correction(work_key, fp, "reject", 0);
 }
 
 int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, size_t *size,

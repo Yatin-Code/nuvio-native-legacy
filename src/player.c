@@ -234,7 +234,8 @@ extern int trakt_scrobble_alvo(int, const TraktScrobbleAlvo *, double, double,
 // IDs estaveis: a ordem visual e de navegacao vem de transporteAcoes.
 // Na serie, Anterior/Proximo ficam ao lado do Play; o restante conserva a ordem.
 enum { PLR_PLAY, PLR_CC, PLR_AUDIO, PLR_ASPECTO,
-       PLR_FONTES, PLR_EPISODIOS, PLR_PROXIMO, PLR_REINICIAR, PLR_NESTE, PLR_NBTNS };
+       PLR_FONTES, PLR_EPISODIOS, PLR_PROXIMO, PLR_REINICIAR, PLR_NESTE,
+       PLR_CORRECAO, PLR_NBTNS };
 
 // Avanco em curso: enquanto vale, posSeg e do DONO e nao do pipeline.
 static int    scrubbing, scrubPassos, scrubTocava, scrubDir, scrubToque;
@@ -339,6 +340,9 @@ static int   botao = PLR_PLAY;
 // dos botoes porque nao e um botao — o OK nela nao 'aperta' nada, e o
 // ESQUERDA/DIREITA muda de significado (procura, em vez de trocar de foco).
 static int   barraFoco = 0;
+// The pool correction sub-menu is opened from its visible OSD action. It uses
+// the same left/right/OK/Back model as the rest of the TV player.
+static int poolCorrectionMenu = -1;
 static int   visivel = 0;          // alvo dos controles (1 = em pe)
 static float anim = 0.0f;          // 0..1 seguindo `visivel`, por mola
 // SO A BARRA (#128). A busca que comeca com os controles escondidos (#121)
@@ -3366,6 +3370,7 @@ static int transporteAcoes(PlrAcao a[PLR_NBTNS]) {
   a[n++] = (PlrAcao){PLR_FONTES, 1};
   if (temUltimoBotao()) a[n++] = (PlrAcao){PLR_EPISODIOS, 1};
   if (serie) a[n++] = (PlrAcao){PLR_NESTE, 1};
+  if (!ehCanal() && seekr_pool_correction_available()) a[n++] = (PlrAcao){PLR_CORRECAO, 1};
   return n;
 }
 static int transporteHabilitado(int id) {
@@ -3388,7 +3393,11 @@ static int transporteDuasLinhas(void) {
   return NV_LAYOUT_REAL_H > NV_LAYOUT_REAL_W ||
       (NV_VTELA_W - PLR_MARGEM * 2.0f) * gfx_escala_ui() < n * PLR_TOQUE_CELULA;
 }
-static int transportePrimeiraLinha(void) { return transporteSerie() ? 4 : 2; }
+static int transportePrimeiraLinha(void) {
+  if (transporteSerie()) return 4;
+  PlrAcao a[PLR_NBTNS]; int n = transporteAcoes(a);
+  return n > 6 ? (n + 1) / 2 : 2;
+}
 static float transporteCelulaH(void) { return PLR_TOQUE_CELULA / gfx_escala_ui(); }
 static float transporteBarraY(void) {
   if (!transporteToque()) return PLR_BARRA_Y;
@@ -4175,6 +4184,53 @@ static void terminarSalto(void) {
   scrubToque = 0; scrubInicio = 0.0;
 }
 
+static void poolCorrectionMenuMostrar(void) {
+  static const char *const mensagem[] = {
+    "-2,5 s. Setas: escolher. OK: aplicar. Voltar: fechar.",
+    "+2,5 s. Setas: escolher. OK: aplicar. Voltar: fechar.",
+    "Recusar prévia. Setas: escolher. OK: aplicar. Voltar: fechar."
+  };
+  if (poolCorrectionMenu >= 0 && poolCorrectionMenu < 3)
+    player_toast_ex(i18n(mensagem[poolCorrectionMenu]), 5000, "pl_triangle-alert", 0);
+}
+
+static int poolCorrectionMenuEvento(const SDL_Event *e) {
+  if (poolCorrectionMenu < 0 || e->type != SDL_KEYDOWN) return 0;
+  SDL_Keycode k = e->key.keysym.sym;
+  if (k == SDLK_ESCAPE || k == SDLK_AC_BACK || k == SDLK_BACKSPACE || k == SDLK_DELETE) {
+    poolCorrectionMenu = -1;
+    toastTexto[0] = 0; toastAte = 0;
+    return 1;
+  }
+  if (k == SDLK_LEFT || k == SDLK_RIGHT) {
+    poolCorrectionMenu = (poolCorrectionMenu + (k == SDLK_RIGHT ? 1 : 2)) % 3;
+    poolCorrectionMenuMostrar();
+    return 1;
+  }
+  if (k == SDLK_RETURN || k == SDLK_KP_ENTER || k == SDLK_SPACE) {
+    int action = poolCorrectionMenu;
+    poolCorrectionMenu = -1;
+    confirmacaoTransporteRetida = 1;
+    if (seekr_pool_correction_start(action)) {
+      player_toast_ex(i18n("Aplicando correção..."), 5000, "pl_triangle-alert", 0);
+    } else {
+      player_toast_ex(i18n("Não foi possível salvar a correção. Tente novamente."), 3500, "aj_triangle-alert", 1);
+    }
+    return 1;
+  }
+  // An unrelated key dismisses the sub-menu, then follows its usual player path.
+  poolCorrectionMenu = -1;
+  return 0;
+}
+
+static void poolCorrectionResultadoAtualizar(void) {
+  int result = seekr_pool_correction_status();
+  if (result == 2) player_toast_ex(i18n("Ajuste salvo nesta TV."), 3500, "aj_check", 0);
+  else if (result == 3) player_toast_ex(i18n("Prévia recusada nesta TV."), 3500, "aj_check", 0);
+  else if (result == -1) player_toast_ex(i18n("Sem conexão. Tente novamente."), 3500, "aj_triangle-alert", 1);
+  else if (result == -2) player_toast_ex(i18n("Não foi possível salvar a correção. Tente novamente."), 3500, "aj_triangle-alert", 1);
+}
+
 static int ativarBotao(int i, int repetiu) {
   if (!aberto || saindo || !transporteHabilitado(i)) return 0;
   // Uma abertura rapida pode devolver o foco ao Play antes do OK ser solto.
@@ -4225,6 +4281,10 @@ static int ativarBotao(int i, int repetiu) {
     case PLR_AUDIO: pedFaixas = 1; break;
     case PLR_FONTES: pedFontes = 1; break;
     case PLR_NESTE: nesteAberto = 1; nesteT = epT; nesteE = epE; break;
+    case PLR_CORRECAO:
+      poolCorrectionMenu = 0;
+      poolCorrectionMenuMostrar();
+      return 1;
     case PLR_EPISODIOS:
       if (ehCanal()) pedGuia = 1;
       else if (epE > 0) episodios_abrir(idxAtual(), epT, epE);
@@ -4248,6 +4308,8 @@ void player_evento(const SDL_Event *e) {
       pausao_activity(); break;
     default: break;
   }
+  if (!aberto || saindo) poolCorrectionMenu = -1;
+  if (poolCorrectionMenuEvento(e)) return;
   if (e->type == SDL_KEYUP && (e->key.keysym.sym == SDLK_RETURN ||
       e->key.keysym.sym == SDLK_KP_ENTER || e->key.keysym.sym == SDLK_SPACE))
     confirmacaoTransporteRetida = 0;
@@ -4567,6 +4629,7 @@ void player_atualizar(float dt, Uint32 agora) {
 #ifdef NV_TOUCH_UI
   playerTelaAtualizar();
 #endif
+  poolCorrectionResultadoAtualizar();
   if (retido) { player_validar_retido(agora); return; }
   if (aberto || mini) atualizarIdentidade();
 #ifdef NV_TPK
@@ -5350,6 +5413,7 @@ static const char *iconeBotao(int i) {
     case PLR_PROXIMO:   return "pl_chevron-right";
     case PLR_REINICIAR: return "pl_rotate-ccw";
     case PLR_NESTE:     return "pl_users";
+    case PLR_CORRECAO:  return "pl_triangle-alert";
     default:            return epE > 0 ? "pl_list-video" : "pl_film";
   }
 }
@@ -5363,6 +5427,7 @@ static const char *rotuloBotao(int i) {
     case PLR_PROXIMO:   return "Próximo episódio";
     case PLR_REINICIAR: return "Assistir do começo";
     case PLR_NESTE:     return "Neste episódio";
+    case PLR_CORRECAO:  return "Prévia errada?";
     default:            return ehCanal() ? "Guia" : epE > 0 ? "Epis\xc3\xb3""dios" : "Relacionados";
   }
 }

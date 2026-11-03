@@ -107,7 +107,26 @@ static unsigned geracao;
 static Job *job;                 // the title being shown (NULL = none)
 static char urlAtual[4096];      // its link (identity: video_url_atual)
 static long durAtual;
+static char seekImdb[24];
+static int seekSeason, seekEpisode;
 static Uint32 batida;            // last seekr_pedir: the player still shows this title
+// Current hint candidate is a UI correction target. It is copied under `mu`
+// because the lookup worker publishes it while the player reads it.
+static char correctionWorkKey[65], correctionFp[65], correctionUrl[4096];
+static int64_t correctionOffset;
+static char correctionImdb[24];
+static int correctionSeason, correctionEpisode;
+static long correctionDuration;
+static unsigned correctionGeneration, correctionRequestGeneration;
+static int correctionRequestState, correctionRefreshPending;
+
+typedef struct {
+  char workKey[65], fp[65], url[4096], imdb[24];
+  int action, season, episode;
+  long duration;
+  int64_t bMs;
+  unsigned generation;
+} PoolCorrectionWork;
 
 static long alvoScrub = -1; static Uint32 alvoTick;
 
@@ -685,6 +704,25 @@ static int nvmtCompleto(const unsigned char *b, size_t n) {
   return slots > 0 && count == slots;
 }
 
+static void guardarAlvoCorrecao(Job *j, const MiniMeta *meta, const MpoolCandidate *candidate) {
+  char key[65] = "";
+  if (!meta || !candidate || !minipool_work_key(meta, key)) return;
+  pthread_mutex_lock(&mu);
+  // A canceled worker may finish a request after a new title has started.
+  // Only the current generation can publish the target exposed to the UI.
+  if (job == j && j->vivo && j->g == geracao) {
+    snprintf(correctionWorkKey, sizeof correctionWorkKey, "%s", key);
+    snprintf(correctionFp, sizeof correctionFp, "%s", candidate->fp);
+    snprintf(correctionUrl, sizeof correctionUrl, "%s", urlAtual);
+    correctionOffset = candidate->b_ms;
+    snprintf(correctionImdb, sizeof correctionImdb, "%s", meta->imdb);
+    correctionSeason = meta->temporada; correctionEpisode = meta->episodio;
+    correctionDuration = meta->durMs;
+    correctionGeneration = j->g;
+  }
+  pthread_mutex_unlock(&mu);
+}
+
 static void *poolLookupWorker(void *arg) {
   PoolLookup *w = arg; Job *j = w->j; MiniMeta meta = w->meta;
   Uint32 start = SDL_GetTicks(); unsigned char *b = NULL; size_t n = 0; char profile[16] = "";
@@ -744,6 +782,7 @@ static void *poolLookupWorker(void *arg) {
           int added = desempacotarCandidato(j, b, n, c, &grid);
           free(b); b = NULL;
           if (added) {
+            guardarAlvoCorrecao(j, &meta, c);
             printf("[miniatura] hint hit fp=%.64s score=%d relation=%s\n", c->fp, c->score, c->relation);
             fflush(stdout);
             break;
@@ -755,6 +794,7 @@ static void *poolLookupWorker(void *arg) {
         int added = desempacotarCandidato(j, b, n, c, &grid);
         free(b); b = NULL;
         if (!added) continue;
+        guardarAlvoCorrecao(j, &meta, c);
         printf("[miniatura] hint hit fp=%.64s score=%d relation=%s\n", c->fp, c->score, c->relation);
         fflush(stdout);
         break;
@@ -1076,21 +1116,29 @@ static void nomeDaFonte(char *nome, size_t n, uint64_t *bytes) {
   if (s) { snprintf(nome, n, "%s", s->arquivo); *bytes = s->tamanhoBytes; }
 }
 
-void seekr_pedir(const char *imdb, int t, int e, long durMs) {
+static void seekr_pedir_context(const char *imdb, int t, int e, long durMs,
+                                const char *expectedUrl) {
   const char *url = video_url_atual();
   Trabalho *w;
   Job *j;
   pthread_t f;
-  if (!url || !*url) { printf("[miniatura] request skipped: empty source URL\n"); fflush(stdout); return; }
+  if (!url || !*url || (expectedUrl && strcmp(url, expectedUrl))) {
+    printf("[miniatura] request skipped: source context changed\n"); fflush(stdout); return;
+  }
   pthread_mutex_lock(&mu);
   batida = SDL_GetTicks();
   // Same title still on screen: only the heartbeat.
-  if (urlAtual[0] && !strcmp(urlAtual, url) && labs(durAtual - durMs) < 3000) { pthread_mutex_unlock(&mu); return; }
+  if (urlAtual[0] && !strcmp(urlAtual, url) && labs(durAtual - durMs) < 3000 &&
+      !strcmp(seekImdb, imdb ? imdb : "") && seekSeason == t && seekEpisode == e) {
+    pthread_mutex_unlock(&mu); return;
+  }
   pthread_mutex_unlock(&mu);
   seekr_desligar();                        // the previous title's worker saves its set and ends
   pthread_mutex_lock(&mu);
   snprintf(urlAtual, sizeof urlAtual, "%s", url);
   durAtual = durMs;
+  snprintf(seekImdb, sizeof seekImdb, "%s", imdb ? imdb : "");
+  seekSeason = t; seekEpisode = e;
   batida = SDL_GetTicks();
   if (!strncmp(url, "http://127.0.0.1", 16) || strstr(url, ".m3u8") || durMs < 60000) {
     printf("[miniatura] request skipped: %s\n", !strncmp(url, "http://127.0.0.1", 16) ? "local proxy source" :
@@ -1140,12 +1188,22 @@ void seekr_pedir(const char *imdb, int t, int e, long durMs) {
   }
 }
 
+void seekr_pedir(const char *imdb, int t, int e, long durMs) {
+  seekr_pedir_context(imdb, t, e, durMs, NULL);
+}
+
 void seekr_desligar(void) {
   // The worker keeps its own reference: it saves the set to Drive and frees it.
   pthread_mutex_lock(&mu);
   if (job) { job->parar = 1; soltarJob(job); job = NULL; }
   geracao++;
   urlAtual[0] = 0; durAtual = 0;
+  seekImdb[0] = 0; seekSeason = seekEpisode = 0;
+  correctionWorkKey[0] = correctionFp[0] = correctionUrl[0] = 0;
+  correctionOffset = 0; correctionImdb[0] = 0;
+  correctionSeason = correctionEpisode = 0; correctionDuration = 0;
+  correctionGeneration = 0; correctionRefreshPending = 0;
+  if (correctionRequestState != 1) correctionRequestState = 0;
   estado = SEEKR_DESLIGADO;
   pthread_mutex_unlock(&mu);
 }
@@ -1157,6 +1215,112 @@ void seekr_definir_chave(const char *c) { (void)c; }
 void seekr_chave_propria(int p) { (void)p; }
 int seekr_validar(const char *c) { (void)c; return 1; }
 void seekr_tentar_novamente(void) {}
+static void *poolCorrectionWorker(void *arg) {
+  PoolCorrectionWork *w = arg;
+  int response = w->action == 2 ? minipool_candidato_rejeitar(w->workKey, w->fp) :
+                                 minipool_candidato_offset(w->workKey, w->fp, w->bMs);
+  int result = response == 1 ? (w->action == 2 ? 3 : 2) : response < 0 ? -1 : -2;
+  pthread_mutex_lock(&mu);
+  // The request belongs to one exact playback generation. A late response may
+  // persist remotely, but it cannot refresh or retarget a different title.
+  if (correctionRequestState == 1 && correctionRequestGeneration == w->generation &&
+      correctionGeneration == w->generation && job && job->g == w->generation &&
+      !strcmp(correctionUrl, w->url) && !strcmp(correctionWorkKey, w->workKey) &&
+      !strcmp(correctionFp, w->fp)) {
+    if (result == 2) correctionOffset = w->bMs;
+    else if (result == 3) {
+      correctionWorkKey[0] = correctionFp[0] = 0;
+      correctionOffset = 0;
+    }
+    correctionRefreshPending = result == 2 || result == 3;
+    correctionRequestState = result;
+  } else {
+    correctionRequestState = 0;
+    correctionRefreshPending = 0;
+  }
+  pthread_mutex_unlock(&mu);
+  free(w);
+  return NULL;
+}
+
+int seekr_pool_correction_start(int action) {
+  PoolCorrectionWork *w;
+  pthread_t thread;
+  const char *videoUrl = video_url_atual();
+  char currentUrl[4096];
+  snprintf(currentUrl, sizeof currentUrl, "%s", videoUrl ? videoUrl : "");
+  if (action < 0 || action > 2 || !currentUrl[0] || !(w = calloc(1, sizeof *w))) return 0;
+  pthread_mutex_lock(&mu);
+  if (correctionRequestState != 0 || !correctionFp[0] || !correctionWorkKey[0] ||
+      correctionGeneration != geracao || strcmp(correctionUrl, currentUrl)) {
+    pthread_mutex_unlock(&mu); free(w); return 0;
+  }
+  snprintf(w->workKey, sizeof w->workKey, "%s", correctionWorkKey);
+  snprintf(w->fp, sizeof w->fp, "%s", correctionFp);
+  snprintf(w->url, sizeof w->url, "%s", correctionUrl);
+  snprintf(w->imdb, sizeof w->imdb, "%s", correctionImdb);
+  w->season = correctionSeason; w->episode = correctionEpisode; w->duration = correctionDuration;
+  w->action = action; w->generation = correctionGeneration;
+  w->bMs = correctionOffset + (action == 0 ? -2500 : action == 1 ? 2500 : 0);
+  if (action != 2 && (w->bMs < -86400000LL || w->bMs > 86400000LL)) {
+    pthread_mutex_unlock(&mu); free(w); return 0;
+  }
+  correctionRequestGeneration = w->generation;
+  correctionRequestState = 1;
+  correctionRefreshPending = 0;
+  pthread_mutex_unlock(&mu);
+  if (pthread_create(&thread, NULL, poolCorrectionWorker, w) != 0) {
+    pthread_mutex_lock(&mu);
+    if (correctionRequestState == 1 && correctionRequestGeneration == w->generation)
+      correctionRequestState = 0;
+    pthread_mutex_unlock(&mu);
+    free(w); return 0;
+  }
+  pthread_detach(thread);
+  return 1;
+}
+
+int seekr_pool_correction_status(void) {
+  char imdb[24] = "", targetUrl[4096] = "", currentUrl[4096] = "";
+  int season = 0, episode = 0, result, refresh = 0;
+  long duration = 0;
+  unsigned generation = 0;
+  const char *videoUrl = video_url_atual();
+  snprintf(currentUrl, sizeof currentUrl, "%s", videoUrl ? videoUrl : "");
+  pthread_mutex_lock(&mu);
+  result = correctionRequestState;
+  if (result == 2 || result == 3) {
+    snprintf(imdb, sizeof imdb, "%s", correctionImdb);
+    snprintf(targetUrl, sizeof targetUrl, "%s", correctionUrl);
+    season = correctionSeason; episode = correctionEpisode; duration = correctionDuration;
+    generation = correctionGeneration;
+    refresh = correctionRefreshPending && job && job->g == generation && generation == geracao &&
+              targetUrl[0] && !strcmp(targetUrl, currentUrl) && duration > 0;
+    correctionRefreshPending = 0;
+  }
+  if (result != 1) correctionRequestState = 0;
+  pthread_mutex_unlock(&mu);
+  if (refresh) {
+    pthread_mutex_lock(&mu);
+    refresh = correctionGeneration == generation && job && job->g == generation &&
+              !strcmp(correctionUrl, targetUrl) && !strcmp(targetUrl, currentUrl);
+    if (refresh) urlAtual[0] = 0;
+    pthread_mutex_unlock(&mu);
+    if (refresh) seekr_pedir_context(imdb, season, episode, duration, targetUrl);
+  }
+  // A result from a playback that has already changed should not toast over
+  // the new title's controls.
+  if ((result == 2 || result == 3) && !refresh) return 0;
+  return result;
+}
+int seekr_pool_correction_available(void) {
+  int available;
+  pthread_mutex_lock(&mu);
+  available = correctionFp[0] != 0 && correctionRequestState == 0 &&
+              correctionGeneration == geracao && job && job->g == geracao;
+  pthread_mutex_unlock(&mu);
+  return available;
+}
 void seekr_definir_ajuste_ms(long ms) { (void)ms; }   // frames of this very file: no sync offset
 void seekr_ocioso(void) {}
 void seekr_uso(SeekrUso *u) { if (u) memset(u, 0, sizeof *u); }

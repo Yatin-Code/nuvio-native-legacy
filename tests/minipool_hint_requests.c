@@ -2,7 +2,10 @@
 #include "../src/minipool.c"
 
 static int status[4], calls;
-static char urls[4][2048], methods[4][8];
+static char urls[4][2048], methods[4][8], captured_headers[4][256];
+static char request_pins[4][64];
+static int request_redirects[4], request_tls_personal[4];
+static char request_bodies[4][256];
 static size_t request_body_bytes[4];
 static const char *bodies[4];
 static const char *response_headers[4];
@@ -14,7 +17,18 @@ int rede_pedir(const RedePedido *p, RedeResposta *r) {
   if (!p || !r || i >= 4) return 0;
   snprintf(methods[i], sizeof methods[i], "%s", p->metodo ? p->metodo : "GET");
   snprintf(urls[i], sizeof urls[i], "%s", p->url ? p->url : "");
+  snprintf(request_pins[i], sizeof request_pins[i], "%s", p->tls_pin ? p->tls_pin : "");
+  request_redirects[i] = p->seguir;
+  request_tls_personal[i] = p->tls_pessoal;
+  if (p->cabecalhos) for (int h = 0; p->cabecalhos[h]; h++) {
+    size_t have = strlen(captured_headers[i]);
+    snprintf(captured_headers[i] + have, sizeof captured_headers[i] - have, "%s%s", have ? "\n" : "", p->cabecalhos[h]);
+  }
   request_body_bytes[i] = p->n_corpo;
+  if (p->corpo && p->n_corpo < sizeof request_bodies[i]) {
+    memcpy(request_bodies[i], p->corpo, p->n_corpo);
+    request_bodies[i][p->n_corpo] = 0;
+  }
   r->status = status[i];
   if (response_binary_size) {
     r->corpo = malloc(response_binary_size);
@@ -40,6 +54,11 @@ static void reset(void) {
   memset(status, 0, sizeof status);
   memset(urls, 0, sizeof urls);
   memset(methods, 0, sizeof methods);
+  memset(captured_headers, 0, sizeof captured_headers);
+  memset(request_pins, 0, sizeof request_pins);
+  memset(request_redirects, 0, sizeof request_redirects);
+  memset(request_tls_personal, 0, sizeof request_tls_personal);
+  memset(request_bodies, 0, sizeof request_bodies);
   memset(request_body_bytes, 0, sizeof request_body_bytes);
   memset(bodies, 0, sizeof bodies);
   memset(response_headers, 0, sizeof response_headers);
@@ -97,8 +116,13 @@ int main(void) {
   if (strcmp(methods[0], "GET") || strncmp(urls[0], "https://pool.example/v1/pool/candidates?", 40) ||
       !strstr(urls[0], "imdb=tt1234567") || !strstr(urls[0], "season=0") ||
       !strstr(urls[0], "episode=0") || !strstr(urls[0], "duration_ms=7200000") ||
+      !strstr(urls[0], "work_key=") ||
       !strstr(urls[0], "size_bytes=1500000000") ||
-      !strstr(urls[0], "filename=Caf%C3%A9%20%26%20Friends%20%231.mkv")) return 2;
+      !strstr(urls[0], "filename=Caf%C3%A9%20%26%20Friends%20%231.mkv") ||
+      !strstr(captured_headers[0], "Authorization: Bearer paired-device-token") ||
+      strstr(urls[0], "paired-device-token") ||
+      strcmp(request_pins[0], "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") ||
+      request_redirects[0] != 0 || request_tls_personal[0] != 1) return 2;
 
   reset(); status[0] = 200;
   bodies[0] = "{\"candidates\":[{\"fp\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":59,\"relation\":\"same_length\"},{\"fp\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":100,\"relation\":\"same_length\"}]}";
@@ -182,6 +206,40 @@ int main(void) {
   if (!minipool_buscar_candidato(1, &candidate, &download, &download_size, NULL) ||
       !download || download_size != sizeof package || calls != 1) return 12;
   free(download);
+
+  // C3 correction writes use the pinned paired-device bearer transport and
+  // exact endpoint/body contract. An offline/unpaired device fails closed.
+  reset(); status[0] = 204;
+  const char *work = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const char *candidate_fp = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  if (minipool_candidato_offset(work, candidate_fp, -2500) != 1 || calls != 1 ||
+      strcmp(methods[0], "PUT") || strcmp(urls[0], "https://pool.example/v1/pool/candidates/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/offset") ||
+      !strstr(captured_headers[0], "Authorization: Bearer paired-device-token") ||
+      !strstr(captured_headers[0], "Content-Type: application/json") ||
+      strcmp(request_pins[0], "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") ||
+      request_redirects[0] != 0 || request_tls_personal[0] != 1 ||
+      strcmp(request_bodies[0], "{\"work_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"b_ms\":-2500}")) return 13;
+  reset(); status[0] = 200;
+  if (minipool_candidato_rejeitar(work, candidate_fp) != 1 || calls != 1 ||
+      strcmp(methods[0], "PUT") || !strstr(urls[0], "/reject") ||
+      !strstr(captured_headers[0], "Authorization: Bearer paired-device-token") ||
+      !strstr(captured_headers[0], "Content-Type: application/json") ||
+      strcmp(request_pins[0], "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") ||
+      request_redirects[0] != 0 || request_tls_personal[0] != 1 ||
+      strcmp(request_bodies[0], "{\"work_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"days\":30}")) return 14;
+  reset(); status[0] = 403;
+  if (minipool_candidato_rejeitar(work, candidate_fp) != 0 || calls != 1) return 17;
+  reset(); status[0] = 500;
+  if (minipool_candidato_offset(work, candidate_fp, 2500) != 0 || calls != 1) return 18;
+  reset(); status[0] = 0;
+  if (minipool_candidato_offset(work, candidate_fp, 2500) != -1 || calls != 1) return 19;
+  reset(); status[0] = 300;
+  if (minipool_candidato_offset(work, candidate_fp, 2500) != 0 || calls != 1) return 21;
+  reset();
+  if (minipool_candidato_offset(work, "not-a-fingerprint", 2500) || calls != 0 ||
+      minipool_candidato_offset(work, candidate_fp, 86400001) || calls != 0) return 20;
+  reset(); mp_token[0] = 0;
+  if (minipool_candidato_offset(work, candidate_fp, 2500) != 0 || calls != 0) return 15;
 
   // Local/VPS upload sends the same hints with the NVMT body in a direct PUT.
   unsigned char upload_package[20 + 12 + 125] = {0};
