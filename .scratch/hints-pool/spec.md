@@ -2,7 +2,7 @@
 
 Status: ready for implementation.
 Scope: the native client in this repo (`src/minipool.c`, `src/minipool.h`, `src/miniatura.c`, `src/minidrive.h`, UI strings).
-Server spec: `Yatin-Code/openseek-telegram` GitHub issue #1; source ticket text `docs/TICKETS-HINTS-POOL.md` on `openseek-thumbnil`.
+Server spec: `Yatin-Code/openseek-telegram` GitHub issue #1; source ticket text `docs/TICKETS-HINTS-POOL.md` on `integration/hints-pool`.
 
 ## Goal
 
@@ -17,7 +17,8 @@ with the hints that make future reuse possible.
 3. No full-file hash and no hash of hints. Hints are raw IMDb/season/episode/duration/size/filename.
 4. No request-time frame or sample verification. The server ranks; the client accepts the best
    candidate and applies a timing mapping.
-5. Serverless is deferred. The current pinned-TLS, no-redirect, single-PUT transport stays.
+5. Vercel is a supported server profile. Local/VPS uploads keep the direct PUT; Vercel uploads use a short-lived signed staging target and poll Telegram publication status. Downloads continue through OpenSeek from Telegram.
+6. OpenSeek generation is a separate owner action in the browser dashboard. Nuvio still generates locally on a playback miss; the player never waits for server generation.
 
 ## What the client has today
 
@@ -57,13 +58,14 @@ Candidate response: an array under `candidates`, best first. Each candidate carr
 `profile`, `duration_ms`, `n_slots`, `n_tiles`, `score`, `match`, `relation`,
 `approximate: true`, `a_num`, `a_den`, `b_ms`, `source_duration_ms`.
 
-Upload:
+Local/VPS upload:
 
 ```
 PUT /v1/pool/{fp}/nvmt?profile=...&duration_ms=...
 ```
 
-plus the same hints (A1 decides query vs header; D2 follows it).
+plus the same hints (A1 defines their encoding; D2 follows it). Vercel upload uses D8's signed staging and
+finalization flow; the package body does not pass through a Vercel function.
 
 Read-only contribution:
 
@@ -77,12 +79,13 @@ Read-only contribution:
 |---|---|---|---|
 | 01 | D0 — commit the pending label rename | — | — |
 | 02 | D1 — work key for movies | 01 | — |
-| 03 | D2 — send raw hints on lookup and upload | 02 | server #2 (A1) |
+| 03 | D2 — send raw hints on lookup and local/VPS upload | 02 | server #2 (A1) |
 | 04 | D3 — accept the ranked candidate without sample verification | 03 | server #5 (A4) |
 | 05 | D4 — apply linear timing mapping | 04 | — |
 | 06 | D5 — reject/offset UI (phase 2) | 05 | server #16 (C3) |
 | 07 | D6 — client test harness | 02, 03 | — |
 | 08 | D7 — handle read-only channel contributions | 03 | server #13 (B7) |
+| 09 | D8 — Vercel staged upload and Telegram acceptance polling | 03 | server #20 (F1) |
 
 ## Contribution topologies (client-visible)
 
@@ -91,6 +94,12 @@ Read-only contribution:
   D7 retries the same PUT once against that URL. Otherwise the client surfaces the denial and the
   URL so the user can use the librarian bot.
 - The client never follows HTTP redirects; it retries the URL directly.
+
+## Deployment-specific transfers
+
+- **Local/VPS:** Nuvio sends its NVMT package to OpenSeek with the existing direct PUT and hints.
+- **Vercel:** Nuvio requests a short-lived upload target, sends the package directly to temporary Supabase Storage, finalizes with OpenSeek, and polls the upload ID until Telegram accepts it. Supabase and Telegram credentials never enter the client.
+- **Downloads:** both profiles return the package as a stream through OpenSeek from Telegram; the client does not receive Telegram credentials or a Supabase download URL.
 
 ## Definition of done
 
