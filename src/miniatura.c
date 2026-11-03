@@ -645,10 +645,11 @@ static int esperarVerificacao(Job *j, const unsigned char *samples, size_t sampl
 #endif
 
 static int desempacotarCandidato(Job *j, const unsigned char *b, size_t n,
-                                 long sourceDuration, long *grade) {
+                                 const MpoolCandidate *candidate, long *grade) {
   uint32_t grid, count; size_t pos = 20; int added = 0, step;
+  long sourceDuration = candidate ? candidate->durationMs : 0;
   if (grade) *grade = 0;
-  if (!b || n < 20 || memcmp(b, "NVMT", 4) || get32(b + 4) != 1 || sourceDuration <= 0) return 0;
+  if (!candidate || !b || n < 20 || memcmp(b, "NVMT", 4) || get32(b + 4) != 1 || sourceDuration <= 0) return 0;
   grid = get32(b + 8); count = get32(b + 16);
   if ((grid != 5000 && grid != 10000) || count == 0 || count > get32(b + 12)) return 0;
   pthread_mutex_lock(&mu); step = j->passo; pthread_mutex_unlock(&mu);
@@ -660,7 +661,8 @@ static int desempacotarCandidato(Job *j, const unsigned char *b, size_t n,
     slot = get32(b + pos); ptsRaw = get32(b + pos + 4); len = get32(b + pos + 8); pos += 12;
     pts = (long)(int32_t)ptsRaw;
     if (slot >= get32(b + 12) || pts < 0 || pts > sourceDuration || len < 125 || len > 200000 || pos + len > n) break;
-    mapped = (long)((long long)pts * j->dur / sourceDuration);
+    if (!minipool_map_pts(pts, candidate->a_num, candidate->a_den,
+                          candidate->b_ms, j->dur, &mapped)) { pos += len; continue; }
     k = (int)((mapped + BASE_MS * step / 2) / (BASE_MS * step)) * step;
     if (k >= 0 && k < j->n && b[pos] == 0xff && b[pos + 1] == 0xd8 &&
         b[pos + len - 2] == 0xff && b[pos + len - 1] == 0xd9) {
@@ -735,11 +737,11 @@ static void *poolLookupWorker(void *arg) {
                c->fp, verifyInfo.remoteSamples, verifyInfo.tested, verifyInfo.matched,
                verifyInfo.anchorsTested, verifyInfo.anchorsMatched); fflush(stdout);
         if (!accepted || j->parar) { free(samples); continue; }
-        int sampleAdded = desempacotarCandidato(j, samples, sampleSize, c->durationMs, &grid);
+        int sampleAdded = desempacotarCandidato(j, samples, sampleSize, c, &grid);
         free(samples);
         if (!sampleAdded) continue;
         if (minipool_buscar_candidato(ajustes_openseek_pool_receber(), c, &b, &n, &j->parar)) {
-          int added = desempacotarCandidato(j, b, n, c->durationMs, &grid);
+          int added = desempacotarCandidato(j, b, n, c, &grid);
           free(b); b = NULL;
           if (added) {
             printf("[miniatura] hint hit fp=%.64s score=%d relation=%s\n", c->fp, c->score, c->relation);
@@ -750,7 +752,7 @@ static void *poolLookupWorker(void *arg) {
 #else
         if (!minipool_buscar_candidato(ajustes_openseek_pool_receber(), c, &b, &n, &j->parar))
           continue;
-        int added = desempacotarCandidato(j, b, n, c->durationMs, &grid);
+        int added = desempacotarCandidato(j, b, n, c, &grid);
         free(b); b = NULL;
         if (!added) continue;
         printf("[miniatura] hint hit fp=%.64s score=%d relation=%s\n", c->fp, c->score, c->relation);

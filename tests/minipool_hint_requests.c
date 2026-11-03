@@ -55,7 +55,29 @@ static void put32(unsigned char *p, uint32_t v) {
   p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
 }
 
+static int test_linear_mapping(void) {
+  static const struct {
+    int64_t pts, a_num, a_den, b_ms, duration, expected;
+  } cases[] = {
+    { 25000, 24, 25, 0, 60000, 24000 },
+    { 25000, 25, 24, 0, 60000, 26041 },
+    { 12345, 1, 1, 0, 60000, 12345 },
+    { 10000, 1, 1, 1500, 60000, 11500 },
+    { -100, 1, 1, 0, 60000, 0 },
+    { 65000, 1, 1, 0, 60000, 60000 },
+  };
+  for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+    long mapped = -1;
+    if (!minipool_map_pts(cases[i].pts, cases[i].a_num, cases[i].a_den,
+                          cases[i].b_ms, cases[i].duration, &mapped) ||
+        mapped != cases[i].expected) return 0;
+  }
+  long mapped = -1;
+  return !minipool_map_pts(1000, 1, 0, 0, 60000, &mapped) && mapped == -1;
+}
+
 int main(void) {
+  if (!test_linear_mapping()) return 15;
   MiniMeta meta = {0};
   MpoolCandidate candidates[8];
   int count = 0;
@@ -67,10 +89,11 @@ int main(void) {
 
   reset();
   status[0] = 200;
-  bodies[0] = "{\"candidates\":[{\"fp\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":88,\"relation\":\"same_length\"}]}";
+  bodies[0] = "{\"candidates\":[{\"fp\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":88,\"relation\":\"same_length\",\"a_num\":24,\"a_den\":25,\"b_ms\":1200}]}";
   if (!minipool_candidates(1, &meta, "Caf\xc3\xa9 & Friends #1.mkv", 1500000000,
                            candidates, &count, NULL) || count != 1 ||
-      candidates[0].score != 88 || strcmp(candidates[0].relation, "same_length")) return 1;
+      candidates[0].score != 88 || strcmp(candidates[0].relation, "same_length") ||
+      candidates[0].a_num != 24 || candidates[0].a_den != 25 || candidates[0].b_ms != 1200) return 1;
   if (strcmp(methods[0], "GET") || strncmp(urls[0], "https://pool.example/v1/pool/candidates?", 40) ||
       !strstr(urls[0], "imdb=tt1234567") || !strstr(urls[0], "season=0") ||
       !strstr(urls[0], "episode=0") || !strstr(urls[0], "duration_ms=7200000") ||
@@ -85,6 +108,10 @@ int main(void) {
   bodies[0] = "{\"candidates\":[{\"fp\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":90,\"relation\":\"length_differs\"}]}";
   if (minipool_candidates(1, &meta, "Film.mkv", 1000, candidates, &count, NULL) ||
       count || calls != 1) return 14;
+  reset(); status[0] = 200;
+  bodies[0] = "{\"candidates\":[{\"fp\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":90,\"relation\":\"same_length\",\"a_num\":24,\"a_den\":0,\"b_ms\":0}]}";
+  if (minipool_candidates(1, &meta, "Film.mkv", 1000, candidates, &count, NULL) ||
+      count || calls != 1) return 16;
 
   // Without a catalog ID, filename and duration still reach the ranked lookup.
   meta.imdb[0] = 0;

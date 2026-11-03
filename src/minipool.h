@@ -4,6 +4,7 @@
 
 #include "minidrive.h"
 #include <stddef.h>
+#include <stdint.h>
 
 typedef enum {
   MPOOL_PARADO = 0,
@@ -21,6 +22,7 @@ typedef struct {
   int nTiles;
   int score;
   char relation[32];
+  int64_t a_num, a_den, b_ms;
 } MpoolCandidate;
 
 typedef enum {
@@ -62,6 +64,10 @@ int minipool_work_key(const MiniMeta *meta, char key[65]);
 int minipool_candidates(int enabled, const MiniMeta *meta, const char *filename,
                         uint64_t sizeBytes, MpoolCandidate out[8], int *count,
                         volatile int *cancelar);
+// Apply a candidate's source-to-target linear timeline mapping. Returns 0 for
+// an invalid denominator, duration, output pointer, or arithmetic overflow.
+int minipool_map_pts(int64_t pts, int64_t a_num, int64_t a_den, int64_t b_ms,
+                     int64_t dur_ms, long *mapped_ms);
 int minipool_buscar_slots(int enabled, const MpoolCandidate *candidate,
                           const int *slots, int nSlots,
                           unsigned char **data, size_t *size, volatile int *cancelar,

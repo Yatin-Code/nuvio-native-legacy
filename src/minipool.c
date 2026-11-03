@@ -9,6 +9,7 @@
 #include "js.h"
 #include "rede.h"
 #include <ctype.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -155,6 +156,35 @@ static int hex_string(const char *s, size_t n) {
 static int token_valid(const char *s) {
   size_t n = s ? strlen(s) : 0; if (n != 43) return 0;
   for (size_t i = 0; i < n; i++) if (!isalnum((unsigned char)s[i]) && s[i] != '-' && s[i] != '_') return 0;
+  return 1;
+}
+
+static int candidate_int32(const char *object, const char *end, const char *key,
+                           int64_t fallback, int64_t *out) {
+  double value = js_num(object, end, key, (double)fallback);
+  if (value != value || value < -2147483648.0 || value > 2147483647.0 ||
+      value != (double)(int32_t)value) return 0;
+  *out = (int64_t)(int32_t)value;
+  return 1;
+}
+
+int minipool_map_pts(int64_t pts, int64_t a_num, int64_t a_den, int64_t b_ms,
+                     int64_t dur_ms, long *mapped_ms) {
+  int64_t product, mapped;
+  if (!mapped_ms || a_den <= 0 || dur_ms < 0) return 0;
+  if (a_num > 0 && pts > 0 && pts > INT64_MAX / a_num) return 0;
+  if (a_num > 0 && pts < 0 && pts < INT64_MIN / a_num) return 0;
+  if (a_num < 0 && pts > 0 && a_num < INT64_MIN / pts) return 0;
+  if (a_num < 0 && pts < 0 && a_num < INT64_MAX / pts) return 0;
+  product = pts * a_num;
+  mapped = product / a_den;
+  if ((b_ms > 0 && mapped > INT64_MAX - b_ms) ||
+      (b_ms < 0 && mapped < INT64_MIN - b_ms)) return 0;
+  mapped += b_ms;
+  if (mapped < 0) mapped = 0;
+  if (mapped > dur_ms) mapped = dur_ms;
+  if (mapped > LONG_MAX) return 0;
+  *mapped_ms = (long)mapped;
   return 1;
 }
 static int proof_equal(const char *a, const char *b) {
@@ -542,14 +572,19 @@ int minipool_candidates(int enabled, const MiniMeta *meta, const char *filename,
       }
       if (js_texto(p, end, "fp", fp, sizeof fp) && hex_string(fp, 64) &&
           js_texto(p, end, "profile", profile, sizeof profile) && (grid = candidate_grid(profile)) != 0) {
+        int64_t a_num, a_den, b_ms;
         dur = (long)js_num(p, end, "duration_ms", 0);
         slots = (int)js_num(p, end, "n_slots", 0); tiles = (int)js_num(p, end, "n_tiles", 0);
-        if (dur > 0 && slots > 0 && slots <= 8640 && tiles > 0 && tiles <= slots &&
+        if (candidate_int32(p, end, "a_num", 1, &a_num) && a_num > 0 &&
+            candidate_int32(p, end, "a_den", 1, &a_den) && a_den > 0 &&
+            candidate_int32(p, end, "b_ms", 0, &b_ms) &&
+            dur > 0 && slots > 0 && slots <= 8640 && tiles > 0 && tiles <= slots &&
             slots == (int)(((long long)dur + grid - 1) / grid)) {
           snprintf(out[found].fp, sizeof out[found].fp, "%s", fp);
           snprintf(out[found].profile, sizeof out[found].profile, "%s", profile);
           out[found].durationMs = dur; out[found].nSlots = slots; out[found].nTiles = tiles;
           out[found].score = score;
+          out[found].a_num = a_num; out[found].a_den = a_den; out[found].b_ms = b_ms;
           snprintf(out[found].relation, sizeof out[found].relation, "%s", relation);
           found++;
         }
