@@ -116,6 +116,7 @@ int main(void) {
   if (strcmp(methods[0], "GET") || strncmp(urls[0], "https://pool.example/v1/pool/candidates?", 40) ||
       !strstr(urls[0], "imdb=tt1234567") || !strstr(urls[0], "season=0") ||
       !strstr(urls[0], "episode=0") || !strstr(urls[0], "duration_ms=7200000") ||
+      !strstr(urls[0], "exclude_fp=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") ||
       !strstr(urls[0], "work_key=") ||
       !strstr(urls[0], "size_bytes=1500000000") ||
       !strstr(urls[0], "filename=Caf%C3%A9%20%26%20Friends%20%231.mkv") ||
@@ -123,6 +124,15 @@ int main(void) {
       strstr(urls[0], "paired-device-token") ||
       strcmp(request_pins[0], "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") ||
       request_redirects[0] != 0 || request_tls_personal[0] != 1) return 2;
+
+  // Episode suffixes are sent as a base catalog ID plus explicit season/episode.
+  strcpy(meta.imdb, "tt1234567:3:1"); meta.temporada = 0; meta.episodio = 0;
+  reset(); status[0] = 200; bodies[0] = "{\"candidates\":[]}";
+  minipool_candidates(1, &meta, "show.s03e01.mkv", 1500000000,
+                      candidates, &count, NULL);
+  if (calls != 1 || !strstr(urls[0], "imdb=tt1234567&season=3&episode=1") ||
+      strstr(urls[0], "imdb=tt1234567%3A3%3A1")) return 22;
+  strcpy(meta.imdb, "tt1234567"); meta.temporada = 0; meta.episodio = 0;
 
   reset(); status[0] = 200;
   bodies[0] = "{\"candidates\":[{\"fp\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":59,\"relation\":\"same_length\"},{\"fp\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":100,\"relation\":\"same_length\"}]}";
@@ -207,6 +217,21 @@ int main(void) {
       !download || download_size != sizeof package || calls != 1) return 12;
   free(download);
 
+  // Exact-fingerprint reads pass duration so channel nodes can reconstruct
+  // old tiles whose Telegram documents lack filename metadata.
+  MiniMeta exact_meta = {0}; char exact_profile[16] = "";
+  strcpy(exact_meta.fp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  strcpy(exact_meta.imdb, "tt1234567"); exact_meta.durMs = 5000;
+  reset(); status[0] = 200; response_binary_size = sizeof package;
+  memcpy(response_binary, package, sizeof package);
+  admin_sha256_hex(response_binary, (unsigned long)response_binary_size, digest);
+  snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 5000\nX-OpenSeek-Sha256: %s\n", digest);
+  response_headers[0] = headers;
+  if (!minipool_buscar(1, &exact_meta, &download, &download_size, exact_profile, NULL) ||
+      calls != 1 || !strstr(urls[0], "duration_ms=5000") ||
+      strcmp(exact_profile, "nvmt-v1-g5")) return 24;
+  free(download);
+
   // C3 correction writes use the pinned paired-device bearer transport and
   // exact endpoint/body contract. An offline/unpaired device fails closed.
   reset(); status[0] = 204;
@@ -257,6 +282,13 @@ int main(void) {
       !strstr(urls[0], "episode=0") || !strstr(urls[0], "duration_ms=21000") ||
       !strstr(urls[0], "size_bytes=1500000000") ||
       !strstr(urls[0], "filename=Caf%C3%A9%20%26%20Friends%20%231.mkv")) return 7;
+
+  strcpy(meta.imdb, "tt1234567:3:1"); meta.temporada = 0; meta.episodio = 0;
+  reset(); status[0] = 201; bodies[0] = "{}";
+  if (!minipool_enviar(1, &meta, "show.s03e01.mkv", 1500000000,
+                       upload_package, sizeof upload_package) || calls != 1 ||
+      !strstr(urls[0], "imdb=tt1234567&season=3&episode=1") ||
+      strstr(urls[0], "imdb=tt1234567%3A3%3A1")) return 23;
 
   // A server rejecting unknown query params receives one legacy direct PUT.
   reset(); status[0] = 400; bodies[0] = "{\"error\":\"bad_request\"}";

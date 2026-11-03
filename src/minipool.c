@@ -388,28 +388,37 @@ static int response_error(const RedeResposta *r, const char *wanted) {
          !strcmp(code, wanted);
 }
 
+static int catalog_hints(const MiniMeta *meta, char imdb[24], int *temporada, int *episodio) {
+  if (!meta || !imdb || !temporada || !episodio) return 0;
+  imdb[0] = 0;
+  // Catalog IDs can arrive with an episode suffix (tt1234567:2:4). Pool keys
+  // and hint requests use the base IMDb ID plus explicit season/episode fields.
+  idbase_copiar(meta->imdb, imdb, 24);
+  *temporada = meta->temporada;
+  *episodio = meta->episodio;
+  if (*temporada < 0 || *episodio <= 0) {
+    int idTemporada = 0, idEpisodio = 0;
+    idbase_episodio(meta->imdb, &idTemporada, &idEpisodio);
+    if (idEpisodio > 0) {
+      if (*temporada < 0 || (*episodio <= 0 && *temporada == 0 && idTemporada > 0))
+        *temporada = idTemporada;
+      if (*episodio <= 0) *episodio = idEpisodio;
+    }
+  }
+  if (*temporada < 0) *temporada = 0;
+  if (*episodio < 0) *episodio = 0;
+  size_t imdb_len = strlen(imdb);
+  if (*temporada > 9999 || *episodio > 9999 || strncmp(imdb, "tt", 2) ||
+      imdb_len < 3 || imdb_len > 12) return 0;
+  for (const char *p = imdb + 2; *p; p++) if (!isdigit((unsigned char)*p)) return 0;
+  return 1;
+}
+
 int minipool_work_key(const MiniMeta *meta, char key[65]) {
   char identity[128], imdb[24];
   int temporada, episodio;
   if (key) key[0] = 0;
-  if (!meta || !key) return 0;
-  // Catalog IDs can arrive with an episode suffix (tt1234567:2:4). Pool keys
-  // use the base IMDb ID plus explicit season/episode fields, so normalize the
-  // ID and recover the suffix only when the separate fields are absent.
-  idbase_copiar(meta->imdb, imdb, sizeof imdb);
-  temporada = meta->temporada; episodio = meta->episodio;
-  if (temporada < 0 || episodio <= 0) {
-    int idTemporada = 0, idEpisodio = 0;
-    idbase_episodio(meta->imdb, &idTemporada, &idEpisodio);
-    if (idEpisodio > 0) {
-      if (temporada < 0 || (episodio <= 0 && temporada == 0 && idTemporada > 0))
-        temporada = idTemporada;
-      if (episodio <= 0) episodio = idEpisodio;
-    }
-  }
-  if (temporada < 0 || episodio < 0 || strncmp(imdb, "tt", 2) ||
-      strlen(imdb) < 7 || strlen(imdb) > 12) return 0;
-  for (const char *p = imdb + 2; *p; p++) if (!isdigit((unsigned char)*p)) return 0;
+  if (!meta || !key || !catalog_hints(meta, imdb, &temporada, &episodio)) return 0;
   int n;
   if (temporada == 0 && episodio == 0)
     n = snprintf(identity, sizeof identity, "openseek-work-v1\nimdb:%s", imdb);
@@ -483,14 +492,17 @@ static int url_append_number(char *url, size_t cap, size_t *used,
 
 static int candidate_url(char url[2048], const char *base, const MiniMeta *meta,
                          const char *filename, uint64_t sizeBytes) {
-  size_t used = 0; char key[65] = "";
+  size_t used = 0; char key[65] = "", imdb[24] = "";
+  int temporada = 0, episodio = 0;
+  int have_imdb = catalog_hints(meta, imdb, &temporada, &episodio);
   int n = snprintf(url, 2048, "%s/v1/pool/candidates", base);
   if (n <= 0 || n >= 2048) return 0;
   used = (size_t)n;
-  if ((meta->imdb[0] && !url_append_param(url, 2048, &used, "imdb", meta->imdb, sizeof meta->imdb - 1)) ||
-      !url_append_number(url, 2048, &used, "season", (unsigned long long)(meta->temporada < 0 ? 0 : meta->temporada)) ||
-      !url_append_number(url, 2048, &used, "episode", (unsigned long long)(meta->episodio < 0 ? 0 : meta->episodio)) ||
+  if ((have_imdb && !url_append_param(url, 2048, &used, "imdb", imdb, sizeof imdb - 1)) ||
+      !url_append_number(url, 2048, &used, "season", (unsigned long long)temporada) ||
+      !url_append_number(url, 2048, &used, "episode", (unsigned long long)episodio) ||
       !url_append_number(url, 2048, &used, "duration_ms", (unsigned long long)(meta->durMs > 0 ? meta->durMs : 0)) ||
+      (hex_string(meta->fp, 64) && !url_append_param(url, 2048, &used, "exclude_fp", meta->fp, 64)) ||
       (sizeBytes && !url_append_number(url, 2048, &used, "size_bytes", sizeBytes)) ||
       (filename && filename[0] && !url_append_param(url, 2048, &used, "filename", filename, 200))) return 0;
   // Authenticated reads use this stable work identity so C3 applies only this
@@ -509,7 +521,9 @@ static int legacy_episode_url(char url[512], const char *base, const MiniMeta *m
 static int upload_url(char url[2048], const char *base, const MiniMeta *meta,
                       const char *profile, long durationMs, const char *filename,
                       uint64_t sizeBytes, int withHints) {
-  char key[65] = "";
+  char key[65] = "", imdb[24] = "";
+  int temporada = 0, episodio = 0;
+  int have_imdb = catalog_hints(meta, imdb, &temporada, &episodio);
   int n = snprintf(url, 2048, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld",
                    base, meta->fp, profile, durationMs);
   if (n <= 0 || n >= 2048) return 0;
@@ -517,9 +531,9 @@ static int upload_url(char url[2048], const char *base, const MiniMeta *meta,
   if (minipool_work_key(meta, key) &&
       !url_append_param(url, 2048, &used, "episode_key", key, sizeof key - 1)) return 0;
   if (!withHints) return 1;
-  if ((meta->imdb[0] && !url_append_param(url, 2048, &used, "imdb", meta->imdb, sizeof meta->imdb - 1)) ||
-      !url_append_number(url, 2048, &used, "season", (unsigned long long)(meta->temporada < 0 ? 0 : meta->temporada)) ||
-      !url_append_number(url, 2048, &used, "episode", (unsigned long long)(meta->episodio < 0 ? 0 : meta->episodio)) ||
+  if ((have_imdb && !url_append_param(url, 2048, &used, "imdb", imdb, sizeof imdb - 1)) ||
+      !url_append_number(url, 2048, &used, "season", (unsigned long long)temporada) ||
+      !url_append_number(url, 2048, &used, "episode", (unsigned long long)episodio) ||
       (sizeBytes && !url_append_number(url, 2048, &used, "size_bytes", sizeBytes)) ||
       (filename && filename[0] && !url_append_param(url, 2048, &used, "filename", filename, 200))) return 0;
   return 1;
@@ -722,9 +736,11 @@ int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, siz
     if (cancelar && *cancelar) break;
     RedeResposta r = {0}; char duration[32] = "", hash[80] = "", digest[65];
     if (have_episode_key)
-      snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&episode_key=%s", base, meta->fp, profiles[i].name, episode_key);
+      snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&episode_key=%s&duration_ms=%ld",
+               base, meta->fp, profiles[i].name, episode_key, meta->durMs);
     else
-      snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s", base, meta->fp, profiles[i].name);
+      snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld",
+               base, meta->fp, profiles[i].name, meta->durMs);
     // This runs beside local decoding. Keep the cold Telegram read allowance,
     // but make every request cancellable when the TV switches sources.
     int status = request_cancelable("GET", url, pin, token, NULL, NULL, 0, MP_MAX_PACKAGE, 15000, cancelar, &r);
