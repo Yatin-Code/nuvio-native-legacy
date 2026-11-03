@@ -57,8 +57,9 @@ int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data,
 // Cross-encode episode fallback. The key is a stable SHA-256 of IMDb episode
 // identity; no title, source URL, or raw catalog ID is sent to the pool.
 int minipool_work_key(const MiniMeta *meta, char key[65]);
-int minipool_episode_candidates(int enabled, const char *key, long durationMs,
-                                MpoolCandidate out[8], int *count, volatile int *cancelar);
+int minipool_candidates(int enabled, const MiniMeta *meta, const char *filename,
+                        uint64_t sizeBytes, MpoolCandidate out[8], int *count,
+                        volatile int *cancelar);
 int minipool_buscar_slots(int enabled, const MpoolCandidate *candidate,
                           const int *slots, int nSlots,
                           unsigned char **data, size_t *size, volatile int *cancelar,
@@ -66,7 +67,7 @@ int minipool_buscar_slots(int enabled, const MpoolCandidate *candidate,
 int minipool_buscar_candidato(int enabled, const MpoolCandidate *candidate,
                               unsigned char **data, size_t *size, volatile int *cancelar);
 // Blocking; uploads one NVMT package only when enabled and paired.
-int minipool_enviar(int enabled, const MiniMeta *meta,
-                    const unsigned char *data, size_t size);
+int minipool_enviar(int enabled, const MiniMeta *meta, const char *filename,
+                    uint64_t sizeBytes, const unsigned char *data, size_t size);
 
 #endif

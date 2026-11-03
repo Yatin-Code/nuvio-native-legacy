@@ -400,19 +400,134 @@ static int candidate_grid(const char *profile) {
   return 0;
 }
 
-int minipool_episode_candidates(int enabled, const char *key, long durationMs,
-                                MpoolCandidate out[8], int *count, volatile int *cancelar) {
-  char url[512], base[256], pin[64], token[96];
+static int url_append(char *url, size_t cap, size_t *used, const char *text) {
+  size_t n = strlen(text);
+  if (*used >= cap || n >= cap - *used) return 0;
+  memcpy(url + *used, text, n + 1);
+  *used += n;
+  return 1;
+}
+
+static int url_append_param(char *url, size_t cap, size_t *used, const char *name,
+                            const char *value, size_t maxBytes) {
+  static const char hex[] = "0123456789ABCDEF";
+  char encoded[601]; size_t n = 0;
+  if (!value) return 1;
+  size_t inputBytes = 0;
+  while (inputBytes < maxBytes && value[inputBytes]) inputBytes++;
+  if (value[inputBytes]) {
+    if (inputBytes > 0) {
+      size_t lead = inputBytes - 1;
+      while (lead > 0 && ((unsigned char)value[lead] & 0xc0) == 0x80) lead--;
+      unsigned char first = (unsigned char)value[lead];
+      size_t codepointBytes = first < 0x80 ? 1 : first < 0xe0 ? 2 : first < 0xf0 ? 3 : first < 0xf8 ? 4 : 1;
+      if (codepointBytes > inputBytes - lead) inputBytes = lead;
+    }
+  }
+  for (size_t i = 0; i < inputBytes; i++) {
+    unsigned char c = (unsigned char)value[i];
+    int safe = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+               (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' || c == '~';
+    if (safe) {
+      if (n + 1 >= sizeof encoded) return 0;
+      encoded[n++] = (char)c;
+    } else {
+      if (n + 3 >= sizeof encoded) return 0;
+      encoded[n++] = '%'; encoded[n++] = hex[c >> 4]; encoded[n++] = hex[c & 15];
+    }
+  }
+  encoded[n] = 0;
+  char prefix[48];
+  int pn = snprintf(prefix, sizeof prefix, "%s%s=", *used && strchr(url, '?') ? "&" : "?", name);
+  if (pn <= 0 || (size_t)pn >= sizeof prefix || !url_append(url, cap, used, prefix) ||
+      !url_append(url, cap, used, encoded)) return 0;
+  return 1;
+}
+
+static int url_append_number(char *url, size_t cap, size_t *used,
+                             const char *name, unsigned long long value) {
+  char number[32];
+  snprintf(number, sizeof number, "%llu", value);
+  return url_append_param(url, cap, used, name, number, sizeof number - 1);
+}
+
+static int candidate_url(char url[2048], const char *base, const MiniMeta *meta,
+                         const char *filename, uint64_t sizeBytes) {
+  size_t used = 0;
+  int n = snprintf(url, 2048, "%s/v1/pool/candidates", base);
+  if (n <= 0 || n >= 2048) return 0;
+  used = (size_t)n;
+  if ((meta->imdb[0] && !url_append_param(url, 2048, &used, "imdb", meta->imdb, sizeof meta->imdb - 1)) ||
+      !url_append_number(url, 2048, &used, "season", (unsigned long long)(meta->temporada < 0 ? 0 : meta->temporada)) ||
+      !url_append_number(url, 2048, &used, "episode", (unsigned long long)(meta->episodio < 0 ? 0 : meta->episodio)) ||
+      !url_append_number(url, 2048, &used, "duration_ms", (unsigned long long)(meta->durMs > 0 ? meta->durMs : 0)) ||
+      (sizeBytes && !url_append_number(url, 2048, &used, "size_bytes", sizeBytes)) ||
+      (filename && filename[0] && !url_append_param(url, 2048, &used, "filename", filename, 200))) return 0;
+  return 1;
+}
+
+static int legacy_episode_url(char url[512], const char *base, const MiniMeta *meta) {
+  char key[65] = "";
+  if (!minipool_work_key(meta, key) || meta->durMs <= 0) return 0;
+  int n = snprintf(url, 512, "%s/v1/pool/episodes/%s?duration_ms=%ld", base, key, meta->durMs);
+  return n > 0 && n < 512;
+}
+
+static int upload_url(char url[2048], const char *base, const MiniMeta *meta,
+                      const char *profile, long durationMs, const char *filename,
+                      uint64_t sizeBytes, int withHints) {
+  char key[65] = "";
+  int n = snprintf(url, 2048, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld",
+                   base, meta->fp, profile, durationMs);
+  if (n <= 0 || n >= 2048) return 0;
+  size_t used = (size_t)n;
+  if (minipool_work_key(meta, key) &&
+      !url_append_param(url, 2048, &used, "episode_key", key, sizeof key - 1)) return 0;
+  if (!withHints) return 1;
+  if ((meta->imdb[0] && !url_append_param(url, 2048, &used, "imdb", meta->imdb, sizeof meta->imdb - 1)) ||
+      !url_append_number(url, 2048, &used, "season", (unsigned long long)(meta->temporada < 0 ? 0 : meta->temporada)) ||
+      !url_append_number(url, 2048, &used, "episode", (unsigned long long)(meta->episodio < 0 ? 0 : meta->episodio)) ||
+      (sizeBytes && !url_append_number(url, 2048, &used, "size_bytes", sizeBytes)) ||
+      (filename && filename[0] && !url_append_param(url, 2048, &used, "filename", filename, 200))) return 0;
+  return 1;
+}
+
+static int upload_package(const char *base, const MiniMeta *meta,
+                          const char *profile, long durationMs, const char *filename,
+                          uint64_t sizeBytes, const unsigned char *data, size_t size,
+                          const char *pin, const char *token, RedeResposta *response) {
+  char url[2048], legacyUrl[2048];
+  if (!upload_url(url, base, meta, profile, durationMs, filename, sizeBytes, 1)) return 0;
+  int status = request("PUT", url, pin, token, "application/vnd.openseek.nvmt", data, size,
+                       16 * 1024, 45000, response);
+  if (status == 400 || status == 404) {
+    rede_resposta_limpar(response);
+    if (!upload_url(legacyUrl, base, meta, profile, durationMs, filename, sizeBytes, 0)) return status;
+    status = request("PUT", legacyUrl, pin, token, "application/vnd.openseek.nvmt", data, size,
+                     16 * 1024, 45000, response);
+  }
+  return status;
+}
+
+int minipool_candidates(int enabled, const MiniMeta *meta, const char *filename,
+                        uint64_t sizeBytes, MpoolCandidate out[8], int *count,
+                        volatile int *cancelar) {
+  char url[2048], base[256], legacyUrl[512], pin[64], token[96];
   RedeResposta r = {0}; int status, found = 0;
   if (count) *count = 0;
   if (out) memset(out, 0, sizeof(MpoolCandidate) * 8);
-  if (!enabled || !out || !count || !key || !hex_string(key, 64) || durationMs <= 0) return 0;
+  if (!enabled || !meta || !out || !count || meta->durMs <= 0) return 0;
   pthread_mutex_lock(&mp_mu);
   snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin);
   snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
   if (!pin[0]) { wipe(token, sizeof token); return 0; }
-  snprintf(url, sizeof url, "%s/v1/pool/episodes/%s?duration_ms=%ld", base, key, durationMs);
+  if (!candidate_url(url, base, meta, filename, sizeBytes)) { wipe(token, sizeof token); return 0; }
   status = request_cancelable("GET", url, pin, token, NULL, NULL, 0, 16 * 1024, 2500, cancelar, &r);
+  if ((status == 400 || status == 404) && legacy_episode_url(legacyUrl, base, meta)) {
+    rede_resposta_limpar(&r);
+    status = request_cancelable("GET", legacyUrl, pin, token, NULL, NULL, 0,
+                                16 * 1024, 2500, cancelar, &r);
+  }
   if (status == 200 && r.corpo) {
     const char *p = js_array(r.corpo, NULL, "candidates");
     while (p && found < 8) {
@@ -434,7 +549,7 @@ int minipool_episode_candidates(int enabled, const char *key, long durationMs,
       p = js_prox(end);
     }
   }
-  printf("[miniatura] SeekDB episode candidate index: HTTP %d, %d candidate(s)\n", status, found);
+  printf("[miniatura] SeekDB candidate index: HTTP %d, %d candidate(s)\n", status, found);
   fflush(stdout);
   rede_resposta_limpar(&r); wipe(token, sizeof token); *count = found; return found > 0;
 }
@@ -542,8 +657,9 @@ int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, siz
   wipe(token, sizeof token); return found;
 }
 
-int minipool_enviar(int enabled, const MiniMeta *meta, const unsigned char *data, size_t size) {
-  char url[512], base[256], pin[64], token[96], profile[24];
+int minipool_enviar(int enabled, const MiniMeta *meta, const char *filename,
+                    uint64_t sizeBytes, const unsigned char *data, size_t size) {
+  char base[256], pin[64], token[96], profile[24];
   RedeResposta r = {0}; int status, grid;
   if (!enabled || !meta || !hex_string(meta->fp, 64) || !data || size > MP_MAX_PACKAGE || !minipool_pareado()) return 0;
   if (size < 20) return 0;
@@ -552,15 +668,8 @@ int minipool_enviar(int enabled, const MiniMeta *meta, const unsigned char *data
   if (!nvmt_ok(data, size, meta->durMs, grid)) return 0;
   pthread_mutex_lock(&mp_mu); snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin); snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
   if (!pin[0] || !token[0]) { wipe(token, sizeof token); return 0; }
-  char episode_key[65] = "";
-  int have_episode_key = minipool_work_key(meta, episode_key);
-  if (have_episode_key)
-    snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld&episode_key=%s",
-             base, meta->fp, profile, meta->durMs, episode_key);
-  else
-    snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld",
-             base, meta->fp, profile, meta->durMs);
-  status = request("PUT", url, pin, token, "application/vnd.openseek.nvmt", data, size, 16 * 1024, 45000, &r);
+  status = upload_package(base, meta, profile, meta->durMs, filename, sizeBytes,
+                          data, size, pin, token, &r);
   if (status == 409 && response_error(&r, "media_metadata_conflict")) {
     char storedText[32] = "", *end = NULL;
     if (response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", storedText, sizeof storedText)) {
@@ -570,14 +679,8 @@ int minipool_enviar(int enabled, const MiniMeta *meta, const unsigned char *data
       if (end && *end == 0 && storedDuration > 0 && storedDuration != meta->durMs &&
           nvmt_ok(data, size, storedDuration, grid)) {
         rede_resposta_limpar(&r);
-        if (have_episode_key)
-          snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld&episode_key=%s",
-                   base, meta->fp, profile, storedDuration, episode_key);
-        else
-          snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld",
-                   base, meta->fp, profile, storedDuration);
-        status = request("PUT", url, pin, token, "application/vnd.openseek.nvmt",
-                         data, size, 16 * 1024, 45000, &r);
+        status = upload_package(base, meta, profile, storedDuration, filename, sizeBytes,
+                                data, size, pin, token, &r);
       }
     }
   }

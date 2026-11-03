@@ -45,7 +45,7 @@ static void reset(int firstStatus, const char *firstBody, const char *firstHeade
 }
 
 static int send(MiniMeta *meta, const unsigned char *package, size_t size) {
-  return minipool_enviar(1, meta, package, size);
+  return minipool_enviar(1, meta, "film.mkv", 100000, package, size);
 }
 
 int main(void) {

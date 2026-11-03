@@ -375,7 +375,7 @@ static void startDriveLookup(Job *j, const MiniMeta *meta) {
   }
 }
 
-typedef struct { Job *j; MiniMeta meta; long playheadMs; } PoolLookup;
+typedef struct { Job *j; MiniMeta meta; long playheadMs; char filename[512]; uint64_t sizeBytes; } PoolLookup;
 
 static int nvmtGrid(const char *profile) {
   return !strcmp(profile, "nvmt-v1-g5") ? 5000 : !strcmp(profile, "nvmt-v1-g10") ? 10000 : 0;
@@ -697,14 +697,10 @@ static void *poolLookupWorker(void *arg) {
     printf("[miniatura] SeekDB exact lookup: %u ms, %s\n", SDL_GetTicks() - start, j->parar ? "cancelled" : "miss/unavailable"); fflush(stdout);
   }
   if (!j->parar && !exactComplete) {
-    char key[65] = ""; MpoolCandidate candidates[8]; int candidateCount = 0;
-    int haveEpisodeKey = minipool_work_key(&meta, key);
-    if (!j->parar && !haveEpisodeKey) {
-      printf("[miniatura] SeekDB episode lookup skipped: no usable episode identity\n"); fflush(stdout);
-    }
-    if (!j->parar && haveEpisodeKey &&
-        minipool_episode_candidates(ajustes_openseek_pool_receber(), key, meta.durMs,
-                                    candidates, &candidateCount, &j->parar)) {
+    MpoolCandidate candidates[8]; int candidateCount = 0;
+    if (!j->parar &&
+        minipool_candidates(ajustes_openseek_pool_receber(), &meta, w->filename, w->sizeBytes,
+                            candidates, &candidateCount, &j->parar)) {
       for (int ci = 0; ci < candidateCount && ci < 8 && !j->parar; ci++) {
         MpoolCandidate *c = &candidates[ci];
         long delta = labs(c->durationMs - meta.durMs);
@@ -771,17 +767,19 @@ static void *poolLookupWorker(void *arg) {
   free(w); return NULL;
 }
 
-static void startPoolLookup(Job *j, const MiniMeta *meta, long playheadMs) {
+static void startPoolLookup(Job *j, const MiniMeta *meta, long playheadMs,
+                            const char *filename, uint64_t sizeBytes) {
   PoolLookup *w; pthread_t thread;
   if (!ajustes_openseek_pool_receber() || !minipool_pin_configurado() || j->parar) return;
   w = calloc(1, sizeof *w); if (!w) return;
-  w->j = j; w->meta = *meta; w->playheadMs = playheadMs;
+  w->j = j; w->meta = *meta; w->playheadMs = playheadMs; w->sizeBytes = sizeBytes;
+  if (filename) snprintf(w->filename, sizeof w->filename, "%s", filename);
   pthread_mutex_lock(&mu); j->refs++; pthread_mutex_unlock(&mu);
   if (pthread_create(&thread, NULL, poolLookupWorker, w) == 0) pthread_detach(thread);
   else { pthread_mutex_lock(&mu); soltarJob(j); pthread_mutex_unlock(&mu); free(w); }
 }
 
-static int salvarPool(Job *j, const MiniMeta *meta) {
+static int salvarPool(Job *j, const MiniMeta *meta, const char *filename, uint64_t sizeBytes) {
   size_t n; int c;
   Uint32 inicio = SDL_GetTicks();
   if (!meta->fp[0] || !ajustes_openseek_pool_contribuir() || !minipool_pareado()) return 0;
@@ -789,7 +787,7 @@ static int salvarPool(Job *j, const MiniMeta *meta) {
   if (!ha) return 0;
   unsigned char *b = empacotar(j, &n, &c);
   if (!b) return 0;
-  int ok = minipool_enviar(1, meta, b, n);
+  int ok = minipool_enviar(1, meta, filename, sizeBytes, b, n);
   if (ok) {
     printf("[miniatura] SeekDB pool: sent %d tile(s), %zu bytes in %u ms\n", c, n, SDL_GetTicks() - inicio); fflush(stdout);
   } else {
@@ -806,7 +804,7 @@ static int salvarPool(Job *j, const MiniMeta *meta) {
 // Publish a partial NVMT while playback continues. Keep the same worker thread
 // as the uploader so package snapshots cannot race tile writes. A failed
 // checkpoint is retried after a minute; new frames remain in memory meanwhile.
-static void checkpointPool(Job *j, const MiniMeta *meta, int force,
+static void checkpointPool(Job *j, const MiniMeta *meta, const char *filename, uint64_t sizeBytes, int force,
                            int *uploadedTiles, Uint32 *lastSuccess, Uint32 *lastAttempt) {
   int nowTiles;
   Uint32 now = SDL_GetTicks();
@@ -818,7 +816,7 @@ static void checkpointPool(Job *j, const MiniMeta *meta, int force,
     if ((!due_by_tiles && !due_by_time) || (*lastAttempt && now - *lastAttempt < POOL_CHECKPOINT_MS)) return;
   }
   *lastAttempt = now;
-  if (salvarPool(j, meta)) { *uploadedTiles = nowTiles; *lastSuccess = SDL_GetTicks(); }
+  if (salvarPool(j, meta, filename, sizeBytes)) { *uploadedTiles = nowTiles; *lastSuccess = SDL_GetTicks(); }
 }
 
 static void *trabalhar(void *u) {
@@ -838,6 +836,7 @@ static void *trabalhar(void *u) {
   Uint32 etapaTick = SDL_GetTicks();
   Uint32 poolCheckpointAt = 0, poolCheckpointAttempt = 0;
   int poolUploadedTiles = 0;
+  uint64_t poolSizeBytes = w->bytes;
   if (!l) goto fim;
   l->j = j;
   snprintf(l->url, sizeof l->url, "%s", w->url);
@@ -873,7 +872,8 @@ static void *trabalhar(void *u) {
     fflush(stdout);
   }
 
-  startPoolLookup(j, &meta, (long)(video_pos() * 1000.0));
+  poolSizeBytes = l->total > 0 ? (uint64_t)l->total : w->bytes;
+  startPoolLookup(j, &meta, (long)(video_pos() * 1000.0), w->nome, poolSizeBytes);
   startDriveLookup(j, &meta);
 
   // Pool and personal Drive lookups are started after fingerprinting but run
@@ -983,7 +983,8 @@ static void *trabalhar(void *u) {
       }
       pthread_mutex_unlock(&mu);
       if (irmao >= 0) {
-        checkpointPool(j, &meta, 0, &poolUploadedTiles, &poolCheckpointAt, &poolCheckpointAttempt);
+        checkpointPool(j, &meta, w->nome, poolSizeBytes, 0,
+                       &poolUploadedTiles, &poolCheckpointAt, &poolCheckpointAttempt);
         continue;
       }
     }
@@ -1022,7 +1023,8 @@ static void *trabalhar(void *u) {
     fflush(stdout);
     // What this tile really cost (MemAvailable before -> after, decoder open).
     if (antes >= 0 && depois >= 0 && antes > depois) medidas[nMedidas++ % MEDIDAS] = antes - depois;
-    checkpointPool(j, &meta, 0, &poolUploadedTiles, &poolCheckpointAt, &poolCheckpointAttempt);
+    checkpointPool(j, &meta, w->nome, poolSizeBytes, 0,
+                   &poolUploadedTiles, &poolCheckpointAt, &poolCheckpointAttempt);
     dormirJ(j, INTERVALO_MS);
   }
   if (feitosAqui)
@@ -1037,7 +1039,8 @@ fim:
   if (m) mini_motor_fechar(m);
   fflush(stdout);
   pthread_mutex_lock(&mu); j->local_worker_done = 1; pthread_mutex_unlock(&mu);
-  checkpointPool(j, &meta, 1, &poolUploadedTiles, &poolCheckpointAt, &poolCheckpointAttempt);
+  checkpointPool(j, &meta, w->nome, poolSizeBytes, 1,
+                 &poolUploadedTiles, &poolCheckpointAt, &poolCheckpointAttempt);
   maybeSalvarDrive(j, &meta);
   free(l);
   pthread_mutex_lock(&mu);
