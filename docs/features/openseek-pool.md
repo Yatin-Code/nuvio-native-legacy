@@ -1,7 +1,7 @@
-# OpenSeek shared thumbnail pool
+# SeekDB shared thumbnail pool
 
 Native thumbnail builds (Samsung `.tpk`, LG webOS, and Android) can read and
-contribute TV-generated thumbnail packages to an OpenSeek server. Each TV still
+contribute TV-generated thumbnail packages to a SeekDB server. Each TV still
 reads and decodes its own video locally. The pool receives only the bounded
 `NVMT` thumbnail package; it never receives the video, playback URL, or source
 headers.
@@ -10,19 +10,22 @@ headers.
 
 Open **Settings → Miniatures** on the TV and set:
 
-1. **OpenSeek server** to the server's HTTPS origin, with no path (for example
+1. **SeekDB server** to the server's HTTPS origin, with no path (for example
    `https://20.244.104.107`).
-2. **OpenSeek TLS pin** to the server's `sha256//…` SPKI pin, obtained from the
+2. **SeekDB TLS pin** to the server's `sha256//…` SPKI pin, obtained from the
    server owner through a trusted channel. The pin authenticates the server's
    self-signed certificate; do not accept a pin copied from an unverified
    network response.
-3. **Link OpenSeek** to enter either the owner's temporary 8-character pairing
-   code or a one-use 16-character invitation. The invitation must still be
-   valid when entered.
+3. **Link SeekDB** to enter the owner's 16-character invitation. The owner
+   controls an invitation's use count and expiry; the v1 bootstrap invitation
+   defaults to 100 uses over 30 days.
+
+Existing saved server URLs, TLS pins, and paired device tokens are retained
+when upgrading; the product label changes without resetting the connection.
 
 The server owner must enable sharing. To contribute, the invitation must grant
 contribution permission and the TV's **Share generated miniatures** setting
-must be enabled. **Receive from OpenSeek** and **Share generated miniatures**
+must be enabled. **Receive from SeekDB** and **Share generated miniatures**
 both start off, so each TV opts in separately. Receiving public packages needs
 the server pin but does not require a paired account when the server exposes
 its public read listener.
@@ -38,7 +41,8 @@ accepted frame for each slot.
 
 Google Drive remains the personal backup path. When a shared 5-second package
 is incomplete, Nuvio can still check that TV owner's Drive set before decoding.
-Drive and OpenSeek have separate settings and permissions.
+Drive and SeekDB have separate settings and permissions. SeekDB keeps the
+OpenSeek-compatible v1 wire format so existing pool packages remain usable.
 
 The pool stores multiple profile variants for one exact video fingerprint,
 including the 5-second and 10-second grids. Different cuts or encodes have

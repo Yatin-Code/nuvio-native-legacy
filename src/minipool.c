@@ -1,4 +1,4 @@
-// Paired, TLS-pinned client for the shared OpenSeek thumbnail pool.
+// Paired, TLS-pinned client for the shared SeekDB thumbnail pool.
 #include "miniplat.h"
 
 #ifdef NV_MINIATURAS
@@ -62,7 +62,7 @@ void minipool_carregar(void) {
     wipe(s, strlen(s)); free(s);
   }
   pthread_mutex_lock(&mp_mu); mp_estado = mp_token[0] ? MPOOL_LIGADO : MPOOL_PARADO; pthread_mutex_unlock(&mp_mu);
-  printf("[miniatura] OpenSeek pool %s; TLS pin %s\n", mp_token[0] ? "paired" : "not paired", mp_pin[0] ? "configured" : "required"); fflush(stdout);
+  printf("[miniatura] SeekDB pool %s; TLS pin %s\n", mp_token[0] ? "paired" : "not paired", mp_pin[0] ? "configured" : "required"); fflush(stdout);
 }
 
 const char *minipool_servidor(void) { return mp_url; }
@@ -428,7 +428,7 @@ int minipool_episode_candidates(int enabled, const char *key, long durationMs,
       p = js_prox(end);
     }
   }
-  printf("[miniatura] OpenSeek episode candidate index: HTTP %d, %d candidate(s)\n", status, found);
+  printf("[miniatura] SeekDB episode candidate index: HTTP %d, %d candidate(s)\n", status, found);
   fflush(stdout);
   rede_resposta_limpar(&r); wipe(token, sizeof token); *count = found; return found > 0;
 }

@@ -27,7 +27,7 @@
 // ~20% faster) and is closed while paused. The tiles stay compressed in RAM
 // (~8 KB each); only the few on screen become textures.
 //
-// Nothing is kept on the device: OpenSeek and Google Drive lookups run beside
+// Nothing is kept on the device: SeekDB and Google Drive lookups run beside
 // local extraction, so a slow remote read does not delay the first local tiles.
 //
 // Logs `[miniatura]`, never URLs or keys.
@@ -689,18 +689,18 @@ static void *poolLookupWorker(void *arg) {
   if (hit && !j->parar) {
     exactComplete = nvmtCompleto(b, n);
     int add = desempacotar(j, b, n, &grid);
-    printf("[miniatura] OpenSeek exact lookup: %u ms, %d tile(s) (%s)\n", SDL_GetTicks() - start, add, profile); fflush(stdout);
+    printf("[miniatura] SeekDB exact lookup: %u ms, %d tile(s) (%s)\n", SDL_GetTicks() - start, add, profile); fflush(stdout);
     if (!exactComplete) { printf("[miniatura] exact pool package is partial; checking episode variants\n"); fflush(stdout); }
     free(b); b = NULL;
   } else {
     free(b); b = NULL;
-    printf("[miniatura] OpenSeek exact lookup: %u ms, %s\n", SDL_GetTicks() - start, j->parar ? "cancelled" : "miss/unavailable"); fflush(stdout);
+    printf("[miniatura] SeekDB exact lookup: %u ms, %s\n", SDL_GetTicks() - start, j->parar ? "cancelled" : "miss/unavailable"); fflush(stdout);
   }
   if (!j->parar && !exactComplete) {
     char key[65] = ""; MpoolCandidate candidates[8]; int candidateCount = 0;
     int haveEpisodeKey = minipool_episode_key(&meta, key);
     if (!j->parar && !haveEpisodeKey) {
-      printf("[miniatura] OpenSeek episode lookup skipped: no usable episode identity\n"); fflush(stdout);
+      printf("[miniatura] SeekDB episode lookup skipped: no usable episode identity\n"); fflush(stdout);
     }
     if (!j->parar && haveEpisodeKey &&
         minipool_episode_candidates(ajustes_openseek_pool_receber(), key, meta.durMs,
@@ -754,11 +754,11 @@ static void *poolLookupWorker(void *arg) {
         if (!accepted || j->parar) { free(samples); continue; }
         int sampleAdded = desempacotarCandidato(j, samples, sampleSize, c->durationMs, &grid);
         free(samples);
-        printf("[miniatura] OpenSeek episode reuse: %d verified sample tile(s) from %s\n",
+        printf("[miniatura] SeekDB episode reuse: %d verified sample tile(s) from %s\n",
                sampleAdded, c->fp); fflush(stdout);
         if (minipool_buscar_candidato(ajustes_openseek_pool_receber(), c, &b, &n, &j->parar)) {
           int added = desempacotarCandidato(j, b, n, c->durationMs, &grid);
-          printf("[miniatura] OpenSeek episode reuse: %d additional tile(s) from verified candidate %s\n",
+          printf("[miniatura] SeekDB episode reuse: %d additional tile(s) from verified candidate %s\n",
                  added, c->fp); fflush(stdout);
           free(b); b = NULL;
           if (added) break;
@@ -791,12 +791,12 @@ static int salvarPool(Job *j, const MiniMeta *meta) {
   if (!b) return 0;
   int ok = minipool_enviar(1, meta, b, n);
   if (ok) {
-    printf("[miniatura] OpenSeek pool: sent %d tile(s), %zu bytes in %u ms\n", c, n, SDL_GetTicks() - inicio); fflush(stdout);
+    printf("[miniatura] SeekDB pool: sent %d tile(s), %zu bytes in %u ms\n", c, n, SDL_GetTicks() - inicio); fflush(stdout);
   } else {
     if (minipool_contribuicao_recusada())
-      printf("[miniatura] OpenSeek pool upload denied: not_contribute; local thumbnails kept\n");
+      printf("[miniatura] SeekDB pool upload denied: not_contribute; local thumbnails kept\n");
     else
-      printf("[miniatura] OpenSeek pool upload unavailable; local thumbnails kept\n");
+      printf("[miniatura] SeekDB pool upload unavailable; local thumbnails kept\n");
     fflush(stdout);
   }
   free(b);
