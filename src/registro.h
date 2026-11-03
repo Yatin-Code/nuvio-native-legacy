@@ -61,6 +61,9 @@ int  registro_aberto(void);
 // Abre o painel sem a tecla vermelha (Ajustes > Sobre e ajuda > "Ver o
 // registro na tela"): nem todo controle LG tem a fileira de cores.
 void registro_abrir(void);
+// Abre o mesmo painel com somente as linhas do pool OpenSeek, incluindo a
+// marca legada SeekDB dos registros de versões anteriores.
+void registro_abrir_openseek(void);
 // Mesma ilha de leitura; aviso informativo apos adicionar fonte, uma vez por TV.
 void registro_legal_abrir(void);
 void registro_aviso_legal(void);

@@ -355,3 +355,4 @@
   0, /* folder hero details: On (V_LIGA 0) */
   0, 0, 0, /* OpenSeek server URL, TLS pin, and pair action */
   1, 1, /* OpenSeek pool receive and contribution: off until opted in */
+  0, /* OpenSeek log viewer action */

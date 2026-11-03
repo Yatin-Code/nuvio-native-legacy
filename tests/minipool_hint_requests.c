@@ -1,5 +1,6 @@
 #define NV_ANDROID 1
 #include "../src/minipool.c"
+#include <unistd.h>
 
 static int status[4], calls;
 static char urls[4][2048], methods[4][8], captured_headers[4][256];
@@ -95,8 +96,30 @@ static int test_linear_mapping(void) {
   return !minipool_map_pts(1000, 1, 0, 0, 60000, &mapped) && mapped == -1;
 }
 
+static int test_log_error_redaction(void) {
+  RedeResposta r = {0};
+  char output[256] = "";
+  FILE *capture = tmpfile();
+  int saved;
+  if (!capture) return 0;
+  r.erro = REDE_TRANSPORTE; r.curl_erro = 28;
+  r.corpo = "{\"error\":\"secret\\nAuthorization: bearer-token\"}";
+  fflush(stdout);
+  saved = dup(STDOUT_FILENO);
+  if (saved < 0 || dup2(fileno(capture), STDOUT_FILENO) < 0) { if (saved >= 0) close(saved); fclose(capture); return 0; }
+  mp_log_failure("candidate index", 0, &r);
+  fflush(stdout);
+  if (saved >= 0) { dup2(saved, STDOUT_FILENO); close(saved); }
+  rewind(capture);
+  fread(output, 1, sizeof output - 1, capture);
+  fclose(capture);
+  return strstr(output, "OpenSeek candidate index failed: HTTP 0 transport=transport curl=28 api=invalid_code") &&
+         !strstr(output, "Authorization") && !strstr(output, "bearer-token");
+}
+
 int main(void) {
   if (!test_linear_mapping()) return 15;
+  if (!test_log_error_redaction()) return 23;
   MiniMeta meta = {0};
   MpoolCandidate candidates[8];
   int count = 0;

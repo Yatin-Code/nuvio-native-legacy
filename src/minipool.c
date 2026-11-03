@@ -1,4 +1,4 @@
-// Paired, TLS-pinned client for the shared SeekDB thumbnail pool.
+// Paired, TLS-pinned client for the shared OpenSeek thumbnail pool.
 #include "miniplat.h"
 
 #ifdef NV_MINIATURAS
@@ -29,6 +29,9 @@ static int mp_busy, mp_contribution_denied;
 
 typedef struct { int mode; char code[32], url[256], pin[64], token[96]; } MpoolWork;
 static void wipe(void *p, size_t n) { volatile unsigned char *q = p; while (n--) *q++ = 0; }
+static void mp_log_failure(const char *operation, int status, const RedeResposta *r);
+static void mp_log_rejected(const char *operation, const char *reason);
+static void mp_log_note(const char *message);
 
 static int pin_valido(const char *pin) {
   size_t i;
@@ -63,7 +66,7 @@ void minipool_carregar(void) {
     wipe(s, strlen(s)); free(s);
   }
   pthread_mutex_lock(&mp_mu); mp_estado = mp_token[0] ? MPOOL_LIGADO : MPOOL_PARADO; pthread_mutex_unlock(&mp_mu);
-  printf("[miniatura] SeekDB pool %s; TLS pin %s\n", mp_token[0] ? "paired" : "not paired", mp_pin[0] ? "configured" : "required"); fflush(stdout);
+  printf("[miniatura] OpenSeek pool %s; TLS pin %s\n", mp_token[0] ? "paired" : "not paired", mp_pin[0] ? "configured" : "required"); fflush(stdout);
 }
 
 const char *minipool_servidor(void) { return mp_url; }
@@ -248,19 +251,22 @@ static int start_pair(const char *url, const char *pin, const char *code, char t
   char device[] = "Nuvio TV", client_proof[65], server_proof[80] = "", token_hex[65], expected[65];
   char code_norm[17] = "", invite_tag[5] = "", salt[200] = "", returned_token[96] = "", device_id[24] = "";
   unsigned char key[32] = {0}, mac[32] = {0}, token_hash[32] = {0}; int status, ok = 0;
-  if (!normalize_code(code, code_norm, invite_tag)) goto done;
+  if (!normalize_code(code, code_norm, invite_tag)) { mp_log_rejected("pairing", "invalid_code_format"); goto done; }
   snprintf(endpoint, sizeof endpoint, "%s/v1/pair/start", url);
   if (invite_tag[0]) snprintf(request_body, sizeof request_body, "{\"invite\":\"%s\"}", invite_tag);
   else snprintf(request_body, sizeof request_body, "{\"invite\":null}");
   status = request("POST", endpoint, pin, NULL, "application/json", request_body, strlen(request_body), 16 * 1024, 45000, &start);
-  if (status != 200 || !start.corpo || !js_texto(start.corpo, NULL, "pair_id", pair_id, sizeof pair_id) ||
+  if (status != 200) { mp_log_failure("pair start", status, &start); goto done; }
+  if (!start.corpo || !js_texto(start.corpo, NULL, "pair_id", pair_id, sizeof pair_id) ||
       !js_texto(start.corpo, NULL, "salt", salt_hex, sizeof salt_hex) ||
-      !js_texto(start.corpo, NULL, "spki_pin", server_pin, sizeof server_pin)) goto done;
+      !js_texto(start.corpo, NULL, "spki_pin", server_pin, sizeof server_pin)) {
+    mp_log_rejected("pair start", "invalid_challenge_response"); goto done;
+  }
   unsigned iterations = (unsigned)js_num(start.corpo, NULL, "iterations", 0);
   if (!hex_string(pair_id, 32) || !hex_string(salt_hex, 32) || !pin_valido(server_pin) || strcmp(server_pin, pin) ||
-      iterations < 200000 || iterations > 1000000) goto done;
+      iterations < 200000 || iterations > 1000000) { mp_log_rejected("pair start", "challenge_validation_failed"); goto done; }
   snprintf(salt, sizeof salt, "OSP1%s%s%s", pair_id, salt_hex, server_pin);
-  if (!pbkdf2(code_norm, salt, iterations, key)) goto done;
+  if (!pbkdf2(code_norm, salt, iterations, key)) { mp_log_rejected("pair claim", "proof_generation_failed"); goto done; }
   snprintf(request_body, sizeof request_body, "client%s%s", pair_id, device);
   hmac256(key, sizeof key, (const unsigned char *)request_body, strlen(request_body), mac);
   bin_hex(mac, sizeof mac, client_proof);
@@ -268,14 +274,17 @@ static int start_pair(const char *url, const char *pin, const char *code, char t
   snprintf(request_body, sizeof request_body,
            "{\"pair_id\":\"%s\",\"device_name\":\"%s\",\"client_proof\":\"%s\"}", pair_id, device, client_proof);
   status = request("POST", endpoint, pin, NULL, "application/json", request_body, strlen(request_body), 16 * 1024, 45000, &claim);
-  if (status != 200 || !claim.corpo || !js_texto(claim.corpo, NULL, "token", returned_token, sizeof returned_token) ||
+  if (status != 200) { mp_log_failure("pair claim", status, &claim); goto done; }
+  if (!claim.corpo || !js_texto(claim.corpo, NULL, "token", returned_token, sizeof returned_token) ||
       !js_texto(claim.corpo, NULL, "device_id", device_id, sizeof device_id) ||
       !js_texto(claim.corpo, NULL, "server_proof", server_proof, sizeof server_proof) ||
-      !token_valid(returned_token) || !hex_string(device_id, 16)) goto done;
+      !token_valid(returned_token) || !hex_string(device_id, 16)) {
+    mp_log_rejected("pair claim", "invalid_claim_response"); goto done;
+  }
   sha256_bin(returned_token, strlen(returned_token), token_hash); bin_hex(token_hash, sizeof token_hash, token_hex);
   snprintf(request_body, sizeof request_body, "server%s%s", pair_id, token_hex);
   hmac256(key, sizeof key, (const unsigned char *)request_body, strlen(request_body), mac); bin_hex(mac, sizeof mac, expected);
-  if (!proof_equal(server_proof, expected)) goto done;
+  if (!proof_equal(server_proof, expected)) { mp_log_rejected("pair claim", "server_proof_mismatch"); goto done; }
   snprintf(token_out, 96, "%s", returned_token); ok = 1;
 done:
   wipe(code_norm, sizeof code_norm); wipe(invite_tag, sizeof invite_tag); wipe(key, sizeof key); wipe(mac, sizeof mac); wipe(token_hash, sizeof token_hash);
@@ -288,7 +297,12 @@ static void *mp_worker(void *arg) {
   MpoolWork *w = arg; char new_token[96] = "", url[384]; int ok = 0;
   if (w->mode == 1) {
     ok = start_pair(w->url, w->pin, w->code, new_token);
-    if (ok) { char line[100]; snprintf(line, sizeof line, "%s\n", new_token); if (!dados_gravar(MP_TOKEN_FILE, line)) ok = 0; }
+    if (ok) {
+      char line[100];
+      snprintf(line, sizeof line, "%s\n", new_token);
+      if (!dados_gravar(MP_TOKEN_FILE, line)) { mp_log_rejected("pairing", "device_token_save_failed"); ok = 0; }
+    }
+    if (ok) mp_log_note("pairing completed");
     pthread_mutex_lock(&mp_mu);
     if (ok) {
       snprintf(mp_token, sizeof mp_token, "%s", new_token);
@@ -299,6 +313,8 @@ static void *mp_worker(void *arg) {
   } else {
     snprintf(url, sizeof url, "%s/v1/pair", w->url); RedeResposta r = {0};
     int status = request("DELETE", url, w->pin, w->token, NULL, NULL, 0, 1024, 45000, &r);
+    if (status != 204) mp_log_failure("pair revoke", status, &r);
+    else mp_log_note("pairing revoked");
     rede_resposta_limpar(&r);
     pthread_mutex_lock(&mp_mu);
     if (status == 204) {
@@ -316,20 +332,22 @@ static int start_work(MpoolWork *w) {
   pthread_t thread;
   pthread_mutex_lock(&mp_mu);
   if (mp_busy || !mp_pin[0]) {
+    const char *reason = mp_busy ? "operation_busy" : "tls_pin_not_configured";
     mp_estado = MPOOL_ERRO; snprintf(mp_erro, sizeof mp_erro, "%s", mp_busy ? "Aguarde a operação atual" : "Configure o pin TLS");
-    pthread_mutex_unlock(&mp_mu); wipe(w, sizeof *w); free(w); return 0;
+    pthread_mutex_unlock(&mp_mu); mp_log_rejected("pairing", reason); wipe(w, sizeof *w); free(w); return 0;
   }
   mp_busy = 1; pthread_mutex_unlock(&mp_mu);
   if (pthread_create(&thread, NULL, mp_worker, w)) {
     pthread_mutex_lock(&mp_mu); mp_busy = 0; mp_estado = MPOOL_ERRO;
     snprintf(mp_erro, sizeof mp_erro, "%s", "Não foi possível iniciar a operação"); pthread_mutex_unlock(&mp_mu);
+    mp_log_rejected("pairing", "worker_start_failed");
     wipe(w, sizeof *w); free(w); return 0;
   }
   pthread_detach(thread); return 1;
 }
 void minipool_vincular(const char *code) {
   MpoolWork *w = calloc(1, sizeof *w); if (!w) return;
-  if (!code || strlen(code) >= sizeof w->code) { free(w); return; }
+  if (!code || strlen(code) >= sizeof w->code) { mp_log_rejected("pairing", "invalid_code_format"); free(w); return; }
   w->mode = 1; snprintf(w->code, sizeof w->code, "%s", code);
   pthread_mutex_lock(&mp_mu); snprintf(w->url, sizeof w->url, "%s", mp_url); snprintf(w->pin, sizeof w->pin, "%s", mp_pin);
   mp_estado = MPOOL_VINCULANDO; mp_erro[0] = 0; pthread_mutex_unlock(&mp_mu); (void)start_work(w);
@@ -386,6 +404,72 @@ static int response_error(const RedeResposta *r, const char *wanted) {
   char code[64] = "";
   return r && r->corpo && wanted && js_texto(r->corpo, NULL, "error", code, sizeof code) &&
          !strcmp(code, wanted);
+}
+
+static const char *mp_rede_erro_nome(const RedeResposta *r) {
+  if (!r) return "unknown";
+  switch (r->erro) {
+    case REDE_OK: return r->status ? "none" : "no_response";
+    case REDE_ENTRADA: return "invalid_request";
+    case REDE_INDISPONIVEL: return "unavailable";
+    case REDE_MEMORIA: return "memory";
+    case REDE_TRANSPORTE: return "transport";
+    case REDE_PRAZO: return "timeout";
+    case REDE_CANCELADO: return "cancelled";
+    case REDE_GERACAO: return "stale_request";
+    case REDE_LIMITE_CORPO: return "body_limit";
+    case REDE_LIMITE_CABECALHOS: return "header_limit";
+    case REDE_REDIRECT: return "redirect";
+  }
+  return "unknown";
+}
+
+// API error values are server-controlled; accept only short machine codes so
+// log records can never include arbitrary response text or credentials.
+static void mp_api_error(const RedeResposta *r, char out[64]) {
+  char raw[96] = "";
+  size_t i, n = 0;
+  out[0] = 0;
+  if (!r || !r->corpo || !js_texto(r->corpo, NULL, "error", raw, sizeof raw)) return;
+  for (i = 0; raw[i] && n < 63; i++) {
+    unsigned char c = (unsigned char)raw[i];
+    if (isalnum(c) || c == '_' || c == '-') out[n++] = (char)tolower(c);
+    else { snprintf(out, 64, "invalid_code"); return; }
+  }
+  out[n] = 0;
+}
+
+static void mp_log_failure(const char *operation, int status, const RedeResposta *r) {
+  char api[64] = "none";
+  if (r && r->erro == REDE_CANCELADO) return;
+  mp_api_error(r, api);
+  printf("[miniatura] OpenSeek %s failed: HTTP %d transport=%s curl=%d api=%s\n",
+         operation ? operation : "request", status, mp_rede_erro_nome(r), r ? r->curl_erro : 0, api);
+  fflush(stdout);
+}
+
+static void mp_log_rejected(const char *operation, const char *reason) {
+  printf("[miniatura] OpenSeek %s rejected: %s\n",
+         operation ? operation : "response", reason ? reason : "invalid_response");
+  fflush(stdout);
+}
+
+static void mp_log_note(const char *message) {
+  printf("[miniatura] OpenSeek %s\n", message ? message : "request note");
+  fflush(stdout);
+}
+
+static int mp_json_array_empty(const char *json, const char *key) {
+  char needle[48];
+  const char *p;
+  int n = snprintf(needle, sizeof needle, "\"%s\"", key ? key : "");
+  if (!json || n <= 0 || (size_t)n >= sizeof needle || !(p = strstr(json, needle))) return 0;
+  p = strchr(p + n, ':');
+  if (!p) return 0;
+  do { p++; } while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n');
+  if (*p++ != '[') return 0;
+  while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+  return *p == ']';
 }
 
 static int catalog_hints(const MiniMeta *meta, char imdb[24], int *temporada, int *episodio) {
@@ -548,6 +632,7 @@ static int upload_package(const char *base, const MiniMeta *meta,
   int status = request("PUT", url, pin, token, "application/vnd.openseek.nvmt", data, size,
                        16 * 1024, 45000, response);
   if (status == 400 || status == 404) {
+    mp_log_note("upload retrying legacy route after compatibility response");
     rede_resposta_limpar(response);
     if (!upload_url(legacyUrl, base, meta, profile, durationMs, filename, sizeBytes, 0)) return status;
     status = request("PUT", legacyUrl, pin, token, "application/vnd.openseek.nvmt", data, size,
@@ -567,16 +652,19 @@ int minipool_candidates(int enabled, const MiniMeta *meta, const char *filename,
   pthread_mutex_lock(&mp_mu);
   snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin);
   snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
-  if (!pin[0]) { wipe(token, sizeof token); return 0; }
+  if (!pin[0]) { mp_log_rejected("candidate index", "tls_pin_not_configured"); wipe(token, sizeof token); return 0; }
   if (!candidate_url(url, base, meta, filename, sizeBytes)) { wipe(token, sizeof token); return 0; }
   status = request_cancelable("GET", url, pin, token, NULL, NULL, 0, 16 * 1024, 2500, cancelar, &r);
   if (status == 400 && legacy_episode_url(legacyUrl, base, meta)) {
+    mp_log_note("candidate index using legacy route after HTTP 400");
     rede_resposta_limpar(&r);
     status = request_cancelable("GET", legacyUrl, pin, token, NULL, NULL, 0,
                                 16 * 1024, 2500, cancelar, &r);
   }
   if (status == 200 && r.corpo) {
     const char *p = js_array(r.corpo, NULL, "candidates");
+    if (!p && !mp_json_array_empty(r.corpo, "candidates"))
+      mp_log_rejected("candidate index", "missing_or_invalid_candidates_array");
     while (p && found < 8) {
       const char *end = js_fim(p); char fp[65] = "", profile[16] = "", relation[32] = "";
       long dur; int slots, tiles, grid, score;
@@ -609,7 +697,9 @@ int minipool_candidates(int enabled, const MiniMeta *meta, const char *filename,
       p = js_prox(end);
     }
   }
-  printf("[miniatura] SeekDB candidate index: HTTP %d, %d candidate(s)\n", status, found);
+  if (status == 200 && !r.corpo) mp_log_rejected("candidate index", "empty_response_body");
+  if (status != 200) mp_log_failure("candidate index", status, &r);
+  printf("[miniatura] OpenSeek candidate index: HTTP %d, %d candidate(s)\n", status, found);
   fflush(stdout);
   rede_resposta_limpar(&r); wipe(token, sizeof token); *count = found; return found > 0;
 }
@@ -631,7 +721,7 @@ static int minipool_package_get(int enabled, const char *fp, const char *profile
   pthread_mutex_lock(&mp_mu);
   snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin);
   snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
-  if (!pin[0]) { wipe(token, sizeof token); return 0; }
+  if (!pin[0]) { mp_log_rejected("package download", "tls_pin_not_configured"); wipe(token, sizeof token); return 0; }
   if (slots) {
     size_t used;
     int n = snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&slots=", base, fp, profile);
@@ -652,18 +742,44 @@ static int minipool_package_get(int enabled, const char *fp, const char *profile
   }
   if (status != 200) {
     if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_HTTP_ERROR;
+    mp_log_failure("package download", status, &r);
     goto done;
   }
-  if (!r.corpo || !response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", duration, sizeof duration) ||
-      !response_header(r.cabecalhos, "X-OpenSeek-Sha256", hash, sizeof hash) || atol(duration) != durationMs ||
-      !hex_string(hash, 64) || r.n_corpo > MP_MAX_PACKAGE ||
-      !nvmt_ok((unsigned char *)r.corpo, r.n_corpo, durationMs, grid)) {
+  if (!r.corpo) {
     if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_INVALID_RESPONSE;
+    mp_log_rejected("package download", "empty_response_body");
+    goto done;
+  }
+  if (!response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", duration, sizeof duration) ||
+      !response_header(r.cabecalhos, "X-OpenSeek-Sha256", hash, sizeof hash)) {
+    if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_INVALID_RESPONSE;
+    mp_log_rejected("package download", "missing_integrity_headers");
+    goto done;
+  }
+  if (atol(duration) != durationMs) {
+    if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_INVALID_RESPONSE;
+    mp_log_rejected("package download", "duration_mismatch");
+    goto done;
+  }
+  if (!hex_string(hash, 64)) {
+    if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_INVALID_RESPONSE;
+    mp_log_rejected("package download", "invalid_sha256_header");
+    goto done;
+  }
+  if (r.n_corpo > MP_MAX_PACKAGE) {
+    if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_INVALID_RESPONSE;
+    mp_log_rejected("package download", "package_too_large");
+    goto done;
+  }
+  if (!nvmt_ok((unsigned char *)r.corpo, r.n_corpo, durationMs, grid)) {
+    if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_INVALID_RESPONSE;
+    mp_log_rejected("package download", "invalid_nvmt_package");
     goto done;
   }
   admin_sha256_hex((const unsigned char *)r.corpo, (unsigned long)r.n_corpo, digest);
   if (strcasecmp(digest, hash)) {
     if (sampleInfo) sampleInfo->status = MPOOL_SAMPLE_CHECKSUM_MISMATCH;
+    mp_log_rejected("package download", "sha256_mismatch");
     goto done;
   }
   *data = (unsigned char *)r.corpo; r.corpo = NULL; *size = r.n_corpo;
@@ -708,6 +824,7 @@ static int minipool_correction(const char *work_key, const char *fp,
     snprintf(body, sizeof body, "{\"work_key\":\"%s\",\"b_ms\":%lld}", work_key, (long long)b_ms);
   else snprintf(body, sizeof body, "{\"work_key\":\"%s\",\"days\":30}", work_key);
   int status = request("PUT", url, pin, token, "application/json", body, strlen(body), 4096, 2500, &r);
+  if (status < 200 || status >= 300) mp_log_failure("candidate correction", status, &r);
   rede_resposta_limpar(&r); wipe(token, sizeof token);
   if (!status) return -1;
   return status >= 200 && status < 300 ? 1 : 0;
@@ -731,7 +848,7 @@ int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, siz
   if (!enabled || !meta || !data || !size || !profile || !hex_string(meta->fp, 64)) return 0;
   int have_episode_key = minipool_work_key(meta, episode_key);
   pthread_mutex_lock(&mp_mu); snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin); snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
-  if (!pin[0]) return 0;
+  if (!pin[0]) { mp_log_rejected("exact lookup", "tls_pin_not_configured"); wipe(token, sizeof token); return 0; }
   for (size_t i = 0; i < sizeof profiles / sizeof *profiles; i++) {
     if (cancelar && *cancelar) break;
     RedeResposta r = {0}; char duration[32] = "", hash[80] = "", digest[65];
@@ -744,11 +861,26 @@ int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, siz
     // This runs beside local decoding. Keep the cold Telegram read allowance,
     // but make every request cancellable when the TV switches sources.
     int status = request_cancelable("GET", url, pin, token, NULL, NULL, 0, MP_MAX_PACKAGE, 15000, cancelar, &r);
-    if (status == 200 && r.corpo && response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", duration, sizeof duration) &&
-        response_header(r.cabecalhos, "X-OpenSeek-Sha256", hash, sizeof hash) && atol(duration) == meta->durMs &&
-        hex_string(hash, 64) && r.n_corpo <= MP_MAX_PACKAGE && nvmt_ok((unsigned char *)r.corpo, r.n_corpo, meta->durMs, profiles[i].grid)) {
+    if (status == 200 && !r.corpo) {
+      mp_log_rejected("exact package", "empty_response_body");
+    } else if (status == 200 &&
+        (!response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", duration, sizeof duration) ||
+         !response_header(r.cabecalhos, "X-OpenSeek-Sha256", hash, sizeof hash))) {
+      mp_log_rejected("exact package", "missing_integrity_headers");
+    } else if (status == 200 && atol(duration) != meta->durMs) {
+      mp_log_rejected("exact package", "duration_mismatch");
+    } else if (status == 200 && !hex_string(hash, 64)) {
+      mp_log_rejected("exact package", "invalid_sha256_header");
+    } else if (status == 200 && r.n_corpo > MP_MAX_PACKAGE) {
+      mp_log_rejected("exact package", "package_too_large");
+    } else if (status == 200 && !nvmt_ok((unsigned char *)r.corpo, r.n_corpo, meta->durMs, profiles[i].grid)) {
+      mp_log_rejected("exact package", "invalid_nvmt_package");
+    } else if (status == 200) {
       admin_sha256_hex((const unsigned char *)r.corpo, (unsigned long)r.n_corpo, digest);
       if (!strcasecmp(digest, hash)) { *data = (unsigned char *)r.corpo; r.corpo = NULL; *size = r.n_corpo; snprintf(profile, 16, "%s", profiles[i].name); found = 1; }
+      else mp_log_rejected("exact package", "sha256_mismatch");
+    } else if (status != 404) {
+      mp_log_failure("exact lookup", status, &r);
     }
     rede_resposta_limpar(&r); if (found) break;
   }
@@ -776,6 +908,7 @@ int minipool_enviar(int enabled, const MiniMeta *meta, const char *filename,
       // slot count and every frame timestamp still fits that duration.
       if (end && *end == 0 && storedDuration > 0 && storedDuration != meta->durMs &&
           nvmt_ok(data, size, storedDuration, grid)) {
+        mp_log_note("upload retrying after media duration conflict");
         rede_resposta_limpar(&r);
         status = upload_package(base, meta, profile, storedDuration, filename, sizeBytes,
                                 data, size, pin, token, &r);
@@ -783,6 +916,7 @@ int minipool_enviar(int enabled, const MiniMeta *meta, const char *filename,
     }
   }
   int denied = status == 403 && response_error(&r, "not_contribute");
+  if (status != 200 && status != 201) mp_log_failure("package upload", status, &r);
   if (denied || status == 200 || status == 201) {
     pthread_mutex_lock(&mp_mu);
     mp_contribution_denied = denied;

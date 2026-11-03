@@ -27,7 +27,7 @@
 // ~20% faster) and is closed while paused. The tiles stay compressed in RAM
 // (~8 KB each); only the few on screen become textures.
 //
-// Nothing is kept on the device: SeekDB and Google Drive lookups run beside
+// Nothing is kept on the device: OpenSeek and Google Drive lookups run beside
 // local extraction, so a slow remote read does not delay the first local tiles.
 //
 // Logs `[miniatura]`, never URLs or keys.
@@ -731,12 +731,13 @@ static void *poolLookupWorker(void *arg) {
   if (hit && !j->parar) {
     exactComplete = nvmtCompleto(b, n);
     int add = desempacotar(j, b, n, &grid);
-    printf("[miniatura] SeekDB exact lookup: %u ms, %d tile(s) (%s)\n", SDL_GetTicks() - start, add, profile); fflush(stdout);
-    if (!exactComplete) { printf("[miniatura] exact pool package is partial; checking episode variants\n"); fflush(stdout); }
+    printf("[miniatura] OpenSeek exact lookup: %u ms, %d tile(s) (%s)\n", SDL_GetTicks() - start, add, profile); fflush(stdout);
+    if (!exactComplete) { printf("[miniatura] OpenSeek package is partial; checking episode variants\n"); fflush(stdout); }
     free(b); b = NULL;
   } else {
     free(b); b = NULL;
-    printf("[miniatura] SeekDB exact lookup: %u ms, %s\n", SDL_GetTicks() - start, j->parar ? "cancelled" : "miss/unavailable"); fflush(stdout);
+    if (!j->parar) printf("[miniatura] OpenSeek exact lookup: %u ms, miss/unavailable\n", SDL_GetTicks() - start);
+    fflush(stdout);
   }
   if (!j->parar && !exactComplete) {
     MpoolCandidate candidates[8]; int candidateCount = 0;
@@ -783,7 +784,7 @@ static void *poolLookupWorker(void *arg) {
           free(b); b = NULL;
           if (added) {
             guardarAlvoCorrecao(j, &meta, c);
-            printf("[miniatura] hint hit fp=%.64s score=%d relation=%s\n", c->fp, c->score, c->relation);
+            printf("[miniatura] OpenSeek episode candidate accepted: rank=%d score=%d\n", ci + 1, c->score);
             fflush(stdout);
             break;
           }
@@ -795,7 +796,7 @@ static void *poolLookupWorker(void *arg) {
         free(b); b = NULL;
         if (!added) continue;
         guardarAlvoCorrecao(j, &meta, c);
-        printf("[miniatura] hint hit fp=%.64s score=%d relation=%s\n", c->fp, c->score, c->relation);
+        printf("[miniatura] OpenSeek episode candidate accepted: rank=%d score=%d\n", ci + 1, c->score);
         fflush(stdout);
         break;
 #endif
@@ -810,7 +811,11 @@ static void *poolLookupWorker(void *arg) {
 static void startPoolLookup(Job *j, const MiniMeta *meta, long playheadMs,
                             const char *filename, uint64_t sizeBytes) {
   PoolLookup *w; pthread_t thread;
-  if (!ajustes_openseek_pool_receber() || !minipool_pin_configurado() || j->parar) return;
+  if (!ajustes_openseek_pool_receber() || j->parar) return;
+  if (!minipool_pin_configurado()) {
+    printf("[miniatura] OpenSeek lookup rejected: tls_pin_not_configured\n"); fflush(stdout);
+    return;
+  }
   w = calloc(1, sizeof *w); if (!w) return;
   w->j = j; w->meta = *meta; w->playheadMs = playheadMs; w->sizeBytes = sizeBytes;
   if (filename) snprintf(w->filename, sizeof w->filename, "%s", filename);
@@ -822,19 +827,23 @@ static void startPoolLookup(Job *j, const MiniMeta *meta, long playheadMs,
 static int salvarPool(Job *j, const MiniMeta *meta, const char *filename, uint64_t sizeBytes) {
   size_t n; int c;
   Uint32 inicio = SDL_GetTicks();
-  if (!meta->fp[0] || !ajustes_openseek_pool_contribuir() || !minipool_pareado()) return 0;
+  if (!meta->fp[0] || !ajustes_openseek_pool_contribuir()) return 0;
+  if (!minipool_pareado()) {
+    printf("[miniatura] OpenSeek contribution rejected: device_not_paired\n"); fflush(stdout);
+    return 0;
+  }
   pthread_mutex_lock(&mu); int ha = j->novos; pthread_mutex_unlock(&mu);
   if (!ha) return 0;
   unsigned char *b = empacotar(j, &n, &c);
   if (!b) return 0;
   int ok = minipool_enviar(1, meta, filename, sizeBytes, b, n);
   if (ok) {
-    printf("[miniatura] SeekDB pool: sent %d tile(s), %zu bytes in %u ms\n", c, n, SDL_GetTicks() - inicio); fflush(stdout);
+    printf("[miniatura] OpenSeek pool: sent %d tile(s), %zu bytes in %u ms\n", c, n, SDL_GetTicks() - inicio); fflush(stdout);
   } else {
     if (minipool_contribuicao_recusada())
-      printf("[miniatura] SeekDB pool upload denied: not_contribute; local thumbnails kept\n");
+      printf("[miniatura] OpenSeek pool upload denied: not_contribute; local thumbnails kept\n");
     else
-      printf("[miniatura] SeekDB pool upload unavailable; local thumbnails kept\n");
+      printf("[miniatura] OpenSeek pool upload failed; local thumbnails kept\n");
     fflush(stdout);
   }
   free(b);

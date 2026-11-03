@@ -729,9 +729,10 @@ typedef enum {
   // Hero logo and information size (0 Normal, 1 Grande, 2 Muito grande). LOCAL, append-only.
   AJ_HERO_TAMANHO,
   AJ_HERO_PASTA_DETALHES, // Device-local folder hero details, append-only; on by default.
-  // SeekDB shared TV thumbnail pool settings. Appended to preserve stored IDs.
+  // OpenSeek shared TV thumbnail pool settings. Appended to preserve stored IDs.
   AJ_OPENPOOL_SERVIDOR, AJ_OPENPOOL_PIN, AJ_OPENPOOL_VINCULAR,
   AJ_OPENPOOL_RECEBER, AJ_OPENPOOL_CONTRIBUIR,
+  AJ_OPENPOOL_LOGS,
   AJ_N
 } OpcaoId;
 _Static_assert(DEBRID_RD == 0 && DEBRID_TB == 1 && DEBRID_PM == 2 && DEBRID_AD == 3,
@@ -1874,11 +1875,12 @@ static const Opcao OPCOES[AJ_N] = {
   ESC("Suavizar degradês", V_DEGRADES, 3),
   ESC("Tamanho do destaque", V_HERO_TAMANHO, 3),       // local: heroSizeLocal
   ESC("Mostrar detalhes da pasta no destaque", V_LIGA, 2),
-  ACAO("Servidor SeekDB"),
-  ACAO("Pin TLS do SeekDB"),
-  ACAO("Vincular SeekDB"),
+  ACAO("Servidor OpenSeek"),
+  ACAO("Pin TLS do OpenSeek"),
+  ACAO("Vincular OpenSeek"),
   ESC("Receber miniaturas compartilhadas", V_LIGA, 2),
   ESC("Contribuir miniaturas", V_LIGA, 2),
+  ACAO("Ver erros do OpenSeek"),
 };
 
 // Nome de cada opcao no arquivo. O formato era POSICIONAL — uma linha por
@@ -2213,7 +2215,7 @@ static const char *CHAVE[] = {
   "heroSizeLocal",
   "heroFolderDetailsLocal",
   "-openSeekPoolServer", "-openSeekPoolPin", "-openSeekPoolPair",
-  "openSeekPoolReadLocal", "openSeekPoolContributeLocal",
+  "openSeekPoolReadLocal", "openSeekPoolContributeLocal", "-openSeekLogs",
 };
 // QUATRO VETORES PARALELOS indexados pelo mesmo enum AJ_*: OPCOES, CHAVE,
 // valor e as secoes. OPCOES ja e declarado [AJ_N], e `valor` aceita inicializacao
@@ -6744,7 +6746,7 @@ static void focarOpcao(int op);
 // trailer" 86, P2P no .wgt 6), escondendo o aviso que importa.
 static int foraDestaPlataforma(int op) {
 #if !defined(NV_MINIATURAS) || defined(NV_TPK40)
-  if (op >= AJ_OPENPOOL_SERVIDOR && op <= AJ_OPENPOOL_CONTRIBUIR) return 1;
+  if (op >= AJ_OPENPOOL_SERVIDOR && op <= AJ_OPENPOOL_LOGS) return 1;
 #endif
   // Os limites dos provedores sao editados dentro da folha de ordem.
   if (op >= AJ_FALHA_RD_LIMITE && op <= AJ_FALHA_AD_LIMITE) return 1;
@@ -8192,11 +8194,12 @@ static const char *ajudaOpcaoBase(int op) {
       return "A TV faz as miniaturas enquanto o vídeo toca: primeiro onde você procura, depois perto da posição atual e então o filme todo. Pausa sozinha se faltar memória.";
     case AJ_SEEKR_CHAVE:
       return "Guarda as miniaturas feitas nesta TV numa pasta oculta do seu Google Drive, para não refazer ao rever. Nada fica na TV. Miniaturas sem uso por 40 dias são apagadas.";
-    case AJ_OPENPOOL_SERVIDOR: return "Endereço HTTPS do servidor SeekDB que guarda os pacotes compartilhados.";
+    case AJ_OPENPOOL_SERVIDOR: return "Endereço HTTPS do servidor OpenSeek que guarda os pacotes compartilhados.";
     case AJ_OPENPOOL_PIN: return "Pin SPKI TLS do servidor, obtido pelo dono em um canal confiável. Necessário para autenticar o certificado autoassinado.";
     case AJ_OPENPOOL_VINCULAR: return "Digite o convite de 16 caracteres (4 grupos) ou o código temporário de 8 caracteres do dono. Ao tocar novamente, revoga o pareamento desta TV.";
-    case AJ_OPENPOOL_RECEBER: return "Baixa um pacote de miniaturas do SeekDB antes de gerar quadros localmente. Não exige conta pareada para leitura pública.";
+    case AJ_OPENPOOL_RECEBER: return "Baixa um pacote de miniaturas do OpenSeek antes de gerar quadros localmente. Não exige conta pareada para leitura pública.";
     case AJ_OPENPOOL_CONTRIBUIR: return "Envia os quadros gerados nesta TV ao pool compartilhado. Exige convite com permissão de contribuição.";
+    case AJ_OPENPOOL_LOGS: return "Abre o registro ao vivo filtrado para pedidos e erros do OpenSeek. Use para ver o motivo de uma falha no pool compartilhado.";
 #else
     case AJ_SEEKR_LIGADO: case AJ_SEEKR_CHAVE: return seekrAjuda(op);
 #endif
@@ -9908,6 +9911,7 @@ static void eventoTela(const SDL_Event *e) {
     if (focoOp == AJ_ENVIAR_LOG) { registro_envio_abrir(); return; }
     if (focoOp == AJ_AVISO_LEGAL) { registro_legal_abrir(); return; }
     if (focoOp == AJ_VER_REGISTRO) { registro_abrir(); return; }
+    if (focoOp == AJ_OPENPOOL_LOGS) { registro_abrir_openseek(); return; }
 #ifdef NV_ANDROID
     if (focoOp == AJ_BAIXAR_REGISTRO) {
       android_baixar_registro(registro_arquivo(), i18n("Registro salvo."),
@@ -10013,20 +10017,20 @@ static void eventoTela(const SDL_Event *e) {
     }
     if (focoOp == AJ_OPENPOOL_SERVIDOR) {
       stCampo = focoOp;
-      teclado_abrir_com("Servidor SeekDB", "URL HTTPS, sem caminho (ex.: https://host:443).",
+      teclado_abrir_com("Servidor OpenSeek", "URL HTTPS, sem caminho (ex.: https://host:443).",
                         255, URL_ALFA, minipool_servidor());
       return;
     }
     if (focoOp == AJ_OPENPOOL_PIN) {
       static const char *PIN_ALFA = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+/=";
       stCampo = focoOp;
-      teclado_abrir_com("Pin TLS do SeekDB", "Pin sha256// copiado do painel local do servidor.", 52, PIN_ALFA, NULL);
+      teclado_abrir_com("Pin TLS do OpenSeek", "Pin sha256// copiado do painel local do servidor.", 52, PIN_ALFA, NULL);
       return;
     }
     if (focoOp == AJ_OPENPOOL_VINCULAR) {
       if (minipool_pareado()) { minipool_desvincular(); return; }
       stCampo = focoOp;
-      teclado_abrir_com("Código de convite SeekDB", "Convite de 16 caracteres fornecido pelo dono.", 32, URL_ALFA, NULL);
+      teclado_abrir_com("Código de convite OpenSeek", "Convite de 16 caracteres fornecido pelo dono.", 32, URL_ALFA, NULL);
       return;
     }
 #endif
@@ -10199,11 +10203,11 @@ void ajustes_atualizar(float dt, Uint32 agora) {
 #ifdef NV_MINIATURAS
       else if (stCampo == AJ_OPENPOOL_SERVIDOR) {
         int ok = minipool_servidor_definir(teclado_texto());
-        uxNotificar(ok ? "Servidor SeekDB salvo." : "Use uma origem HTTPS válida.");
+        uxNotificar(ok ? "Servidor OpenSeek salvo." : "Use uma origem HTTPS válida.");
       }
       else if (stCampo == AJ_OPENPOOL_PIN) {
         int ok = minipool_pin_definir(teclado_texto());
-        uxNotificar(ok ? "Pin SeekDB salvo." : "Pin inválido; use o SPKI sha256// do servidor.");
+        uxNotificar(ok ? "Pin OpenSeek salvo." : "Pin inválido; use o SPKI sha256// do servidor.");
       }
       else if (stCampo == AJ_OPENPOOL_VINCULAR) minipool_vincular(teclado_texto());
 #endif
@@ -11048,7 +11052,7 @@ static void ajDesenharTudo(Uint32 agora) {
       GdrEstado ga = minidrive_estado();
       MpoolEstado mp = minipool_estado();
       if (mp == MPOOL_VINCULANDO || mp == MPOOL_DESVINCULANDO || mp == MPOOL_ERRO)
-        desenhaVinculo("SeekDB", minipool_estado_texto(), minipool_servidor(),
+        desenhaVinculo("OpenSeek", minipool_estado_texto(), minipool_servidor(),
                        minipool_erro(), mp == MPOOL_VINCULANDO || mp == MPOOL_DESVINCULANDO);
       else if (ga == GDR_PEDINDO || ga == GDR_AGUARDANDO || ga == GDR_ERRO)
         desenhaVinculo("Google Drive", minidrive_codigo(), minidrive_url(),

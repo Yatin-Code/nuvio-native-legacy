@@ -220,6 +220,21 @@ int main(int argc, char **argv) {
   (void)gl;
 
   // --- painel -------------------------------------------------------------
+  {
+    static const char poolLogs[] =
+      "[miniatura] OpenSeek package download failed: HTTP 503 transport=none curl=0 api=internal_error\n"
+      "[rede] unrelated request completed\n"
+      "[miniatura] SeekDB pool paired; TLS pin configured\n";
+    registro_teste_texto(poolLogs);
+    registro_abrir_openseek();
+    assert(filtroOpenSeek && nVis == 2);
+    assert(lin[vis[0]].sev == 2);
+    assert(registro_teste_achar("HTTP 503", 0) >= 0);
+    assert(registro_teste_achar("SeekDB pool paired", 0) >= 0);
+    assert(registro_teste_achar("unrelated request", 0) < 0);
+    captura("filtro-openseek", CENA_PAINEL);
+    aberto = 0;
+  }
   registro_teste_texto(REG_SHOT_SESSAO);
   registro_abrir();
   hostsDeMentira();

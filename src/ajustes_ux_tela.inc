@@ -34,9 +34,9 @@ static const Item TELA[] = {
 #endif
       OPC(AJ_SEEKR_FITA),
 #if defined(NV_MINIATURAS) && !defined(NV_TPK40)
-      ROT("Cache compartilhado SeekDB"),
+      ROT("Cache compartilhado OpenSeek"),
       OPC(AJ_OPENPOOL_SERVIDOR), OPC(AJ_OPENPOOL_PIN), OPC(AJ_OPENPOOL_VINCULAR),
-      OPC(AJ_OPENPOOL_RECEBER), OPC(AJ_OPENPOOL_CONTRIBUIR),
+      OPC(AJ_OPENPOOL_RECEBER), OPC(AJ_OPENPOOL_CONTRIBUIR), OPC(AJ_OPENPOOL_LOGS),
 #endif
     MAIS(),
     ROT("Escolha da fonte"),

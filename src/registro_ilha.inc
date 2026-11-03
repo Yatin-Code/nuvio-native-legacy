@@ -158,11 +158,12 @@ static float rgSeg(int comNumeros, float x, float yc) {
   float h = 56.0f, ih = 46.0f, w = 10.0f, x0 = x;
   char num[RG_N][16];
   TxtLinha t[RG_N], q[RG_N];
-  int i;
-  for (i = 0; i < RG_N; i++) {
+  int i, nAreas = filtroOpenSeek ? 1 : RG_N;
+  for (i = 0; i < nAreas; i++) {
     int ac = i == area && segEd;
-    snprintf(num[i], sizeof num[i], "%d", cont[i]);
-    t[i] = ac ? rgTT(TXT_AJ_SEG, AREA_NOME[i]) : rgT(TXT_AJ_SEG, AREA_NOME[i]);
+    const char *nome = filtroOpenSeek ? "OpenSeek" : AREA_NOME[i];
+    snprintf(num[i], sizeof num[i], "%d", filtroOpenSeek ? nVis : cont[i]);
+    t[i] = ac ? rgTT(TXT_AJ_SEG, nome) : rgT(TXT_AJ_SEG, nome);
     q[i] = comNumeros ? (ac ? rgTT(TXT_ILHA_GENERO, num[i]) : rgT(TXT_ILHA_GENERO, num[i])) : (TxtLinha){ 0 };
     w += t[i].w + 40.0f + (i ? 4.0f : 0.0f) + (comNumeros ? 9.0f + q[i].w : 0.0f);
   }
@@ -179,7 +180,7 @@ static float rgSeg(int comNumeros, float x, float yc) {
       } else estado = 56 + 14 + 16 + txt_largura(TXT_AJ_CHIP, "Ao vivo") + 20;
     }
     limite = fmaxf(120, fminf(w, RP_X + RP_W - 30 - x - (comNumeros ? estado + 16 : 0)));
-    for (i = 0; i < area; i++) selx += t[i].w + 44 + (comNumeros ? 9 + q[i].w : 0);
+    for (i = 0; i < area && i < nAreas; i++) selx += t[i].w + 44 + (comNumeros ? 9 + q[i].w : 0);
     selw = t[area].w + 40 + (comNumeros ? 9 + q[area].w : 0);
     if (!toqueAreas.livre) {
       if (selx < toqueAreasOffset) toqueAreasOffset = selx - 5;
@@ -195,7 +196,7 @@ static float rgSeg(int comNumeros, float x, float yc) {
   if (rgVid()) gfx_vidro_folha((GfxRect){ x, yc - h * 0.5f, w, h }, 0.5f, 1);
   else rgNeutro((GfxRect){ x, yc - h * 0.5f, w, h }, h * 0.5f, 0.06f, 0.114f, 0.118f, 0.137f, 1);
   x += 5.0f;
-  for (i = 0; i < RG_N; i++) {
+  for (i = 0; i < nAreas; i++) {
     int ac = i == area && segEd;
     float iw = t[i].w + 40.0f + (comNumeros ? 9.0f + q[i].w : 0.0f), al = 0.55f;
 #ifdef NV_TOUCH_UI
@@ -1266,7 +1267,10 @@ static void desenhaVazio(void) {
   float cx = RP_X + RP_W * 0.5f, y;
   const char *tit, *txt;
   float th;
-  if (!semFonte) { tit = "Nenhuma linha de log ainda."; txt = NULL; }
+  if (!semFonte && filtroOpenSeek) {
+    tit = "Nenhum registro do OpenSeek nesta sessão.";
+    txt = "Os pedidos e erros do pool compartilhado aparecerão aqui quando o app tentar usá-lo.";
+  } else if (!semFonte) { tit = "Nenhuma linha de log ainda."; txt = NULL; }
   else {
 #ifdef __EMSCRIPTEN__
     tit = "A página não expôs as linhas do log";
@@ -1319,7 +1323,7 @@ static void desenhaVazio(void) {
 }
 
 static void desenhaPainel(void) {
-  int etap = temEtapas(), vazio = semFonte || !nLin;
+  int etap = temEtapas(), vazio = semFonte || (filtroOpenSeek ? !nVis : !nLin);
   float segFim;
   char t[160];
   // O veu da tela congelada (DESIGN.md §2): 30% vidro, 42% solido.
@@ -1330,7 +1334,8 @@ static void desenhaPainel(void) {
     { char *p = strstr(s, " · "); if (p) { char *q = strstr(p + 3, " · "); if (q) *q = 0; } }
     snprintf(t, sizeof t, "%s · %s · .tpk 4/5", strncmp(a, "Samsung", 7) ? a : "Samsung", s);
     rgCabecalho(t);
-  } else rgCabecalho(i18n("O que o app fez nesta sessão"));
+  } else if (filtroOpenSeek) rgCabecalho(i18n("Registros do OpenSeek"));
+  else rgCabecalho(i18n("O que o app fez nesta sessão"));
   // O VAO ENTRE OS DOIS PAINEIS NAO DEIXA PASSAR A TELA DE TRAS (M sweep,
   // 04/10/2026: letras soltas de Ajustes — "n", "lly", "c", "e" — apareciam em
   // x~1340 na TV do dono). O veu de 30%/42% e a tela congelada ficam inteiros

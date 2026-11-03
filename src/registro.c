@@ -66,6 +66,7 @@
 #define REG_RELER_MS 1000u
 
 static int aberto;
+static int filtroOpenSeek;
 static int aviso;
 static int legal; // 1: aviso curto; 2: leitura em Ajustes
 static int legalVisto;
@@ -176,7 +177,8 @@ static void aparaUtf8(char *s) {
 // defeito passar batido numa foto da tela).
 static int ehFalha(const char *s) {
   return strstr(s, "<<<") || strstr(s, "FALH") || strstr(s, "falh") ||
-         strstr(s, "erro") || strstr(s, "Erro") || strstr(s, "ERRO");
+         strstr(s, "erro") || strstr(s, "Erro") || strstr(s, "ERRO") ||
+         strstr(s, "failed") || strstr(s, "rejected");
 }
 // "HTTP 4xx" ou "HTTP 5xx" em qualquer ponto da linha; devolve o codigo.
 static int httpErro(const char *s) {
@@ -390,6 +392,12 @@ static void filtrar(void) {
   nVis = 0;
   for (i = 0; i < nLin; i++) {
     const RegLinha *L = &lin[i];
+    if (filtroOpenSeek) {
+      if (strstr(L->t, "OpenSeek") || strstr(L->t, "SeekDB")) {
+        vis[nVis] = i; visCtx[nVis++] = 0;
+      }
+      continue;
+    }
     if (area == RG_TUDO) { vis[nVis] = i; visCtx[nVis++] = 0; continue; }
     if (area == RG_PROB) {
       if (!L->sev) continue;
@@ -443,6 +451,8 @@ static void toqueRegLinha(int i, int b) {
 static void toqueRegArea(int i, int b) {
   (void)b;
   if (i < 0 || i >= RG_N) return;
+  if (filtroOpenSeek && i == 0) { segEd = 1; focoEnviar = 0; return; }
+  filtroOpenSeek = 0;
   area = i; segEd = 1; focoEnviar = 0; seguir();
 }
 static void toqueRegSeguir(int a, int b) { (void)a; (void)b; seguir(); }
@@ -491,6 +501,7 @@ static void abrir(void) {
   toquerol_limpar(&toqueAreas); toqueAreasOffset = 0;
 #endif
   aberto = 1;
+  filtroOpenSeek = 0;
   area = RG_TUDO; segEd = 0; pausado = 0; foco = -1; detalhe = 0; focoEnviar = 0;
   novas = 0; focoEtapa = 0;
   fflush(stdout);   // o que este fio ja imprimiu entra no arquivo antes da leitura
@@ -505,6 +516,13 @@ int registro_ja_aberto(void) {
 void registro_abrir(void) {
   if (aberto) return;
   abrir();
+  if (!registro_ja_aberto()) { jaAberto = 1; dados_gravar("registro-aberto.txt", "1\n"); }
+}
+void registro_abrir_openseek(void) {
+  if (!aberto) abrir();
+  filtroOpenSeek = 1;
+  area = RG_TUDO; segEd = 0; pausado = 0; foco = -1; detalhe = 0; focoEnviar = 0;
+  filtrar();
   if (!registro_ja_aberto()) { jaAberto = 1; dados_gravar("registro-aberto.txt", "1\n"); }
 }
 
@@ -553,6 +571,7 @@ static int temEtapas(void) { return area == RG_SISTEMA && etapasN() > 0; }
 static void trocarArea(int d) {
   int a = area + d;
   if (a < 0 || a >= RG_N) return;
+  filtroOpenSeek = 0;
   area = a; focoEtapa = 0;
   if (pausado) { pausado = 0; foco = -1; detalhe = 0; }
   filtrar();
@@ -609,7 +628,7 @@ int registro_evento(const SDL_Event *e) {
   if (e->type == SDL_KEYDOWN) {
     SDL_Keycode k = e->key.keysym.sym;
     if (nv_tecla_voltar(e)) { aberto = 0; engolirSoltura(e); return 1; }
-    if (semFonte || !nLin) {
+    if (semFonte || (filtroOpenSeek ? !nVis : !nLin)) {
       if (ehOk(k)) { recarregar(); engolirSoltura(e); }
       return 1;
     }
