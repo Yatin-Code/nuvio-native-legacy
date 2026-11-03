@@ -358,7 +358,7 @@ static int response_error(const RedeResposta *r, const char *wanted) {
          !strcmp(code, wanted);
 }
 
-int minipool_episode_key(const MiniMeta *meta, char key[65]) {
+int minipool_work_key(const MiniMeta *meta, char key[65]) {
   char identity[128], imdb[24];
   int temporada, episodio;
   if (key) key[0] = 0;
@@ -377,11 +377,17 @@ int minipool_episode_key(const MiniMeta *meta, char key[65]) {
       if (episodio <= 0) episodio = idEpisodio;
     }
   }
-  if (temporada < 0 || episodio <= 0 || strncmp(imdb, "tt", 2) ||
+  if (temporada < 0 || episodio < 0 || strncmp(imdb, "tt", 2) ||
       strlen(imdb) < 7 || strlen(imdb) > 12) return 0;
   for (const char *p = imdb + 2; *p; p++) if (!isdigit((unsigned char)*p)) return 0;
-  int n = snprintf(identity, sizeof identity, "openseek-episode-v1\nimdb:%s\nseason:%d\nepisode:%d",
-                   imdb, temporada, episodio);
+  int n;
+  if (temporada == 0 && episodio == 0)
+    n = snprintf(identity, sizeof identity, "openseek-work-v1\nimdb:%s", imdb);
+  else {
+    if (episodio <= 0) return 0;
+    n = snprintf(identity, sizeof identity, "openseek-episode-v1\nimdb:%s\nseason:%d\nepisode:%d",
+                 imdb, temporada, episodio);
+  }
   if (n <= 0 || (size_t)n >= sizeof identity) return 0;
   admin_sha256_hex((const unsigned char *)identity, (unsigned long)n, key);
   wipe(identity, sizeof identity);
@@ -512,7 +518,7 @@ int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, siz
   char url[512], base[256], pin[64], token[96], episode_key[65] = ""; int found = 0;
   if (data) *data = NULL; if (size) *size = 0; if (profile) profile[0] = 0;
   if (!enabled || !meta || !data || !size || !profile || !hex_string(meta->fp, 64)) return 0;
-  int have_episode_key = minipool_episode_key(meta, episode_key);
+  int have_episode_key = minipool_work_key(meta, episode_key);
   pthread_mutex_lock(&mp_mu); snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin); snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
   if (!pin[0]) return 0;
   for (size_t i = 0; i < sizeof profiles / sizeof *profiles; i++) {
@@ -547,7 +553,7 @@ int minipool_enviar(int enabled, const MiniMeta *meta, const unsigned char *data
   pthread_mutex_lock(&mp_mu); snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin); snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
   if (!pin[0] || !token[0]) { wipe(token, sizeof token); return 0; }
   char episode_key[65] = "";
-  int have_episode_key = minipool_episode_key(meta, episode_key);
+  int have_episode_key = minipool_work_key(meta, episode_key);
   if (have_episode_key)
     snprintf(url, sizeof url, "%s/v1/pool/%s/nvmt?profile=%s&duration_ms=%ld&episode_key=%s",
              base, meta->fp, profile, meta->durMs, episode_key);

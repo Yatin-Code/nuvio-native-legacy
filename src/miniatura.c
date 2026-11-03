@@ -698,7 +698,7 @@ static void *poolLookupWorker(void *arg) {
   }
   if (!j->parar && !exactComplete) {
     char key[65] = ""; MpoolCandidate candidates[8]; int candidateCount = 0;
-    int haveEpisodeKey = minipool_episode_key(&meta, key);
+    int haveEpisodeKey = minipool_work_key(&meta, key);
     if (!j->parar && !haveEpisodeKey) {
       printf("[miniatura] SeekDB episode lookup skipped: no usable episode identity\n"); fflush(stdout);
     }

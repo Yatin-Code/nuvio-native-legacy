@@ -3,7 +3,7 @@
 
 static int is_key(MiniMeta *meta, const char *expected) {
   char key[65] = "";
-  return minipool_episode_key(meta, key) && !strcmp(key, expected);
+  return minipool_work_key(meta, key) && !strcmp(key, expected);
 }
 
 int main(void) {
@@ -28,6 +28,15 @@ int main(void) {
   if (!is_key(&meta, "b9f6854aea756c361928f86107690828d7f304831e17cebf459da5fe85d354a4")) return 4;
 
   meta.episodio = 0;
-  if (minipool_episode_key(&meta, (char[65]){0})) return 5;
+  if (!is_key(&meta, "b98c5f634ced77168a3ee31575a20cbb7de84efaf9910396ef1f37104d53a61e")) return 5;
+
+  // Films use a separate domain tag and need only a valid IMDb identifier.
+  snprintf(meta.imdb, sizeof meta.imdb, "%s", "tt1234567");
+  meta.temporada = 0; meta.episodio = 0;
+  if (!is_key(&meta, "bcef32d6b68d5295ecd712126d448f131d2f1ab3567b46049e614f219fe0f660")) return 6;
+
+  // A film without IMDb identity cannot be assigned a work key.
+  meta.imdb[0] = 0;
+  if (minipool_work_key(&meta, (char[65]){0})) return 7;
   return 0;
 }
