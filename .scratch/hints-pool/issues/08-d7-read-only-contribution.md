@@ -1,6 +1,6 @@
 # D7 — Handle read-only channel contributions
 
-Status: ready (OpenSeek B7/#13 is complete)
+Status: completed (commit `4a2270d6`)
 Blocked by: 03
 External: openseek-telegram#13 (B7 — read-only channel routing; complete)
 Size: M
@@ -19,5 +19,7 @@ Part of: ../spec.md
 **Depends:** D2; external B7.
 
 ## Comments
+
+- 2026-11-04: Done. `403 read_only_channel` is parsed once; a valid HTTPS `contribute_url` is retried exactly once with the same body. Telegram links are surfaced in the Settings help text instead of being PUT targets. Missing/malformed/over-long URLs are logged and denied without a retry. Covered by `tests/minipool_upload_conflict.c` (cases 6–14).
 
 - 2026-11-04: OpenSeek B7 is complete and pushed on `integration/hints-pool`; D7 is unblocked and ready for client implementation.
