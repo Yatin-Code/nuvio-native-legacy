@@ -10,11 +10,11 @@ Part of: ../spec.md
 **Scope:** `src/minipool.c`, `src/miniatura.c`, `src/ajustes.c`, i18n files.
 **Do:**
 - Parse the 403 JSON for `error` and `contribute_url`; store the result in minipool state.
-- If `contribute_url` is present, retry the same PUT exactly once against that URL. The client refuses redirects, so this is a direct retry, not a 3xx follow.
+- If `contribute_url` is a valid HTTPS intake endpoint, retry the same PUT exactly once against it. A Telegram bot link is for manual contribution and must be surfaced in Settings, not used as a PUT target. The client refuses redirects, so this is a direct retry, not a 3xx follow.
 - Require `https://` and cap the URL length; reject anything else.
 - If the retry succeeds, mark the contribution accepted. Otherwise surface a clear denial with the URL in settings/logs.
 - Do not retry on other 4xx/5xx, and never loop.
-**Acceptance:** read-only node + configured host: the package reaches the host; no host: the UI shows a clear denial and the contribute URL; no infinite retry.
+**Acceptance:** read-only node + HTTPS intake endpoint: the package reaches the endpoint once; a Telegram link is shown for manual use; missing/invalid URL shows a clear denial; no infinite retry.
 **Tests:** fake HTTP 403 with and without `contribute_url`; malformed JSON; overlong/non-https URL; retry-once behavior.
 **Depends:** D2; external B7.
 

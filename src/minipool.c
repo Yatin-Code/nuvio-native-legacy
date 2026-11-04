@@ -101,12 +101,20 @@ const char *minipool_contribuicao_url(void) {
   return copy[0] ? copy : NULL;
 }
 
-static void mp_contribution_result(int denied, const char *url) {
-  pthread_mutex_lock(&mp_mu);
+static void mp_contribution_result_locked(int denied, const char *url) {
   mp_contribution_denied = denied;
   if (denied && url) snprintf(mp_contribute_url, sizeof mp_contribute_url, "%s", url);
   else mp_contribute_url[0] = 0;
+}
+
+static void mp_contribution_result(int denied, const char *url) {
+  pthread_mutex_lock(&mp_mu);
+  mp_contribution_result_locked(denied, url);
   pthread_mutex_unlock(&mp_mu);
+}
+
+static void mp_contribution_clear_locked(void) {
+  mp_contribution_result_locked(0, NULL);
 }
 
 int minipool_servidor_definir(const char *url) {
@@ -116,7 +124,7 @@ int minipool_servidor_definir(const char *url) {
   if (mp_busy) { pthread_mutex_unlock(&mp_mu); return 0; }
   if (strcmp(mp_url, clean)) {
     snprintf(mp_url, sizeof mp_url, "%s", clean); limpar_token_memoria_locked();
-    mp_contribution_denied = 0; mp_contribute_url[0] = 0;
+    mp_contribution_clear_locked();
     mp_estado = MPOOL_PARADO; remove_token = 1;
   }
   pthread_mutex_unlock(&mp_mu);
@@ -130,7 +138,7 @@ int minipool_pin_definir(const char *pin) {
   if (mp_busy) { pthread_mutex_unlock(&mp_mu); return 0; }
   if (strcmp(mp_pin, pin)) {
     snprintf(mp_pin, sizeof mp_pin, "%s", pin); limpar_token_memoria_locked();
-    mp_contribution_denied = 0; mp_contribute_url[0] = 0;
+    mp_contribution_clear_locked();
     mp_estado = MPOOL_PARADO; remove_token = 1;
   }
   pthread_mutex_unlock(&mp_mu);
@@ -326,7 +334,7 @@ static void *mp_worker(void *arg) {
     pthread_mutex_lock(&mp_mu);
     if (ok) {
       snprintf(mp_token, sizeof mp_token, "%s", new_token);
-      mp_contribution_denied = 0; mp_contribute_url[0] = 0;
+      mp_contribution_clear_locked();
       mp_estado = MPOOL_LIGADO; mp_erro[0] = 0;
     }
     else { mp_estado = MPOOL_ERRO; snprintf(mp_erro, sizeof mp_erro, "%s", "Vinculação falhou; confira código e pin TLS"); }
@@ -339,7 +347,7 @@ static void *mp_worker(void *arg) {
     rede_resposta_limpar(&r);
     pthread_mutex_lock(&mp_mu);
     if (status == 204) {
-      limpar_token_memoria_locked(); mp_contribution_denied = 0; mp_contribute_url[0] = 0;
+      limpar_token_memoria_locked(); mp_contribution_clear_locked();
       mp_estado = MPOOL_PARADO; mp_erro[0] = 0;
     }
     else { mp_estado = MPOOL_ERRO; snprintf(mp_erro, sizeof mp_erro, "%s", "Não foi possível revogar; tente novamente"); }
