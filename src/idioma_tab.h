@@ -3740,6 +3740,8 @@
   { "O seu código é %s", "Your code is %s" },
   { "O som do trailer no destaque é uma opção à parte, em Som e imagem.", "The featured trailer's sound is a separate option, under Sound and picture." },
   { "O símbolo que o Nuvio mostra na abertura e nas telas de entrada. Novo é o play em degradê; Clássico é a TV retrô de sempre. Vale só nesta TV.", "The symbol Nuvio shows on the opening and the sign-in screens. New is the gradient play button; Classic is the retro TV, as always. Applies to this TV only." },
+  { "O canal compartilhado é somente leitura. Envie o pacote por este endereço:", "The shared channel is read-only. Send the package to this address:" },
+  { "O canal compartilhado é somente leitura e o servidor não informou um endereço de envio.", "The shared channel is read-only and the server did not provide a contribution address." },
   { "O teclado do sistema não abriu.", "The system keyboard didn't open." },
   { "O teste foi cancelado.", "The test was cancelled." },
   { "O teto de resolução das fontes que o Nuvio escolhe.", "The resolution ceiling for the sources Nuvio picks." },

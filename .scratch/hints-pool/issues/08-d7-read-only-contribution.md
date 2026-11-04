@@ -20,6 +20,6 @@ Part of: ../spec.md
 
 ## Comments
 
-- 2026-11-04: Done. `403 read_only_channel` is parsed once; a valid HTTPS `contribute_url` is retried exactly once with the same body. Telegram links are surfaced in the Settings help text instead of being PUT targets. Missing/malformed/over-long URLs are logged and denied without a retry. Covered by `tests/minipool_upload_conflict.c` (cases 6–14).
+- 2026-11-04: Done. `403 read_only_channel` is parsed once; a valid HTTPS intake URL is retried exactly once with the same body and without forwarding the pool token. Telegram links are surfaced in Settings instead of being PUT targets. Missing/malformed/over-long URLs are logged and denied without a retry. Covered by `tests/minipool_upload_conflict.c` (cases 6–15).
 
 - 2026-11-04: OpenSeek B7 is complete and pushed on `integration/hints-pool`; D7 is unblocked and ready for client implementation.

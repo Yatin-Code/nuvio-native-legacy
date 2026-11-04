@@ -1,6 +1,6 @@
 # Spec: hint-based shared pool — Nuvio client (epic D)
 
-Status: in progress — D0–D6 complete; D7 is ready after OpenSeek B7 (#13), and D8 waits on F1 (#20).
+Status: in progress — D0–D7 complete; D8 waits on OpenSeek F1 (#20).
 Scope: the native client in this repo (`src/minipool.c`, `src/minipool.h`, `src/miniatura.c`, `src/minidrive.h`, UI strings).
 Server spec: `Yatin-Code/openseek-telegram` GitHub issue #1; source ticket text `docs/TICKETS-HINTS-POOL.md` on `integration/hints-pool`.
 
@@ -91,9 +91,10 @@ Read-only contribution:
 
 - **Hosted channel:** the node can post. `PUT` succeeds; the client marks the contribution accepted.
 - **Foreign channel:** the node returns `403 read_only_channel`. If `contribute_url` is present,
-  D7 retries the same PUT once against that URL. Otherwise the client surfaces the denial and the
-  URL so the user can use the librarian bot.
-- The client never follows HTTP redirects; it retries the URL directly.
+  D7 retries the same PUT once against a valid HTTPS intake URL. A Telegram bot link is shown in
+  Settings for manual contribution; it is not treated as an HTTP upload endpoint. Otherwise the
+  client surfaces the denial and any validated URL in Settings and logs the reason.
+- The client never follows HTTP redirects or forwards the pool token to the contribution host.
 
 ## Deployment-specific transfers
 
@@ -106,8 +107,8 @@ Read-only contribution:
 Two different files of the same film (different `fp`, same IMDb id, near-equal duration):
 the second client gets a candidate hit, downloads one NVMT package, applies `a*pts+b`, renders,
 and performs **zero local frame extraction**. The log shows `hint hit fp=... score=... relation=...`.
-If the node is read-only, the package reaches the configured `contribute_url` exactly once.
+If the node is read-only, an HTTPS intake URL receives exactly one PUT retry; a Telegram link is shown for manual use.
 
 ## Comments
 
-- 2026-11-04: D0–D6 are implemented and committed on `integration/hints-pool`. OpenSeek B7 is complete, so D7 is ready; D8 still waits on F1. See issues 08 and 09.
+- 2026-11-04: D0–D7 are implemented and committed on `integration/hints-pool`. D8 still waits on F1. See issues 08 and 09.
