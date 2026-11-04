@@ -8224,6 +8224,21 @@ static const char *ajudaOpcaoBase(int op) {
 static const char *ajudaOpcao(int op) {
   const char *base = ajudaOpcaoBase(op);
   static char b[2048];
+  // D7: a read-only channel explains where to send the package instead.
+#ifdef NV_MINIATURAS
+  if (op == AJ_OPENPOOL_CONTRIBUIR && ajustes_openseek_pool_contribuir() &&
+      minipool_contribuicao_recusada()) {
+    const char *url = minipool_contribuicao_url();
+    if (url) {
+      snprintf(b, sizeof b, "%s\n%s\n%s", i18n(base),
+               i18n("O canal compartilhado é somente leitura. Envie o pacote por este endereço:"), url);
+      return b;
+    }
+    snprintf(b, sizeof b, "%s\n%s", i18n(base),
+             i18n("O canal compartilhado é somente leitura e o servidor não informou um endereço de envio."));
+    return b;
+  }
+#endif
   // O endereco da pagina vai junto da ajuda, ao vivo (muda com o IP da TV).
   if (op == AJ_LOG_REDE && logrede_url()[0]) {
     snprintf(b, sizeof b, "%s\n%s", i18n(base), logrede_url());

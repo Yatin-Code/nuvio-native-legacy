@@ -8,13 +8,13 @@ static struct {
   int status;
   const char *body;
   const char *headers;
-} replies[4];
+} replies[8];
 static int calls;
-static char urls[4][512];
+static char urls[8][512];
 
 int rede_pedir(const RedePedido *p, RedeResposta *r) {
   int i = calls++;
-  if (!p || !r || i >= 4 || strcmp(p->metodo, "PUT") || !p->url || !p->corpo) return 0;
+  if (!p || !r || i >= 8 || strcmp(p->metodo, "PUT") || !p->url || !p->corpo) return 0;
   snprintf(urls[i], sizeof urls[i], "%s", p->url);
   r->status = replies[i].status;
   r->corpo = strdup(replies[i].body ? replies[i].body : "");
@@ -39,7 +39,7 @@ static void reset(int firstStatus, const char *firstBody, const char *firstHeade
                   int secondStatus, const char *secondBody) {
   memset(replies, 0, sizeof replies);
   calls = 0;
-  urls[0][0] = urls[1][0] = 0;
+  memset(urls, 0, sizeof urls);
   replies[0].status = firstStatus; replies[0].body = firstBody; replies[0].headers = firstHeaders;
   replies[1].status = secondStatus; replies[1].body = secondBody;
 }
@@ -53,6 +53,7 @@ int main(void) {
   unsigned char package[20 + 12 + 125] = {0};
   const char *conflict = "{\"error\":\"media_metadata_conflict\"}";
   strcpy(meta.fp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  strcpy(meta.imdb, "tt1234567");
   meta.durMs = 21000;
   strcpy(mp_url, "https://pool.example");
   strcpy(mp_pin, "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
@@ -77,5 +78,61 @@ int main(void) {
 
   reset(201, "{}", "", 0, NULL);
   if (!send(&meta, package, sizeof package) || calls != 1 || minipool_contribuicao_recusada()) return 5;
+
+  // D7: a read-only channel returns 403 read_only_channel with an optional
+  // contribution origin. The same package is retried exactly once there.
+  reset(403, "{\"error\":\"read_only_channel\",\"contribute_url\":\"https://host.example\"}", "", 201, "{}");
+  if (!send(&meta, package, sizeof package) || calls != 2 ||
+      strncmp(urls[1], "https://host.example/v1/pool/", 29) ||
+      !strstr(urls[1], "/nvmt?") || !strstr(urls[1], "imdb=tt1234567") ||
+      minipool_contribuicao_recusada() || minipool_contribuicao_url()) return 6;
+
+  // A contribution URL that already has a path keeps it and receives the
+  // original query string.
+  reset(403, "{\"error\":\"read_only_channel\",\"contribute_url\":\"https://host.example/intake\"}", "", 201, "{}");
+  if (!send(&meta, package, sizeof package) || calls != 2 ||
+      strncmp(urls[1], "https://host.example/intake?", 28) ||
+      !strstr(urls[1], "duration_ms=21000") || minipool_contribuicao_recusada()) return 7;
+
+  // A Telegram link is a manual intake channel, not a PUT target: no retry,
+  // but the link must be surfaced in Settings.
+  reset(403, "{\"error\":\"read_only_channel\",\"contribute_url\":\"https://t.me/openseek_pool\"}", "", 201, "{}");
+  if (send(&meta, package, sizeof package) || calls != 1 ||
+      !minipool_contribuicao_recusada() ||
+      !minipool_contribuicao_url() ||
+      strcmp(minipool_contribuicao_url(), "https://t.me/openseek_pool")) return 8;
+
+  // No contribute_url: a clear denial, no retry, no stale link.
+  reset(403, "{\"error\":\"read_only_channel\"}", "", 201, "{}");
+  if (send(&meta, package, sizeof package) || calls != 1 ||
+      !minipool_contribuicao_recusada() || minipool_contribuicao_url()) return 9;
+
+  // Malformed JSON, non-HTTPS, and over-long URLs are refused without a retry.
+  reset(403, "{\"error\":\"read_only_channel\"", "", 201, "{}");
+  if (send(&meta, package, sizeof package) || calls != 1 ||
+      !minipool_contribuicao_recusada() || minipool_contribuicao_url()) return 10;
+  reset(403, "{\"error\":\"read_only_channel\",\"contribute_url\":\"http://host.example\"}", "", 201, "{}");
+  if (send(&meta, package, sizeof package) || calls != 1 ||
+      !minipool_contribuicao_recusada() || minipool_contribuicao_url()) return 11;
+  {
+    char overlong[600];
+    snprintf(overlong, sizeof overlong, "https://host.example/%0590d", 0);
+    char body[700];
+    snprintf(body, sizeof body, "{\"error\":\"read_only_channel\",\"contribute_url\":\"%s\"}", overlong);
+    reset(403, body, "", 201, "{}");
+    if (send(&meta, package, sizeof package) || calls != 1 ||
+        !minipool_contribuicao_recusada() || minipool_contribuicao_url()) return 12;
+  }
+
+  // A failed retry keeps the denial and the destination; there is no loop.
+  reset(403, "{\"error\":\"read_only_channel\",\"contribute_url\":\"https://host.example\"}", "", 500, "{}");
+  if (send(&meta, package, sizeof package) || calls != 2 ||
+      !minipool_contribuicao_recusada() ||
+      strcmp(minipool_contribuicao_url(), "https://host.example")) return 13;
+
+  // read_only_channel on a non-403 never triggers the contribution retry.
+  reset(500, "{\"error\":\"read_only_channel\",\"contribute_url\":\"https://host.example\"}", "", 201, "{}");
+  if (send(&meta, package, sizeof package) || calls != 1) return 14;
+
   return 0;
 }

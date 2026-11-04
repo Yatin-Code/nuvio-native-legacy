@@ -20,10 +20,12 @@
 #define MP_PIN_FILE "openseek-pin.txt"
 #define MP_TOKEN_FILE "openseek-device-token.txt"
 #define MP_MAX_PACKAGE (16u * 1024u * 1024u)
+#define MP_CONTRIBUTE_URL_MAX 512u
 #define MP_DEFAULT_URL "https://20.244.104.107"
 
 static pthread_mutex_t mp_mu = PTHREAD_MUTEX_INITIALIZER;
 static char mp_url[256] = MP_DEFAULT_URL, mp_pin[64], mp_token[96], mp_erro[128];
+static char mp_contribute_url[MP_CONTRIBUTE_URL_MAX + 1];
 static MpoolEstado mp_estado = MPOOL_PARADO;
 static int mp_busy, mp_contribution_denied;
 
@@ -91,6 +93,22 @@ int minipool_contribuicao_recusada(void) {
   return denied;
 }
 
+const char *minipool_contribuicao_url(void) {
+  static char copy[MP_CONTRIBUTE_URL_MAX + 1];
+  pthread_mutex_lock(&mp_mu);
+  snprintf(copy, sizeof copy, "%s", mp_contribute_url);
+  pthread_mutex_unlock(&mp_mu);
+  return copy[0] ? copy : NULL;
+}
+
+static void mp_contribution_result(int denied, const char *url) {
+  pthread_mutex_lock(&mp_mu);
+  mp_contribution_denied = denied;
+  if (denied && url) snprintf(mp_contribute_url, sizeof mp_contribute_url, "%s", url);
+  else mp_contribute_url[0] = 0;
+  pthread_mutex_unlock(&mp_mu);
+}
+
 int minipool_servidor_definir(const char *url) {
   char clean[256], line[260]; int remove_token = 0;
   if (!url_valida(url, clean)) return 0;
@@ -98,7 +116,8 @@ int minipool_servidor_definir(const char *url) {
   if (mp_busy) { pthread_mutex_unlock(&mp_mu); return 0; }
   if (strcmp(mp_url, clean)) {
     snprintf(mp_url, sizeof mp_url, "%s", clean); limpar_token_memoria_locked();
-    mp_contribution_denied = 0; mp_estado = MPOOL_PARADO; remove_token = 1;
+    mp_contribution_denied = 0; mp_contribute_url[0] = 0;
+    mp_estado = MPOOL_PARADO; remove_token = 1;
   }
   pthread_mutex_unlock(&mp_mu);
   if (remove_token) dados_apagar(MP_TOKEN_FILE);
@@ -111,7 +130,8 @@ int minipool_pin_definir(const char *pin) {
   if (mp_busy) { pthread_mutex_unlock(&mp_mu); return 0; }
   if (strcmp(mp_pin, pin)) {
     snprintf(mp_pin, sizeof mp_pin, "%s", pin); limpar_token_memoria_locked();
-    mp_contribution_denied = 0; mp_estado = MPOOL_PARADO; remove_token = 1;
+    mp_contribution_denied = 0; mp_contribute_url[0] = 0;
+    mp_estado = MPOOL_PARADO; remove_token = 1;
   }
   pthread_mutex_unlock(&mp_mu);
   if (remove_token) dados_apagar(MP_TOKEN_FILE);
@@ -306,7 +326,8 @@ static void *mp_worker(void *arg) {
     pthread_mutex_lock(&mp_mu);
     if (ok) {
       snprintf(mp_token, sizeof mp_token, "%s", new_token);
-      mp_contribution_denied = 0; mp_estado = MPOOL_LIGADO; mp_erro[0] = 0;
+      mp_contribution_denied = 0; mp_contribute_url[0] = 0;
+      mp_estado = MPOOL_LIGADO; mp_erro[0] = 0;
     }
     else { mp_estado = MPOOL_ERRO; snprintf(mp_erro, sizeof mp_erro, "%s", "Vinculação falhou; confira código e pin TLS"); }
     pthread_mutex_unlock(&mp_mu);
@@ -318,7 +339,7 @@ static void *mp_worker(void *arg) {
     rede_resposta_limpar(&r);
     pthread_mutex_lock(&mp_mu);
     if (status == 204) {
-      limpar_token_memoria_locked(); mp_contribution_denied = 0;
+      limpar_token_memoria_locked(); mp_contribution_denied = 0; mp_contribute_url[0] = 0;
       mp_estado = MPOOL_PARADO; mp_erro[0] = 0;
     }
     else { mp_estado = MPOOL_ERRO; snprintf(mp_erro, sizeof mp_erro, "%s", "Não foi possível revogar; tente novamente"); }
@@ -626,17 +647,157 @@ static int upload_url(char url[2048], const char *base, const MiniMeta *meta,
 static int upload_package(const char *base, const MiniMeta *meta,
                           const char *profile, long durationMs, const char *filename,
                           uint64_t sizeBytes, const unsigned char *data, size_t size,
-                          const char *pin, const char *token, RedeResposta *response) {
+                          const char *pin, const char *token, RedeResposta *response,
+                          char request_url[2048]) {
   char url[2048], legacyUrl[2048];
   if (!upload_url(url, base, meta, profile, durationMs, filename, sizeBytes, 1)) return 0;
+  snprintf(request_url, 2048, "%s", url);
   int status = request("PUT", url, pin, token, "application/vnd.openseek.nvmt", data, size,
                        16 * 1024, 45000, response);
   if (status == 400 || status == 404) {
     mp_log_note("upload retrying legacy route after compatibility response");
     rede_resposta_limpar(response);
     if (!upload_url(legacyUrl, base, meta, profile, durationMs, filename, sizeBytes, 0)) return status;
+    snprintf(request_url, 2048, "%s", legacyUrl);
     status = request("PUT", legacyUrl, pin, token, "application/vnd.openseek.nvmt", data, size,
                      16 * 1024, 45000, response);
+  }
+  return status;
+}
+
+static int contribution_url_valid(const char *url, char out[MP_CONTRIBUTE_URL_MAX + 1],
+                                  int *telegram_link) {
+  size_t n, authority_n, host_n;
+  const char *authority, *path, *host_end;
+  char host[256];
+  if (telegram_link) *telegram_link = 0;
+  if (!url || strncmp(url, "https://", 8)) return 0;
+  n = strlen(url);
+  if (n < 10 || n > MP_CONTRIBUTE_URL_MAX || strchr(url, '?') || strchr(url, '#')) return 0;
+  authority = url + 8;
+  path = strchr(authority, '/');
+  authority_n = path ? (size_t)(path - authority) : strlen(authority);
+  if (!authority_n || authority_n >= sizeof host) return 0;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)url[i];
+    if (c <= 32 || c >= 127 || c == '@' || c == '\\') return 0;
+  }
+  for (size_t i = 0; i < authority_n; i++) {
+    unsigned char c = (unsigned char)authority[i];
+    if (!isalnum(c) && c != '.' && c != '-' && c != ':' && c != '[' && c != ']') return 0;
+  }
+  if (authority[0] == '[') {
+    const char *close = memchr(authority, ']', authority_n);
+    if (!close || (size_t)(close - authority) < 3 ||
+        ((size_t)(close - authority + 1) < authority_n && close[1] != ':')) return 0;
+    host_end = close + 1;
+  } else {
+    host_end = memchr(authority, ':', authority_n);
+    if (!host_end) host_end = authority + authority_n;
+  }
+  host_n = (size_t)(host_end - authority);
+  if (!host_n || host_n >= sizeof host) return 0;
+  if (host_end < authority + authority_n) {
+    unsigned long port = 0;
+    if (*host_end != ':' || !host_end[1]) return 0;
+    for (const unsigned char *p = (const unsigned char *)host_end + 1;
+         p < (const unsigned char *)authority + authority_n; p++) {
+      if (!isdigit(*p)) return 0;
+      if (port > 6553 || (port == 6553 && *p > '5')) return 0;
+      port = port * 10 + (unsigned)(*p - '0');
+    }
+    if (!port) return 0;
+  }
+  memcpy(host, authority, host_n); host[host_n] = 0;
+  for (size_t i = 0; i < host_n; i++) host[i] = (char)tolower((unsigned char)host[i]);
+  if (path) {
+    for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+      if (!(isalnum(*p) || strchr("/-._~%", *p))) return 0;
+    }
+  }
+  int telegram_host = !strcmp(host, "t.me") || !strcmp(host, "telegram.me") ||
+                      !strcmp(host, "www.telegram.me");
+  int telegram_port = host_end == authority + authority_n ||
+                      ((size_t)((authority + authority_n) - host_end) == 4 &&
+                       !strncmp(host_end, ":443", 4));
+  if (telegram_link && telegram_host && telegram_port)
+    *telegram_link = 1;
+  memcpy(out, url, n + 1);
+  return 1;
+}
+
+static int contribution_retry_url(const char *contribute_url, const char *original_url,
+                                  char out[4096]) {
+  const char *target_path, *source_path, *source_query;
+  size_t target_origin_n;
+  int n;
+  if (!contribute_url || !original_url || strncmp(original_url, "https://", 8)) return 0;
+  target_path = strchr(contribute_url + 8, '/');
+  source_path = strchr(original_url + 8, '/');
+  if (!source_path) return 0;
+  source_query = strchr(source_path, '?');
+  if (!target_path || !target_path[1]) {
+    target_origin_n = target_path ? (size_t)(target_path - contribute_url) : strlen(contribute_url);
+    n = snprintf(out, 4096, "%.*s%s", (int)target_origin_n, contribute_url, source_path);
+  } else {
+    n = snprintf(out, 4096, "%s%s", contribute_url, source_query ? source_query : "");
+  }
+  return n > 0 && n < 4096;
+}
+
+static int request_contribution_host(const char *url, const unsigned char *data, size_t size,
+                                     RedeResposta *response) {
+  const char *headers[] = { "Content-Type: application/vnd.openseek.nvmt", NULL };
+  RedePedido p;
+  memset(&p, 0, sizeof p);
+  p.metodo = "PUT"; p.url = url; p.cabecalhos = headers;
+  p.corpo = data; p.n_corpo = size; p.prazo_ms = 45000;
+  p.max_bytes = 16 * 1024; p.max_cabecalhos = 16 * 1024;
+  p.seguir = 0; p.tls_pessoal = 0; p.tls_pin = NULL;
+  if (!rede_pedir(&p, response) && !response->status) return 0;
+  return response->status;
+}
+
+static int retry_read_only_upload(const char *original_url, const unsigned char *data, size_t size,
+                                  RedeResposta *response, int *retried) {
+  // One byte of slack so a truncated value cannot pass the length check.
+  char raw[MP_CONTRIBUTE_URL_MAX + 2] = "", clean[MP_CONTRIBUTE_URL_MAX + 1] = "";
+  char target[4096];
+  int telegram_link = 0, status;
+  if (retried) *retried = 0;
+  if (!response_error(response, "read_only_channel")) return response ? response->status : 0;
+  mp_contribution_result(1, NULL);
+  if (!response->corpo || !js_texto(response->corpo, NULL, "contribute_url", raw, sizeof raw)) {
+    mp_log_rejected("package contribution", "missing_or_invalid_contribute_url");
+    return response->status;
+  }
+  if (strlen(raw) > MP_CONTRIBUTE_URL_MAX ||
+      !contribution_url_valid(raw, clean, &telegram_link)) {
+    mp_log_rejected("package contribution", "invalid_contribute_url");
+    return response->status;
+  }
+  mp_contribution_result(1, clean);
+  if (telegram_link) {
+    mp_log_note("read-only channel; contribution link is available in Settings");
+    return response->status;
+  }
+  if (!contribution_retry_url(clean, original_url, target)) {
+    mp_log_rejected("package contribution", "invalid_contribution_target");
+    return response->status;
+  }
+  if (retried) *retried = 1;
+  RedeResposta retry = {0};
+  status = request_contribution_host(target, data, size, &retry);
+  if (status >= 200 && status < 300) {
+    rede_resposta_limpar(response);
+    *response = retry;
+    mp_contribution_result(0, NULL);
+    mp_log_note("read-only contribution accepted by the contribution host");
+  } else {
+    rede_resposta_limpar(response);
+    *response = retry;
+    mp_contribution_result(1, clean);
+    mp_log_note("read-only contribution failed; destination is available in Settings");
   }
   return status;
 }
@@ -889,8 +1050,8 @@ int minipool_buscar(int enabled, const MiniMeta *meta, unsigned char **data, siz
 
 int minipool_enviar(int enabled, const MiniMeta *meta, const char *filename,
                     uint64_t sizeBytes, const unsigned char *data, size_t size) {
-  char base[256], pin[64], token[96], profile[24];
-  RedeResposta r = {0}; int status, grid;
+  char base[256], pin[64], token[96], profile[24], request_url[2048] = "";
+  RedeResposta r = {0}; int status, grid, retried_contribution = 0;
   if (!enabled || !meta || !hex_string(meta->fp, 64) || !data || size > MP_MAX_PACKAGE || !minipool_pareado()) return 0;
   if (size < 20) return 0;
   grid = (int)read32(data + 8); if (grid != 5000 && grid != 10000) return 0;
@@ -898,8 +1059,9 @@ int minipool_enviar(int enabled, const MiniMeta *meta, const char *filename,
   if (!nvmt_ok(data, size, meta->durMs, grid)) return 0;
   pthread_mutex_lock(&mp_mu); snprintf(base, sizeof base, "%s", mp_url); snprintf(pin, sizeof pin, "%s", mp_pin); snprintf(token, sizeof token, "%s", mp_token); pthread_mutex_unlock(&mp_mu);
   if (!pin[0] || !token[0]) { wipe(token, sizeof token); return 0; }
+  mp_contribution_result(0, NULL);
   status = upload_package(base, meta, profile, meta->durMs, filename, sizeBytes,
-                          data, size, pin, token, &r);
+                          data, size, pin, token, &r, request_url);
   if (status == 409 && response_error(&r, "media_metadata_conflict")) {
     char storedText[32] = "", *end = NULL;
     if (response_header(r.cabecalhos, "X-OpenSeek-Duration-Ms", storedText, sizeof storedText)) {
@@ -911,17 +1073,17 @@ int minipool_enviar(int enabled, const MiniMeta *meta, const char *filename,
         mp_log_note("upload retrying after media duration conflict");
         rede_resposta_limpar(&r);
         status = upload_package(base, meta, profile, storedDuration, filename, sizeBytes,
-                                data, size, pin, token, &r);
+                                data, size, pin, token, &r, request_url);
       }
     }
   }
+  if (status == 403 && response_error(&r, "read_only_channel"))
+    status = retry_read_only_upload(request_url, data, size, &r, &retried_contribution);
   int denied = status == 403 && response_error(&r, "not_contribute");
-  if (status != 200 && status != 201) mp_log_failure("package upload", status, &r);
-  if (denied || status == 200 || status == 201) {
-    pthread_mutex_lock(&mp_mu);
-    mp_contribution_denied = denied;
-    pthread_mutex_unlock(&mp_mu);
-  }
+  if (status != 200 && status != 201)
+    mp_log_failure(retried_contribution ? "contribution retry" : "package upload", status, &r);
+  if (denied && !retried_contribution) mp_contribution_result(1, NULL);
+  if (status == 200 || status == 201) mp_contribution_result(0, NULL);
   rede_resposta_limpar(&r); wipe(token, sizeof token);
   return status == 200 || status == 201;
 }

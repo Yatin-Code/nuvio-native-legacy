@@ -51,6 +51,8 @@ MpoolEstado minipool_estado(void);
 const char *minipool_estado_texto(void);
 const char *minipool_erro(void);
 int minipool_contribuicao_recusada(void);
+// Returns the validated HTTPS contribution link after a read-only denial, or NULL.
+const char *minipool_contribuicao_url(void);
 void minipool_vincular(const char *codigo_convite);
 void minipool_desvincular(void);
 
