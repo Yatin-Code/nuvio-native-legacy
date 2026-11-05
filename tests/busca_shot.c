@@ -4,6 +4,7 @@
 // cursor e estado vazio depois de duas letras. A lista real e assincrona e fica
 // para o teste manual do aparelho; aqui o importante e a casca da interacao.
 #include "busca.h"
+#include "nvtmp.h"
 #include "buscasrec.h"
 #include "dados.h"
 #include "ajustes.h"
@@ -13,6 +14,8 @@
 #include "tex_cache.h"
 #include "catalogo.h"
 #include "sistexto.h"
+#include "spotpessoa.h"
+#include "vidro_telas.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <assert.h>
@@ -21,6 +24,17 @@
 #include <string.h>
 
 static SDL_Window *janela;
+
+// TMDB de mentira (spotpessoa_teste): as tres pessoas do mockup, sem rede.
+static char *tmdbFalso(const char *url) {
+  static const char *j =
+    "{\"results\":["
+    "{\"id\":3894,\"name\":\"Christian Bale\",\"profile_path\":\"/a.jpg\",\"known_for\":[{\"id\":155,\"media_type\":\"movie\",\"title\":\"The Dark Knight\"},{\"id\":1124,\"media_type\":\"movie\",\"title\":\"The Prestige\"}]},"
+    "{\"id\":1245,\"name\":\"Scarlett Johansson\",\"profile_path\":\"/b.jpg\",\"known_for\":[{\"id\":24428,\"media_type\":\"movie\",\"title\":\"The Avengers\"},{\"id\":1124,\"media_type\":\"movie\",\"title\":\"The Prestige\"}]},"
+    "{\"id\":6968,\"name\":\"Hugh Jackman\",\"profile_path\":\"/c.jpg\",\"known_for\":[{\"id\":1124,\"media_type\":\"movie\",\"title\":\"The Prestige\"}]}]}";
+  (void)url;
+  return strdup(j);
+}
 
 static void tecla(SDL_Keycode k) {
   SDL_Event e;
@@ -36,12 +50,14 @@ static void quadro(void) {
   tex_novo_quadro();
   tex_bombear(12);
   gfx_novo_quadro();
+  vt_antes();
   busca_atualizar(1.0f / 60.0f, SDL_GetTicks());
   glClearColor(0.051f, 0.051f, 0.051f, 1.0f);
   glClear(GL_COLOR_BUFFER_BIT);
   busca_desenhar(SDL_GetTicks());
   rail_shot_desenhar(MENU_BUSCAR);
-  SDL_GL_SwapWindow(janela);
+  vt_depois();
+  if (!vt_ligado()) SDL_GL_SwapWindow(janela);
 }
 
 // `ms` > 0: grava depois de tantos milissegundos de quadros, e nao depois de
@@ -69,7 +85,7 @@ static void capturaEm(const char *nome, Uint32 ms) {
 static void captura(const char *nome) { capturaEm(nome, 0); }
 
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nuvio-busca";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nuvio-busca");
   const char *dir = getenv("NUVIO_DADOS");
   char nome[600];
   SDL_GLContext gl;
@@ -94,7 +110,20 @@ int main(int argc, char **argv) {
   dados_iniciar(dir);
   assert(!strcmp(dados_dir(), dir));
   ajustes_iniciar();
+  if (getenv("NUVIO_SHOT_SOLIDO")) ajustes_aplicar_blob("{\"vidro\":false}");
+  if (getenv("NUVIO_SHOT_ESCALA")) gfx_escala_txt_definir((float)atof(getenv("NUVIO_SHOT_ESCALA")));
   busca_iniciar();
+  // NUVIO_VIDRO_TELAS=<dir> (tests/vidro_telas.sh): glass budget, popular grid.
+  if (vt_ligado()) {
+    int i;
+    vt_vidro(); busca_iniciar();
+    for (i = 0; i < 120; i++) { quadro(); SDL_Delay(2); }
+    vt_zerar(); for (i = 0; i < 30; i++) quadro();
+    vt_png("busca"); vt_relatar("search", 1);
+    for (i = 0; i < 8; i++) { tecla(SDLK_RIGHT); quadro(); quadro(); quadro(); }
+    vt_relatar("search", 0);
+    return vtFalhas ? 1 : 0;
+  }
 
   snprintf(nome, sizeof nome, "%s-vazio.bmp", saida);
   captura(nome);
@@ -105,6 +134,17 @@ int main(int argc, char **argv) {
   tecla(SDLK_g);
   snprintf(nome, sizeof nome, "%s-digitado.bmp", saida);
   captura(nome);
+  // ?!# page: bottom row, 4th key; types "é" and ":".
+  { int i;
+    for (i = 0; i < 6; i++) tecla(SDLK_DOWN);
+    for (i = 0; i < 3; i++) tecla(SDLK_RIGHT);
+    tecla(SDLK_RETURN);
+    for (i = 0; i < 6; i++) tecla(SDLK_UP);
+    for (i = 0; i < 4; i++) tecla(SDLK_RIGHT);
+    tecla(SDLK_RETURN);
+    snprintf(nome, sizeof nome, "%s-simbolos.bmp", saida);
+    captura(nome);
+  }
 
   // COM HISTORICO: campo vazio mostra as pilulas no lugar do estado vazio.
   // Termos de tamanhos diferentes e um longo, para a quebra de linha e o
@@ -141,7 +181,7 @@ int main(int argc, char **argv) {
   captura(nome);
   { int i;
     for (i = 0; i < 6; i++) tecla(SDLK_DOWN);      /* fileira de baixo */
-    for (i = 0; i < 3; i++) tecla(SDLK_RIGHT);     /* tecla de layout */
+    for (i = 0; i < 4; i++) tecla(SDLK_RIGHT);     /* tecla de layout */
     tecla(SDLK_RETURN);                            /* cirilico */
     snprintf(nome, sizeof nome, "%s-cirilico.bmp", saida);
     captura(nome);
@@ -181,12 +221,58 @@ int main(int argc, char **argv) {
     snprintf(fl[1].titulo, sizeof fl[1].titulo, "Trending");
     fl[1].ini = n / 2; fl[1].n = n - n / 2;
     cat_republicar_fileiras(fl, 2); }
+  // CAMPO VAZIO COM CATALOGO: os Populares ocupam a coluna da direita. Sem
+  // historico, e depois com as pilulas das buscas recentes em cima.
+  buscasrec_limpar();
   busca_iniciar();
-  tecla(SDLK_e); tecla(SDLK_r);
+  snprintf(nome, sizeof nome, "%s-populares.bmp", saida);
+  capturaEm(nome, 900);
+  tecla(SDLK_RIGHT);   /* ultima coluna do teclado nao: so a ponte */
+  { int i; for (i = 0; i < 6; i++) tecla(SDLK_RIGHT); }
+  snprintf(nome, sizeof nome, "%s-populares-foco.bmp", saida);
+  capturaEm(nome, 500);
+  { static const char *termos[] = { "dune", "the office", "matrix", "stranger things", "cidade de deus" };
+    int i;
+    for (i = 0; i < 5; i++) buscasrec_registrar(termos[i]); }
+  busca_iniciar();
+  snprintf(nome, sizeof nome, "%s-populares-recentes.bmp", saida);
+  capturaEm(nome, 900);
+  { int i; for (i = 0; i < 6; i++) tecla(SDLK_RIGHT); }   /* pilulas */
+  tecla(SDLK_DOWN);                                       /* desce aos Populares */
+  snprintf(nome, sizeof nome, "%s-populares-recentes-foco.bmp", saida);
+  capturaEm(nome, 500);
+  buscasrec_limpar();
+  // PESSOAS: o TMDB de mentira responde com as tres do mockup.
+  spotpessoa_teste(tmdbFalso);
+  busca_iniciar();
+  tecla(SDLK_t); tecla(SDLK_h); tecla(SDLK_e);
   snprintf(nome, sizeof nome, "%s-resultados-onda.bmp", saida);
   capturaEm(nome, 170);
   snprintf(nome, sizeof nome, "%s-resultados.bmp", saida);
   capturaEm(nome, 1200);
+  // Foco no melhor resultado e depois num cartaz da fileira de baixo.
+  { int i; for (i = 0; i < 6; i++) tecla(SDLK_RIGHT); }
+  snprintf(nome, sizeof nome, "%s-resultados-foco.bmp", saida);
+  capturaEm(nome, 500);
+  tecla(SDLK_DOWN); tecla(SDLK_RIGHT);
+  snprintf(nome, sizeof nome, "%s-resultados-foco2.bmp", saida);
+  capturaEm(nome, 500);
+  // PESSOAS: a fileira entra logo depois da primeira de titulos; OK devolve o
+  // mesmo pedido que o Spotlight devolve (SPOT_PESSOA).
+  tecla(SDLK_DOWN);
+  snprintf(nome, sizeof nome, "%s-pessoas-foco.bmp", saida);
+  capturaEm(nome, 500);
+  tecla(SDLK_RIGHT);
+  snprintf(nome, sizeof nome, "%s-pessoas-foco2.bmp", saida);
+  capturaEm(nome, 500);
+  tecla(SDLK_RETURN);
+  { SpotPedido pp;
+    assert(busca_pediu_pessoa(&pp));
+    assert(pp.tipo == SPOT_PESSOA && pp.indice < 0 && pp.tmdb == 1245);
+    assert(pp.tituloTmdb == 24428 && !strcmp(pp.tituloTipo, "movie"));
+    assert(!strcmp(pp.nome, "Scarlett Johansson"));
+    assert(!busca_pediu_pessoa(&pp)); }
+  spotpessoa_teste(NULL);
   // ANDROID (sistexto em modo de teste): CIMA da primeira fileira foca o campo,
   // direita o Falar; OK no campo chama o teclado do sistema e o texto dele
   // substitui o campo; Concluir leva aos resultados.

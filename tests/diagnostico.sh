@@ -1,4 +1,6 @@
 #!/bin/bash
+export TMPDIR="${TMPDIR:-/tmp}"
+TMPDIR="${TMPDIR%/}"
 # DIAGNOSTICO E OTIMIZACAO: tabela por aparelho, regra de restaurar, fluxo da
 # aplicacao automatica contra o tex_cache real e as chaves de traducao da tela.
 #
@@ -6,25 +8,27 @@
 # chegam em i18n() por variavel (painelTitulo, metrica, BOTAO_ROTULO...), e a
 # varredura so le literal dentro de txt_*. Foi assim que "Modo", "Artes" e
 # "Resultado geral" apareceram em portugues com o app em ingles (C9, 22/09).
-set -eu
+set -euo pipefail
 cd "$(dirname "$0")/.."
+bash tests/diagnostico_dispatch.sh
+bash tests/diagnostico_persistencia.sh
 
-cc tests/diagnostico.c src/perfiltv.c -Isrc -o /tmp/nuvio-diagnostico \
+cc tests/diagnostico.c src/perfiltv.c -Isrc -o ${TMPDIR:-/tmp}/nuvio-diagnostico \
   -O1 -g -Wall -Wextra
-/tmp/nuvio-diagnostico
+${TMPDIR:-/tmp}/nuvio-diagnostico
 
 sources=()
-for source in src/*.c; do
+for source in src/*.c src/dts/*.c; do
   case "$source" in src/main.c|src/diagnostico.c) continue;; esac
   sources+=("$source")
 done
 # -DNV_DADOS_TRAVA_TESTE: a trava de arquivos do Tizen, que no Mac e no-op.
 # Trava dupla no mesmo fio aborta (issue #113: congelava a Samsung).
-cc "${sources[@]}" tests/diagnostico_fluxo.c -Isrc -o /tmp/nuvio-diagnostico-fluxo \
+cc "${sources[@]}" tests/diagnostico_fluxo.c -Isrc -o ${TMPDIR:-/tmp}/nuvio-diagnostico-fluxo \
   -DNV_DADOS_TRAVA_TESTE -O1 -g -I/opt/homebrew/include -I/opt/homebrew/include/SDL2 \
   -L/opt/homebrew/lib -lSDL2 -lSDL2_image -lSDL2_ttf -lz -framework OpenGL \
   -Wno-deprecated-declarations -Wno-macro-redefined
-/tmp/nuvio-diagnostico-fluxo | grep '^ok'
+${TMPDIR:-/tmp}/nuvio-diagnostico-fluxo | grep '^ok'
 
 python3 - <<'EOF'
 import re, importlib.util, sys

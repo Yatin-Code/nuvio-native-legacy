@@ -88,6 +88,9 @@ int cachearte_nativo_indice_pronto(void);
 void cachearte_nativo_indice_registrar(const char *path, long bytes);
 void cachearte_nativo_indice_remover(const char *path);
 void cachearte_nativo_indice_tocar(const char *path);
+/* 1 = o arquivo esta no indice (so nomes em memoria, sem I/O; 0 enquanto o
+ * indice nao terminou de ser montado). Serve ao fio de desenho. */
+int cachearte_nativo_indice_tem(const char *path);
 long cachearte_nativo_indice_bytes(void);
 /* Mesma politica de nv_cache_podar, sem varrer a pasta. 0 se o indice ainda
  * nao esta pronto ou outra poda esta rodando. */

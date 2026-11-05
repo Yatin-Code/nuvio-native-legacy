@@ -5,6 +5,7 @@
 //
 // NAO ENTRA NA SUITE (*_shot.sh): precisa de janela GL e de olho humano.
 #include "ilha.h"
+#include "nvtmp.h"
 #include "salvospainel.h"
 #include "ajustes.h"
 #include "anim.h"
@@ -20,7 +21,10 @@
 
 static SDL_Window *win;
 static const char *base;
-static int direita;
+static int direita, homeLoading;
+// RELOGIO FALSO (> 0): cada quadro vale 16 ms, por mais que a captura demore.
+// Sem ele o glReadPixels de cada marco come quadros da mola do voo.
+static Uint32 falso;
 
 static void captura(const char *nome) {
   unsigned char *pix = malloc(1920 * 1080 * 4);
@@ -56,7 +60,7 @@ static void pedidos(void) {
 static void quadros(int n, const char *nome) {
   int i;
   for (i = 0; i < n; i++) {
-    Uint32 agora = SDL_GetTicks();
+    Uint32 agora = falso ? (falso += 16u) : SDL_GetTicks();
     GLuint fundo;
     tex_novo_quadro();
     tex_bombear(3);
@@ -67,6 +71,7 @@ static void quadros(int n, const char *nome) {
     fundo = tex_obter("deploy/app/art/00.jpg");
     if (fundo) gfx_rect((GfxRect){ 0, 0, 1920, 1080 }, fundo, GFX_SNAP, 0, 0, 0, 0, 1, 1, 1, 1);
     if (spainel_visivel()) spainel_desenhar(agora);
+    if (homeLoading) ilha_atividade("Carregando fileiras…", -1);
     ilha_relogio_visivel(ajustes_relogio_ligado());
     if (direita) ilha_ancorar(1920 - 64, 36, 1);
     { float x = 0, y = 0, w = 0, h = 0;
@@ -96,7 +101,7 @@ int main(int argc, char **argv) {
   SDL_GLContext gl;
   FILE *f;
   IlhaCartao vivo, est;
-  base = argc > 1 ? argv[1] : "/tmp/nuvio-ilha2";
+  base = argc > 1 ? argv[1] : nvt("/nuvio-ilha2");
   assert(dir && *dir);
   snprintf(ajustes, sizeof ajustes, "%s/ajustes.txt", dir);
   f = fopen(ajustes, "w"); assert(f);
@@ -122,6 +127,23 @@ int main(int argc, char **argv) {
   tex_iniciar(64);
   gfx_icones_dir("deploy/app/art");
   ajustes_definir_vidro(1);
+
+  // Synthetic loading counters for visual review, never live TV evidence.
+  homeLoading = 1;
+  ilha_atividade_detalhes("Carregamento da Home",
+    "Carregando fileiras…\nTempo: 8 s · Add-ons consultados: 4 de 6\nFileiras atualizadas: 3 · Falhas: 0\nVocê pode continuar navegando enquanto a Home atualiza.");
+  quadros(45, "home-loading");
+  assert(ilha_atividade_expansivel());
+  assert(ilha_modal_abrir());
+  quadros(70, "home-loading-details");
+  tecla(SDLK_RIGHT);
+  assert(ilha_modal_aberto());
+  { IlhaCartao ignored; int qual; assert(!ilha_pediu(&ignored, &qual)); }
+  tecla(SDLK_RETURN);
+  assert(!ilha_modal_aberto());
+  homeLoading = 0;
+  ilha_atividade_detalhes(NULL, NULL);
+  quadros(45, NULL);
 
   memset(&vivo, 0, sizeof vivo);
   snprintf(vivo.chave, sizeof vivo.chave, "vivo:tt12637874:1:3");
@@ -202,6 +224,48 @@ int main(int argc, char **argv) {
   quadros(1, "16-reduzida-modal-1quadro");
   tecla(SDLK_ESCAPE);
   quadros(1, "17-reduzida-fechado-1quadro");
+  anim_politica_reduzida = 0;
+
+  // MINIMIZAR NA ILHA (ilha_minimizar): o player saiu no meio; o quadro do
+  // video (a arte do cartao) nasce em tela cheia e encolhe ate a mini capa.
+  // Quadros da sequencia para OLHAR, e o final com o cartao na pilula.
+  direita = 0;
+  ilha_cartao(ILHA_VIVO, NULL);
+  quadros(60, NULL);
+  ilha_cartao(ILHA_VIVO, &vivo);
+  falso = SDL_GetTicks();
+  assert(ilha_minimizar("deploy/app/art/00.jpg"));
+  assert(ilha_minimizando());
+  { static const int marcos[] = { 1, 4, 8, 12, 16, 20, 26, 34, 44, 56 };
+    int i, feito = 0;
+    for (i = 0; i < (int)(sizeof marcos / sizeof *marcos); i++) {
+      char nome[40];
+      snprintf(nome, sizeof nome, "18-min-q%02d", marcos[i]);
+      quadros(marcos[i] - feito, nome);
+      feito = marcos[i];
+    } }
+  quadros(90, "19-min-final");
+  assert(!ilha_minimizando());
+  assert(ilha_cartao_na_tela());
+  // Layout Dinamica / ancorada a direita: pousa na capa do outro canto.
+  direita = 1;
+  ilha_cartao(ILHA_VIVO, NULL);
+  quadros(60, NULL);
+  ilha_cartao(ILHA_VIVO, &vivo);
+  assert(ilha_minimizar("deploy/app/art/00.jpg"));
+  quadros(14, "20-min-direita-q14");
+  quadros(90, "21-min-direita-final");
+  assert(!ilha_minimizando());
+  falso = 0;
+  // Animacoes reduzidas: nada voa; o primeiro quadro ja e a home com a pilula.
+  direita = 0;
+  ilha_cartao(ILHA_VIVO, NULL);
+  quadros(60, NULL);
+  anim_politica_reduzida = 1;
+  ilha_cartao(ILHA_VIVO, &vivo);
+  assert(ilha_minimizar("deploy/app/art/00.jpg"));
+  assert(!ilha_minimizando());
+  quadros(1, "22-min-reduzida-1quadro");
   anim_politica_reduzida = 0;
 
   tex_encerrar(); txt_encerrar(); gfx_encerrar();

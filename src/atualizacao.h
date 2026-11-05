@@ -38,8 +38,13 @@ int  atualizacao_aberta(void);
 void atualizacao_abrir(void);
 // Versao nova conhecida ("" se nenhuma) — para a linha de versao dos Ajustes.
 const char *atualizacao_nova(void);
+// 1 enquanto o cartao esta na tela (ou recolhendo): ele E a ilha crescida, e
+// a pilula de baixo nao se desenha (app.c: ilha_coberta).
+int  atualizacao_cobre_ilha(void);
 void atualizacao_evento(const SDL_Event *e);
 void atualizacao_atualizar(float dt, Uint32 agora);
 void atualizacao_desenhar(Uint32 agora);
+// Teste do ponteiro (#99): 0 = "Atualizar agora", 1 = "Depois".
+int  atualizacao_teste_foco(void);
 
 #endif

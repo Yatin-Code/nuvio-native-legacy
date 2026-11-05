@@ -17,6 +17,7 @@
 // NAO CHAMA dados_iniciar DE PROPOSITO: sem ela dados_dir() e "" e o modulo nao
 // le nem escreve arquivo nenhum — a captura nao encosta no cache de quem roda.
 #include "serieaud.h"
+#include "nvtmp.h"
 #include "gfx.h"
 #include "text.h"
 #include "tex_cache.h"
@@ -282,21 +283,24 @@ static void desenharVarias(void (*f)(void), SDL_Window *win) {
   (void)win;
 }
 
-static void telaArcoRadar(void) {
-  GfxRect a = { NV_CONTENT_PAD, 70.0f, NV_TELA_W - NV_CONTENT_PAD * 2, 0 };
-  GfxRect b = a;
-  b.y = 560.0f;
-  serieaud_arco(a);
-  serieaud_radar(b);
+// O BLOCO "Numeros da temporada" inteiro (retencao, impressao digital e o
+// cartao de notas por episodio, aqui sem a grade de temporadas: NULL).
+static int selCaptura;
+static void telaBloco(void) {
+  SaBloco b;
+  memset(&b, 0, sizeof b);
+  b.temporada = serieaud_temporada();
+  b.tempIdx = -1;
+  b.sel = selCaptura;
+  b.selEp = serieaud_ep(selCaptura);
+  b.aberto = 1;
+  serieaud_bloco(NV_CONTENT_PAD, 70.0f, &b, 1.0f);
 }
-
-static void telaDigital(void) {
-  GfxRect d = { NV_CONTENT_PAD, 90.0f, NV_TELA_W - NV_CONTENT_PAD * 2, 0 };
-  serieaud_digital(d);
-}
+#define telaArcoRadar telaBloco
+static void telaDigital(void) { selCaptura = serieaud_n() / 2; telaBloco(); selCaptura = 0; }
 
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nuvio-serieaud";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nuvio-serieaud");
   char nome[600];
   SDL_Window *w;
   SDL_GLContext gl;

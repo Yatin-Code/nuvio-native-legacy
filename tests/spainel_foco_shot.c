@@ -11,6 +11,7 @@
 //   bash tests/spainel_foco_shot.sh /tmp/nv-foco
 #define NV_REC_URL "http://127.0.0.1:8799"
 #include "../src/recomenda.c"
+#include "nvtmp.h"
 #include "salvospainel.h"
 #include "salvos.h"
 #include "avisos.h"
@@ -20,6 +21,7 @@
 #include "gfx.h"
 #include "text.h"
 #include "tex_cache.h"
+#include "shot_arte.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <assert.h>
@@ -52,6 +54,9 @@ static void captura(const char *nome, SDL_Window *win) {
     glViewport(0, 0, 1920, 1080);
     glClearColor(0.20f, 0.24f, 0.32f, 1.0f);   // fundo claro: o vidro deixa ver o corte
     glClear(GL_COLOR_BUFFER_BIT);
+    // Com NUVIO_SHOT_ARTE=<jpg> a arte vai atras, para julgar o vidro; sem ela
+    // o fundo liso, que e o que a MEDIDA do corte (primeiroDesenhado) precisa.
+    if (getenv("NUVIO_SHOT_ARTE")) shot_arte_desenhar(.30f);
     spainel_desenhar(SDL_GetTicks());
     if (i == 149) {
       unsigned char *pix = (unsigned char *)malloc(1920 * 1080 * 4);
@@ -117,7 +122,7 @@ static int primeiroDesenhado(int x, int y0, int y1) {
 }
 
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nv-foco";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nv-foco");
   const char *dir = getenv("NUVIO_DADOS");
   char nome[700];
   SDL_Window *w;
@@ -186,6 +191,10 @@ int main(int argc, char **argv) {
 
     // SOCIAL: foco na primeira recomendacao — a foto do dono
     tecla(SDLK_UP); { int k; for (k = 0; k < 10; k++) tecla(SDLK_UP); }
+    // DUAS para a direita: a Atividade (02/10) entrou entre Salvos e a Social
+    // (hoje "Amigos"). Com uma so, "social-1a" fotografava a Atividade e
+    // "avisos-1a" a Social.
+    tecla(SDLK_RIGHT);
     tecla(SDLK_RIGHT);
     tecla(SDLK_DOWN);   // a barra "Organizar" da Social
     tecla(SDLK_DOWN);

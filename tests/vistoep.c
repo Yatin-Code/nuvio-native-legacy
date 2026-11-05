@@ -7,8 +7,13 @@
 // — a mesma familia de defeito que o heroi mostrando a arte do titulo anterior.
 #include "vistoep.h"
 #include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
+
+uint64_t perfis_sessao_geracao(void) { return 0; }
+int perfis_sessao_travar(uint64_t g) { return !g; }
+void perfis_sessao_destravar(void) {}
 
 // /shows/<id>/progress/watched, com o `completed` explicito por episodio.
 static const char *PROG =
@@ -21,6 +26,121 @@ static const char *PROG =
  "{\"number\":2,\"aired\":5,\"completed\":1,\"episodes\":["
    "{\"number\":1,\"completed\":true},"
    "{\"number\":2,\"completed\":false}]}]}";
+
+static void booleanosENumerosInvalidos(void) {
+  const char *json =
+    "{\"seasons\":[{\"number\":1,\"episodes\":["
+      "{\"number\":1,\"completed\":                    true},"
+      "{\"number\":2,\"completed\": false,\"other\":true},"
+      "{\"number\":3,\"completed\":\"true\"},"
+      "{\"number\":4,\"completed\":null},"
+      "{\"number\":5,\"last_watched_at\":\"true\"},"
+      "{\"number\":1e100,\"completed\":true},"
+      "{\"number\":32768,\"completed\":true},"
+      "{\"number\":1.5,\"completed\":true},"
+      "{\"number\":6,\"completed\":true                     }]},"
+      "{\"number\":1e100,\"episodes\":[{\"number\":1,\"completed\":true}]},"
+      "{\"number\":32768,\"episodes\":[{\"number\":1,\"completed\":true}]},"
+      "{\"number\":2,\"episodes\":[{\"number\":1,\"completed\":true}]}]}";
+  vistoep_esquecer();
+  assert(vistoep_ler_progresso("tt1", json) == 4);
+  assert(vistoep_estado("tt1", 1, 1) == 1);
+  assert(vistoep_estado("tt1", 1, 2) == 0);
+  assert(vistoep_estado("tt1", 1, 3) == -1);
+  assert(vistoep_estado("tt1", 1, 4) == -1);
+  assert(vistoep_estado("tt1", 1, 5) == -1);
+  assert(vistoep_estado("tt1", 1, 6) == 1);
+  assert(vistoep_estado("tt1", 2, 1) == 1);
+  assert(vistoep_n() == 4);
+  vistoep_definir("tt1", SHRT_MAX + 1, 1, 1);
+  vistoep_definir("tt1", 1, SHRT_MAX + 1, 1);
+  assert(vistoep_n() == 4);
+  puts("ok  completed exige booleano e numeros invalidos nao corrompem o mapa");
+}
+
+static void loteSoContaMudancasEfetivas(void) {
+  VistoPar pares[] = {{1, 1}, {1, 0}, {-1, 1}, {1, 1}};
+  VistoPar saida[2];
+  int i;
+  vistoep_esquecer();
+  assert(vistoep_marcar_lote("", pares, 4, 1) == 0);
+  assert(vistoep_marcar_lote("tt1", pares, 4, 1) == 1);
+  assert(vistoep_n() == 1);
+  assert(vistoep_lote("tt1", 1, 1, 1, pares, 4, 0, 0, saida, -1) == 0);
+  // Depois do teto uma tentativa recusada nao pode anunciar mudanca ou
+  // disparar um envio ao servidor como se o estado local tivesse mudado.
+  for (i = 2; i <= 8000; i++) vistoep_definir("tt1", 1, i, 1);
+  assert(vistoep_n() == 8000);
+  pares[0].episodio = 8001;
+  assert(vistoep_marcar_lote("tt1", pares, 1, 1) == 0);
+  assert(vistoep_estado("tt1", 1, 8001) == -1);
+  vistoep_esquecer();
+  puts("ok  lote so conta entradas validas aceitas e respeita o teto do mapa");
+}
+
+// "Ate aqui" em T2E5 com S1 inteira e T2E1-4 vistos: so T2E5 muda. Antes mandava
+// os 15 e o Trakt duplicava os plays (Silo, TCL 08/10 11:46:23).
+static void ateAquiSoEnviaMudancas(void) {
+  VistoPar cat[20], lote[32], envio[32];
+  int i, n, ja = 0, k;
+  for (i = 0; i < 10; i++) { cat[i].temporada = 1; cat[i].episodio = (short)(i + 1);
+                             cat[10 + i].temporada = 2; cat[10 + i].episodio = (short)(i + 1); }
+  vistoep_esquecer();
+  for (i = 1; i <= 10; i++) vistoep_definir("tt14688458", 1, i, 1);
+  for (i = 1; i <= 10; i++) vistoep_definir("tt14688458", 2, i, i <= 4);
+  n = vistoep_lote("tt14688458", 1, 2, 5, cat, 20, 0, 0, lote, 32);
+  assert(n == 15);
+  k = vistoep_aplicar("tt14688458", lote, n, 1, envio, &ja);
+  assert(k == 1 && ja == 14);
+  assert(envio[0].temporada == 2 && envio[0].episodio == 5);
+  assert(vistoep_contar("tt14688458") == 15);          // local correto: 15 vistos
+  // de novo: nada a mandar
+  assert(vistoep_aplicar("tt14688458", lote, n, 1, envio, &ja) == 0 && ja == 15);
+  // desmarcar: so sai quem esta visto (T2E1-5), nao a temporada toda
+  n = vistoep_lote("tt14688458", 0, 2, 0, cat, 20, 0, 0, lote, 32);
+  assert(n == 10);
+  k = vistoep_aplicar("tt14688458", lote, n, 0, envio, &ja);
+  assert(k == 5 && ja == 5);
+  for (i = 0; i < k; i++) assert(envio[i].temporada == 2 && envio[i].episodio <= 5);
+  assert(vistoep_contar("tt14688458") == 10);
+  // titulo desconhecido: tudo conta como mudanca (repara o remoto)
+  vistoep_esquecer();
+  assert(vistoep_aplicar("tt14688458", lote, 3, 1, envio, &ja) == 3 && ja == 0);
+  puts("ok  ate aqui / temporada enviam so o que mudou");
+}
+
+// Modo 2 = daqui em diante; compila tambem antes da implementacao.
+static void daquiEmDiante(void) {
+  VistoPar cat[30], lote[32], envio[32];
+  int i, n, ja;
+  vistoep_esquecer();
+  for (i = 0; i < 30; i++) {
+    cat[i] = (VistoPar){i / 10 + 1, i % 10 + 1};
+    vistoep_definir("tt14688458", cat[i].temporada, cat[i].episodio, i < 29);
+  }
+  n = vistoep_lote("tt14688458", 2, 2, 6, cat, 30, 0, 0, lote, 32);
+  assert(n == 15);
+  assert(vistoep_aplicar("tt14688458", lote, n, 0, envio, &ja) == 14 && ja == 1);
+  for (i = 0; i < 30; i++)
+    assert(vistoep_estado("tt14688458", cat[i].temporada, cat[i].episodio) == (i < 15));
+  // Agenda filtra mapa E catalogo, inclusive o episodio ainda nao lancado.
+  n = vistoep_lote("tt14688458", 2, 2, 6, cat, 30, 3, 5, lote, 32);
+  assert(n == 9);
+  for (i = 0; i < n; i++)
+    assert(lote[i].temporada == 2 ? lote[i].episodio >= 6 :
+           lote[i].temporada == 3 && lote[i].episodio < 5);
+  assert(vistoep_lote("tt14688458", 2, 3, 5, cat, 30, 3, 5, lote, 32) == 0);
+  assert(vistoep_lote("tt14688458", 2, 2, 6, cat, 30, 3, 5, NULL, 0) == 9);
+  assert(vistoep_lote("tt14688458", 2, 2, 6, cat, 30, 3, 5, lote, 3) == 3);
+  // Conta sem mapa Trakt completo: catalogo completa o intervalo sem duplicar.
+  vistoep_esquecer();
+  vistoep_definir("tt14688458", 3, 1, 1);
+  assert(vistoep_lote("tt14688458", 2, 2, 6, cat, 30, 3, 5, lote, 32) == 9);
+  // Anteriores nao gastam o teto do lote antes de chegar ao alvo.
+  for (i = 1; i <= 300; i++) vistoep_definir("tt14688458", 1, i, 1);
+  assert(vistoep_lote("tt14688458", 2, 2, 6, cat, 30, 3, 5, lote, 32) == 9);
+  puts("ok  daqui em diante preserva anteriores, filtra nao lancados e une mapa/catalogo");
+}
 
 int main(void) {
   int n;
@@ -143,6 +263,10 @@ int main(void) {
     puts("ok  saida nula conta sem truncar em max");
   }
 
+  daquiEmDiante();
+  ateAquiSoEnviaMudancas();
+  booleanosENumerosInvalidos();
+  loteSoContaMudancasEfetivas();
   puts("vistoep: tudo ok");
   return 0;
 }

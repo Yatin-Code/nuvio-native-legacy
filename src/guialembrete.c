@@ -1,5 +1,6 @@
 // O aviso do lembrete de programa — ver guialembrete.h.
 #include "guialembrete.h"
+#include "plrui.h"
 #include "ilha.h"
 #include "lembrete.h"
 #include "perfis.h"
@@ -10,6 +11,9 @@
 #include "anim.h"
 #include "layout.h"
 #include "idioma.h"
+#define NV_ESCALA_TELA   // o arquivo inteiro mede pela tela virtual (escala.h)
+#include "escala.h"
+#include "ponteiro.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -22,6 +26,13 @@ static int    foco;                 // 0 = Assistir, 1 = Dispensar
 static int    engolirOkUp;
 static char   aCanal[80], aNome[120], aTitulo[120], aBase[600], aTexto[300];
 static int    pedAssistir;
+
+void glem_abrir_sessao(void) {
+  modo = ultimoModo = foco = engolirOkUp = pedAssistir = 0;
+  desde = ultConferido = 0; anim = 0.0f;
+  aCanal[0] = aNome[0] = aTitulo[0] = aBase[0] = aTexto[0] = 0;
+  lembrete_carregar(perfis_ativo());
+}
 
 static int vendoCanal(const char *id) {
   return id[0] && !strcmp(player_id_canal(), id) &&
@@ -111,22 +122,23 @@ int glem_pediu_assistir(char *id, size_t tam, char *nome, size_t tamNome,
   return 1;
 }
 
-// Pilula de acao do cartao: preenchida na cor de realce com texto escuro em
-// foco (a linguagem das pilulas do app), vidro translucido em repouso.
-static float botao(const char *rot, float x, float y, int f, float a) {
-  float ar, ag, ab;
-  int tf = ajustes_tinta_foco();
-  TxtLinha t = f ? txt_linha(TXT_PG_ROTULO, rot, tf, tf, tf, 255)
-                 : txt_linha(TXT_PG_ROTULO, rot, 230, 231, 236, 255);
-  GfxRect r = { x, y, (float)t.w + 40.0f, 44.0f };
-  ajustes_acento(&ar, &ag, &ab);
-  if (f) gfx_cor(r, 0.5f, ar, ag, ab, a);
-  else   gfx_cor(r, 0.5f, 1, 1, 1, 0.10f * a);
-  txt_desenhar_alpha(t, r.x + 20.0f, r.y + (r.h - (float)t.h) * 0.5f, a);
-  return r.w;
+// PONTEIRO (#99): foco pela mesma variavel das setas (que tambem reiniciam o
+// relogio do cartao); o OK do clique segue por glem_evento.
+static void ponteiroFoco(int i, int b) {
+  (void)b;
+  if (modo != 1 || (i != 0 && i != 1) || foco == i) return;
+  foco = i; desde = SDL_GetTicks();
 }
+int glem_teste_foco(void) { return foco; }
 
+static void glem_desenharCorpo_(Uint32 agora);
+// Camada ampliada (escala.h): o corpo desenha na tela virtual.
 void glem_desenhar(Uint32 agora) {
+  ESCALA_INI();
+  glem_desenharCorpo_(agora);
+  ESCALA_FIM();
+}
+static void glem_desenharCorpo_(Uint32 agora) {
   float a = anim, ar, ag, ab;
   (void)agora;
   if (a < 0.01f) return;
@@ -143,32 +155,38 @@ void glem_desenhar(Uint32 agora) {
     TxtLinha t = txt_linha_corta(TXT_BODY, aTexto, 240, 241, 246, 255, 900.0f);
     float w = (float)t.w + 96.0f, h = 60.0f;
     GfxRect r = { NV_TELA_W - NV_MARGEM_X - w, 44.0f - 16.0f * (1.0f - a), w, h };
-    gfx_cor(r, 0.5f, 0.055f, 0.058f, 0.068f, 0.96f * a);
+    gfx_vidro_ou_solido(r, 0.5f, GFX_VIDRO_DENS, a, 0.055f, 0.058f, 0.068f, 0.96f);
     gfx_icone((GfxRect){ r.x + 24.0f, r.y + (h - 28.0f) * 0.5f, 28.0f, 28.0f }, "sino",
               ar, ag, ab, a);
     txt_desenhar_alpha(t, r.x + 68.0f, r.y + (h - (float)t.h) * 0.5f, a);
     return;
   }
-  { const float W = 680.0f, H = 212.0f;
-    GfxRect r = { NV_TELA_W - NV_MARGEM_X - W, 44.0f - 20.0f * (1.0f - a), W, H };
-    float x = r.x + 32.0f, y = r.y + 26.0f;
+  // GLASS UI (mockup de 03/10, "aovivo-mini"): ilha no topo direito, a 40
+  // das bordas — sino e "COMECA AGORA" no acento (estado), a frase 28/700, os
+  // dois botoes do codigo e o tempo que resta num trilho dentro da ilha.
+  { const float W = 680.0f;
+    float lead = (float)txt_linha(TXT_G28B, "Ag", 0, 0, 0, 255).h + 4.0f;
+    float hT = txt_bloco_corta(TXT_G28B, aTexto, 0, 0, 0, -1.0f, 0.0f, W - 60.0f, lead, 0.0f, 2);
+    float H = 28.0f + 22.0f + 10.0f + hT + 22.0f + 60.0f + 22.0f + 3.0f + 28.0f;
+    GfxRect r = { NV_TELA_W - 40.0f - W, 36.0f - 20.0f * (1.0f - a), W, H };
+    float x = r.x + 30.0f, y = r.y + 28.0f;
     float resta = 1.0f - (float)(SDL_GetTicks() - desde) / (float)GLEM_CARTAO_MS;
-    // Uma luz difusa na cor de realce por tras: o cartao chama o olho sem
-    // precisar piscar.
-    gfx_rect((GfxRect){ r.x - 40.0f, r.y - 40.0f, r.w + 80.0f, r.h + 80.0f }, 0, GFX_SOMBRA,
-             1.0f, 0, 0, 0.5f, ar, ag, ab, 0.16f * a);
-    gfx_cor(r, 24.0f / H, 0.055f, 0.058f, 0.068f, 0.98f * a);
-    gfx_icone((GfxRect){ x, y + 2.0f, 34.0f, 34.0f }, "sino", ar, ag, ab, a);
-    { TxtLinha c = txt_linha(TXT_PG_ROTULO, i18n("Começa agora"), 160, 163, 172, 255);
-      txt_desenhar_alpha(c, x + 50.0f, y + 2.0f + (34.0f - (float)c.h) * 0.5f, a); }
-    y += 50.0f;
-    txt_bloco(TXT_CW_TITULO, aTexto, 244, 245, 250, x, y, W - 64.0f, 34.0f, a, 2);
-    y = r.y + H - 70.0f;
+    plrui_material(r, 32.0f, 0, a);
+    gfx_icone((GfxRect){ x, y, 22.0f, 22.0f }, "pl_bell", ar, ag, ab, a);
+    plrui_kicker("Começa agora", x + 34.0f, y + 2.0f, (int)(ar * 255), (int)(ag * 255), (int)(ab * 255), a);
+    y += 22.0f + 10.0f;
+    txt_bloco_corta(TXT_G28B, aTexto, 243, 242, 239, x, y, W - 60.0f, lead, a, 2);
+    y += hT + 22.0f;
     { float bx = x;
-      bx += botao(i18n("Assistir"), bx, y, foco == 0, a) + 12.0f;
-      botao(i18n("Dispensar"), bx, y, foco == 1, a); }
-    // O tempo que falta para o cartao sumir, numa linha fina na base.
-    if (resta > 0.0f)
-      gfx_cor((GfxRect){ r.x + 24.0f, r.y + H - 10.0f, (W - 48.0f) * resta, 3.0f }, 0.5f,
-              ar, ag, ab, 0.55f * a); }
+      if (modo == 1 && a > 0.99f) {   // so assentado (sem o deslize da entrada)
+        float w0 = plrui_botao_largura("Assistir", "pl_play-f");
+        ponteiro_alvo(bx, y, w0, 60.0f, ponteiroFoco, NULL, 0, 0);
+        ponteiro_alvo(bx + w0 + 12.0f, y, plrui_botao_largura("Dispensar", NULL), 60.0f,
+                      ponteiroFoco, NULL, 1, 0);
+      }
+      bx += plrui_botao(bx, y, "Assistir", "pl_play-f", foco == 0 ? 1.0f : 0.0f, a) + 12.0f;
+      plrui_botao(bx, y, "Dispensar", NULL, foco == 1 ? 1.0f : 0.0f, a); }
+    y += 60.0f + 22.0f;
+    if (resta < 0.0f) resta = 0.0f;
+    plrui_trilho((GfxRect){ x, y, W - 60.0f, 3.0f }, resta, 0.953f, 0.949f, 0.937f, a * 0.5f); }
 }

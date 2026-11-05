@@ -122,7 +122,7 @@ static int sparqlCampo(const char *corpo, const char *var, char *dst, size_t tam
 // "185000000" -> "185 mi". Sem casa decimal acima de 100 milhoes: a terceira
 // casa de uma bilheteria nao diz nada a 3 m de distancia.
 static void dinheiro(char *dst, size_t tam, double v, const char *simbolo) {
-  if (v >= 1000000000.0) snprintf(dst, tam, i18n("%s %.2f bi"), simbolo, v / 1e9);
+  if (v >= 1000000000.0) { snprintf(dst, tam, i18n("%s %.2f bi"), simbolo, v / 1e9); idioma_decimal_texto(dst, ajustes_idioma()); }
   else if (v >= 1000000.0) snprintf(dst, tam, i18n("%s %.0f mi"), simbolo, v / 1e6);
   else snprintf(dst, tam, i18n("%s %.0f mil"), simbolo, v / 1e3);
 }
@@ -549,12 +549,12 @@ static const char *CONSULTA =
 // proposito — e cabecalho de protocolo, nao texto de tela, e em portugues o
 // tests/i18n.sh o acusava de string sem i18n().
 static const char *const CAB[] = {
-  "User-Agent: NuvioTV/1.0 (TV app; contact via the project repository)",
+  "User-Agent: NuvioTV/1.0 (https://github.com/iqui27/nuvio-native-legacy)",
   "Accept: application/sparql-results+json",
   NULL
 };
 static const char *const CAB_WQ[] = {
-  "User-Agent: NuvioTV/1.0 (TV app; contact via the project repository)",
+  "User-Agent: NuvioTV/1.0 (https://github.com/iqui27/nuvio-native-legacy)",
   NULL
 };
 

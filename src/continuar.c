@@ -22,15 +22,28 @@
 // (costuma ser um so), e no maximo uma vez a cada 30 s por titulo: sem meta a
 // resposta volta vazia, e pedir a cada quadro so disputaria o fio com o
 // detalhe.
+//
+// UM RELOGIO POR TITULO. Era um so ("ultimo"): com DOIS cards terminados na
+// fileira eles se revezavam no "ultimo", o limite de 30 s nunca valia e os
+// dois pediam de novo a cada resposta — 47 pedidos em ~7 min no registro
+// 25007 (webOS 1.7.4, tt39304754 e tt33044444 alternando).
+#define CW_PEDIDOS 8
 static void pedirEpisodios(int idx, const char *imdb) {
-  static char ultimo[64];
-  static time_t quando;
+  static struct { char imdb[64]; time_t quando; } ped[CW_PEDIDOS];
   time_t agora = time(NULL);
+  int i, vaga = 0;
   desc_episodios_pendente();
   if (desc_episodios_carregando(idx)) return;
-  if (!strcmp(ultimo, imdb) && agora - quando < 30) return;
-  snprintf(ultimo, sizeof ultimo, "%s", imdb);
-  quando = agora;
+  for (i = 0; i < CW_PEDIDOS; i++) {
+    if (!strcmp(ped[i].imdb, imdb)) {
+      if (agora - ped[i].quando < 30) return;
+      vaga = i;
+      break;
+    }
+    if (ped[i].quando < ped[vaga].quando) vaga = i;   // o mais antigo cede a vaga
+  }
+  snprintf(ped[vaga].imdb, sizeof ped[vaga].imdb, "%s", imdb);
+  ped[vaga].quando = agora;
   printf("[cw] %s terminado sem lista de episodios: pedindo para achar o proximo\n", imdb);
   desc_episodios(idx, 0);
 }

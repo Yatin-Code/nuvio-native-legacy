@@ -36,4 +36,25 @@ RUN chmod +x /tmp/build-ass-arm.sh \
      NUVIO_ASS_ROOT="$NUVIO_ASS_ROOT" /tmp/build-ass-arm.sh \
   && rm -f /tmp/build-ass-arm.sh
 
+# Local DTS conversion is part of the normal webOS build. Specialized images
+# can omit the dependency with --build-arg NUVIO_DTS_FFMPEG=0.
+ARG NUVIO_DTS_FFMPEG=1
+ENV NUVIO_DTS_ROOT=/opt/nuvio-dts
+COPY build-dts-ffmpeg.sh /tmp/build-dts-ffmpeg.sh
+RUN if [ "$NUVIO_DTS_FFMPEG" = 1 ]; then \
+      CC=arm-webos-linux-gnueabi-gcc /bin/sh /tmp/build-dts-ffmpeg.sh; \
+    fi \
+  && rm -f /tmp/build-dts-ffmpeg.sh
+
+# Experimental P7 -> P8.1 metadata conversion; no software video decoder.
+# Pin Rust as well as Cargo.lock. The target uses the LG SDK soft-float ABI.
+ARG NUVIO_DV7=1
+RUN if [ "$NUVIO_DV7" = 1 ]; then \
+      curl --proto "=https" --tlsv1.2 -fsSL https://sh.rustup.rs -o /tmp/rustup.sh \
+      && sh /tmp/rustup.sh -y --profile minimal --default-toolchain 1.88.0 \
+      && /root/.cargo/bin/rustup target add armv7-unknown-linux-gnueabi \
+      && rm /tmp/rustup.sh; \
+    fi
+ENV PATH=/root/.cargo/bin:$PATH
+
 WORKDIR /work

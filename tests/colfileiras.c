@@ -15,7 +15,21 @@
 // Sem o conserto, o passo 3 nao casa e os catalogos da colecao viram fileira.
 #include <assert.h>
 #include <unistd.h>
+int ajustes_social(void) { return 1; }
+int ajustes_hist_conta(void) { return 1; }
+int ajustes_busca_cinemeta(void) { return 1; }
+int ajustes_busca_nuvio(void) { return 0; }   // #311: Primeiro (padrao)
+int ajustes_ocultar_nao_lancados(void) { return 0; }   // #369: descoberta.c le o ajuste
+int ajustes_ocultar_filmes_vistos(void) { return 0; }    // #366: descoberta.c le o ajuste
 #include "../src/descoberta.c"
+unsigned cat_revisao_itens(void) { return 0; }
+int cat_visto(const CatItem *item) { (void)item; return 0; }
+int cat_copiar_por_id(const char *id, const char *tipo, CatItem *item) {
+  (void)id; (void)tipo; (void)item; return 0;
+}
+#include "jellyfin_stub.inc"
+Uint32 SDL_GetTicks(void) { return 0; }
+unsigned recomenda_geracao(void) { return 1; }
 
 // ------------------------------------------------------------------ o addon
 #define BASE "https://xperience.example/abc"
@@ -59,10 +73,29 @@ const char *addons_base_por_id(const char *id) {
   return id && !strcmp(id, AID) ? BASE : "";
 }
 void addons_manifesto_lido(int i, const char *corpo) { (void)i; (void)corpo; sondaLeu = 1; }
+void addons_lista_travar(void) {}
+void addons_lista_destravar(void) {}
+void addons_catalogo_chave(const char *id, const char *base, const char *type, const char *catalog, char *dst, unsigned size) {
+  (void)base; snprintf(dst, size, "%s_%s_%s", id, type, catalog);
+}
+int addons_identidade_recebida(const char *base, unsigned version, uint64_t session, const char *body) {
+  (void)base; (void)version; (void)session; addons_manifesto_lido(0, body); return 1;
+}
+int addons_manifesto_recebido(const char *base, unsigned version, uint64_t session, const char *body) {
+  return addons_identidade_recebida(base, version, session, body);
+}
 
 // ------------------------------------------------------------------ a rede
+char *rede_baixar_st(const char *url, int timeout, const char *const *headers, int *status) {
+  (void)headers;
+  char *body = rede_baixar(url, timeout);
+  *status = body ? 200 : 0;
+  return body;
+}
 static int pedidosDeCatalogo;
 static int snapshotValido, snapshotTem;
+static int preservarFixture;
+static CatFileira antigaFixture;
 char *rede_baixar(const char *url, int t) {
   (void)t;
   if (strstr(url, "/manifest.json")) return strdup(MANIFESTO);
@@ -91,8 +124,11 @@ void cat_republicar_fileiras(const CatFileira *f, int n) { guardar(f, n); }
 void  SDL_Delay(Uint32 ms)                 { usleep(ms * 1000); }
 int   ajustes_cw_fonte(void)               { return 0; }
 int   ajustes_cw_ordem(void)               { return 0; }   // Padrao (issue #127)
+int ajustes_cw_concluido(void)             { return 90; }   // padrao (issue #326)
+int ajustes_cw_minimo(void)                { return 1; }    // padrao (issue #326)
 int   ajustes_itens_fileira(void)          { return 12; }   // padrao (#163)
 int   ajustes_cw_mostrar_nao_exibidos(void) { return 1; }
+int   ajustes_cw_proximo(void) { return 1; }
 int   ajustes_idioma_ingles(void)          { return 0; }
 int ajustes_idioma(void) { return 0; }
 unsigned homeestado_geracao(void) { return 1; }
@@ -111,10 +147,15 @@ const char *sessao_usuario(void) { return ""; }
 void homeestado_contexto(HomeContexto *c) { *c = (HomeContexto){0}; c->perfil = 1; }
 int homeestado_mudancas(const HomeContexto *a, const HomeContexto *b) { (void)a; (void)b; return 0; }
 const char *homeestado_mudancas_texto(int m, char *b, unsigned t) { (void)m; if (b && t) b[0] = 0; return b; }
-const CatFileira *cat_fileira(int i) { (void)i; return NULL; }
-int cat_n_fileiras(void) { return 0; }
+const CatFileira *cat_fileira(int i) { return preservarFixture && i == 0 ? &antigaFixture : NULL; }
+int cat_n_fileiras(void) { return preservarFixture; }
 int cat_copiar_fileira(const char *k, CatItem *o, int m, CatFileira *meta) {
-  (void)k; (void)o; (void)m; (void)meta; return 0;
+  (void)meta;
+  if (preservarFixture && m > 0 && !strcmp(k, antigaFixture.chave)) {
+    memset(o, 0, sizeof *o); snprintf(o->imdb, sizeof o->imdb, "tt_preserved");
+    return 1;
+  }
+  return 0;
 }
 int cat_gravar_cache_se_identidade(const char *d, const char *u, int p) {
   (void)d; (void)u; (void)p; return 1;
@@ -122,16 +163,37 @@ int cat_gravar_cache_se_identidade(const char *d, const char *u, int p) {
 // Integracao TMDB ligada por padrao, como no app de verdade — o portao
 // desc_chave_tmdb consulta estes stubs pelo caminho inteiro.
 int   ajustes_tmdb_ligado(void)            { return 1; }
+int ajustes_tmdb_elenco(void) { return 0; }
+int ajustes_fonte_biblioteca(void) { return 0; }
+char *dados_caminho(char *dst, unsigned size, const char *name) {
+  (void)dst; (void)size; (void)name; return NULL;
+}
+int cat_indice_por_imdb_tipo(const char *id, const char *type) { (void)id; (void)type; return -1; }
+int cat_gravar_cache_se_sessao(const char *dir, const char *user, int profile, uint64_t session) {
+  (void)session; return cat_gravar_cache_se_identidade(dir, user, profile);
+}
 int   ajustes_meta_externo(void)           { return 0; }
 int   ajustes_meta_so_cinemeta(void)        { return 0; }
 int   addons_aceita_id(int i, const char *t, const char *id) { (void)i; (void)t; (void)id; return -1; }
 const char *ajustes_tmdb_idioma(void)      { return "pt-BR"; }
 int   cat_acrescentar(const CatItem *i)    { (void)i; return -1; }
 void  cat_atualizar_item(int i, const CatItem *n) { (void)i; (void)n; }
+void  cat_atualizar_item_sem_abas(int i, const CatItem *n) { (void)i; (void)n; }
+// 2.0.3: fios da descoberta copiam e escrevem por partes (2b4234eb, 70acffaf).
+int   cat_copiar_item(int i, CatItem *s) { (void)i; (void)s; return 0; }
+int   cat_completar_sinopse(int i, const char *im, const char *si, const char *ti) { (void)i; (void)im; (void)si; (void)ti; return 0; }
+int cat_completar_basico(int i, const CatItem *c) { (void)i; (void)c; return 0; }
+int   cat_aplicar_localizado(int i, const char *im, const char *ti, const char *si, const char *lo, const char *fu) { (void)i; (void)im; (void)ti; (void)si; (void)lo; (void)fu; return 0; }
+int   ajustes_tmdb_basico(void)            { return 0; }
+int   ajustes_fundo_addon(void)              { return 0; }
+int   ajustes_logo_addon(void)               { return 0; }
+int   ajustes_tmdb_arte(void)              { return 0; }
 void  cat_cache_substituido(void)          { }
 void  cat_definir_episodios(int i, const CatEp *l, int n) { (void)i; (void)l; (void)n; }
 int   cat_do_cache(void)                   { return 0; }
 int   cat_n(void)                          { return 0; }
+int   cat_home_apenas_fixas(void)          { return 0; }   // not a progressive publish here
+int   cat_mesclar_listas(const CatItem *v, int q) { (void)v; (void)q; return 0; }   // no watchlist/collection rows in this fixture
 unsigned long cat_assinatura(void)         { return 0; }
 unsigned long cat_assinatura_de(const CatItem *l, int q, const CatFileira *f, int n) {
   (void)l; (void)q; (void)f; (void)n; return 1; }
@@ -139,17 +201,32 @@ int   cat_gravar_cache(const char *d)      { (void)d; return 0; }
 int   cat_indice_por_imdb(const char *s)   { (void)s; return -1; }
 const CatItem *cat_item(int i)             { (void)i; return NULL; }
 int   cat_n_episodios(int i)               { (void)i; return 0; }
+double cat_relogio_ms(void)                { return 0.0; }   // descoberta.c times publicarMontagem; the value is only logged
 void  fil_gravar_registro(void)            { }
+int   fil_lista_e_deste_perfil(int p)       { (void)p; return 1; }
+unsigned fil_perfil_geracao(void)          { return 0; }
+FilPassada fil_passada_ler(void)          { FilPassada p = {0, 0}; return p; }
+int   fil_passada_valida(const FilPassada *p) { (void)p; return 1; }
+void  fil_registrar_de(const FilPassada *p, const char *c, const char *t, const char *a, const char *k, int n) { (void)p; (void)c; (void)t; (void)a; (void)k; (void)n; }
+void  fil_registrar_se_couber_de(const FilPassada *p, const char *c, const char *t, const char *a, const char *k) { (void)p; (void)c; (void)t; (void)a; (void)k; }
 int   fil_podar_catalogos(const char *const *ids, const char *const *bases, int n,
                           int perfilDaLista) {
   (void)ids; (void)bases; (void)n; (void)perfilDaLista; return 0; }
+int fil_marcar_declaradas(const char *const *chaves, int n, int perfilDaLista) { (void)chaves; (void)n; (void)perfilDaLista; return 0; }
+int fil_marcar_sem_addon(const char *const *ids, const char *const *bases, const int *ativos, int n, int perfilDaLista) {
+  (void)ids; (void)bases; (void)ativos; (void)n; (void)perfilDaLista; return 0;
+}
 int   fil_addon_novo(const char *id, const char *base) { (void)id; (void)base; return 0; }
 int   addons_perfil_da_lista(void)         { return 0; }
+int addons_base_desligada(const char *b) { (void)b; return 0; }   // 203-desligados
 int   addons_ativo(int i)                  { (void)i; return 1; }
 int   addons_fornece(int i, int oque)     { (void)i; (void)oque; return 0; }
 int   addons_sondado(int i)              { (void)i; return 0; }
 int   fil_limite(void)                     { return limiteFileiras; }
 int   fil_oculta(const char *c)            { (void)c; return 0; }
+int   fil_adicionada_na_tv(const char *c) { (void)c; return 0; }
+int   fil_estado_chave(const char *c) { (void)c; return -1; }
+const char *fil_hero_fonte(void) { return ""; }
 // A assinatura ganhou addon/tipo/contagem quando a folha de fileiras passou a
 // dizer de onde cada fileira vem. Este teste nao tem opiniao sobre nada disso.
 // Dubles da escolha da cota (#126): nada escolhido na TV, e o registro dos
@@ -198,6 +275,7 @@ int   simkl_plantowatch(CatItem *s, int m) { (void)s; (void)m; return 0; }
 int   ajustes_salvos_no_simkl(void)        { return 0; }
 int   trakt_enfeitar_lote(CatItem *s, int n) { (void)s; (void)n; return 0; }
 int   trakt_lista(const char *q, CatItem *s, int m) { (void)q; (void)s; (void)m; return 0; }
+int   trakt_lista_cresc(const char *q, CatItem **s, int m) { (void)q; (void)s; (void)m; return 0; }
 // O servico social proprio (recomenda.c) fica fora deste teste: a uniao e so o que o Trakt trouxe.
 int   recomenda_social_mesclar(CatItem *i, int nTrakt, int max) { (void)i; (void)max; return nTrakt; }
 int   trakt_social(CatItem *s, int m)      { (void)s; (void)m; return 0; }
@@ -232,11 +310,7 @@ static void listar(const char *rotulo) {
 }
 
 static void zerarColecoes(void) {
-  // col_definir_json recusa vazio de proposito (vazio nao apaga). Uma colecao
-  // de um addon que nao existe aqui e o jeito honesto de voltar ao zero.
-  col_definir_json("{\"collections\":[{\"id\":\"z\",\"title\":\"Z\",\"folders\":"
-                   "[{\"id\":\"zf\",\"title\":\"Z\",\"sources\":[{\"provider\":\"addon\","
-                   "\"addonId\":\"nao.instalado\",\"type\":\"movie\",\"catalogId\":\"z\"}]}]}]}");
+  assert(col_definir_json("{\"collections\":[]}") == 0 && col_n() == 0);
 }
 
 int main(void) {
@@ -255,6 +329,28 @@ int main(void) {
     assert(fileiraPodeSerPreservada(&antiga));
     puts("ok  same-source rows are rejected without the current-profile snapshot");
     addonAtivo = 1; snapshotValido = snapshotTem = 0;
+  }
+  {
+    // CW/social do not consume the two catalogue slots, including when a
+    // missing source is recovered from the accepted profile snapshot.
+    CatItem *it = calloc(8, sizeof *it);
+    CatFileira rows[5] = {0};
+    int n = 3, cap = 8, nr = 3;
+    snprintf(rows[0].chave, sizeof rows[0].chave, "continue_watching");
+    snprintf(rows[1].chave, sizeof rows[1].chave, "social_activity");
+    snprintf(rows[2].chave, sizeof rows[2].chave, "current-row");
+    snprintf(rows[2].base, sizeof rows[2].base, "%s", BASE);
+    snprintf(antigaFixture.chave, sizeof antigaFixture.chave, "old-row");
+    snprintf(antigaFixture.base, sizeof antigaFixture.base, "%s", BASE);
+    limiteFileiras = 2; preservarFixture = snapshotValido = snapshotTem = 1;
+    preservarFileirasAusentes(&it, &n, &cap, rows, &nr);
+    assert(nr == 4 && n == 4 && !strcmp(rows[3].chave, "old-row"));
+    assert(!strcmp(it[3].imdb, "tt_preserved"));
+    preservarFileirasAusentes(&it, &n, &cap, rows, &nr);
+    assert(nr == 4 && n == 4); // idempotent and quota remains bounded
+    free(it); preservarFixture = snapshotValido = snapshotTem = 0;
+    limiteFileiras = 16;
+    puts("ok  #233: missing-source preservation keeps catalogue quota independent of fixed rows");
   }
   // ---------------------------------------------------------------- caso 1
   // A colecao chega ANTES do ciclo (o caminho normal: sync em ~2 s, manifestos
@@ -320,3 +416,6 @@ int main(void) {
   puts("colfileiras: tudo ok");
   return 0;
 }
+
+// Fixture sem persistencia nem conta real.
+const char *dados_dir(void) { return ""; }

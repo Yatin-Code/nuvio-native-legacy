@@ -30,6 +30,7 @@
 //
 //   bash tests/detail_eps_shot.sh /tmp/nuvio-deteps
 #include <SDL2/SDL.h>
+#include "nvtmp.h"
 #include <SDL2/SDL_image.h>
 #include <assert.h>
 #include <stdio.h>
@@ -72,8 +73,86 @@
 // pagina pediu desfocada e repassa ao modulo real (gfx.c), que gera a copia de
 // verdade no GL — a captura mostra o resultado, o espiao prova a regra.
 #define gfx_desfocado fx_desfocado
+#define recomenda_ativo fx_recomenda_ativo
+#define recomenda_n fx_recomenda_n
+#define recomenda_item fx_recomenda_item
 
+#include "text.h"
+#include "plrui.h"
+// Render the same frozen page with an intact backdrop as the glass reference.
+static int fxIntactBackdrop;
+static void fx_backdrop(GfxRect r, GLuint tex, GfxModo mode, float focus,
+                        float px, float py, float radius, float cr, float cg,
+                        float cb, float a, const GfxRect *holes, int n) {
+  if (fxIntactBackdrop) gfx_rect(r, tex, mode, focus, px, py, radius, cr, cg, cb, a);
+#ifndef NV_EP_BASELINE_BUILD
+  else gfx_rect_furos(r, tex, mode, focus, px, py, radius, cr, cg, cb, a, holes, n);
+#else
+  else gfx_rect(r, tex, mode, focus, px, py, radius, cr, cg, cb, a);
+  (void)holes; (void)n;
+#endif
+}
+#define gfx_rect_furos fx_backdrop
+static const char *fxTituloEsperado;
+static int fxTituloDesenhado;
+static const char *fxSinopseEsperada;
+static int fxSinopseDesenhada;
+static float fxTituloY, fxTituloH, fxPlayY, fxInfoY;
+static void fx_icone(GfxRect r, const char *nome, float cr, float cg, float cb, float ca);
+static float fx_kicker(const char *s, float x, float y, int r, int g, int b, float a);
+static float fx_titulo_bloco(TxtEstilo estilo, const char *s, int r, int g, int b,
+                            float x, float y, float larg, float leading,
+                            float alpha, int maxLinhas);
+#define txt_bloco fx_titulo_bloco
+#define gfx_icone fx_icone
+#define plrui_kicker fx_kicker
+#include "trailer.h"
+// NV_FPS trailer phase: the harness has no player, so fake "trailer live".
+static int fxTrailerVivo;
+static int fx_trailer_aberto(void) { return fxTrailerVivo; }
+#define trailer_aberto fx_trailer_aberto
+static Uint32 fxTick;
+static Uint32 fx_ticks(void) { return getenv("NV_EP_PERF") || getenv("NV_EP_FINAL_SHOTS") ? fxTick : SDL_GetTicks(); }
+#define SDL_GetTicks fx_ticks
+#ifdef NV_REACAO_DETAIL_SOURCE
+#include NV_REACAO_DETAIL_SOURCE
+#else
 #include "../src/detail.c"
+#endif
+#undef SDL_GetTicks
+#undef gfx_rect_furos
+#include "menu.h"
+#include "ilha.h"
+#undef txt_bloco
+#undef gfx_icone
+#undef plrui_kicker
+#undef recomenda_ativo
+#undef recomenda_n
+#undef recomenda_item
+static void fx_icone(GfxRect r, const char *nome, float cr, float cg, float cb, float ca) {
+  if (ca > .3f && !strcmp(nome,"pl_play-f")) fxPlayY=r.y;
+  gfx_icone(r,nome,cr,cg,cb,ca);
+}
+static float fx_kicker(const char *s, float x, float y, int r, int g, int b, float a) {
+  if (a > .1f) fxInfoY=y;
+  return plrui_kicker(s,x,y,r,g,b,a);
+}
+static float fx_titulo_bloco(TxtEstilo estilo, const char *s, int r, int g, int b,
+                            float x, float y, float larg, float leading,
+                            float alpha, int maxLinhas) {
+  float height = txt_bloco(estilo,s,r,g,b,x,y,larg,leading,alpha,maxLinhas);
+  if (fxTituloEsperado && s && !strcmp(s,fxTituloEsperado) && alpha > 0.3f) {
+    assert(maxLinhas == 0); // The complete name is wrapped, never ellipsized.
+    assert(y >= 109.0f && y + height < NV_TELA_H);
+    fxTituloY = y;
+    fxTituloH = height;
+    fxTituloDesenhado++;
+  }
+  if (fxSinopseEsperada && s && !strcmp(s,fxSinopseEsperada) && alpha > 0.3f) {
+    fxSinopseDesenhada++;
+  }
+  return height;
+}
 
 #undef gfx_desfocado
 GLuint gfx_desfocado(GLuint src, const char *chave);
@@ -111,6 +190,18 @@ static int fxDesfPediu(const char *chave) {
 // era da montagem, nao do desenho, mas so apareceu porque a foto foi olhada.
 #define IMDB_SERIE "tt0903747"
 #define IMDB_FILME "tt0133093"
+
+static int fxRecomendacaoLigada;
+int fx_recomenda_ativo(void) { return fxRecomendacaoLigada; }
+int fx_recomenda_n(void) { return fxRecomendacaoLigada; }
+int fx_recomenda_item(int i, RecItem *item) {
+  if (!fxRecomendacaoLigada || i != 0) return 0;
+  memset(item, 0, sizeof *item);
+  snprintf(item->imdb, sizeof item->imdb, "%s", IMDB_FILME);
+  snprintf(item->deNome, sizeof item->deNome, "Marina");
+  snprintf(item->de, sizeof item->de, "nuvio:fixture");
+  return 1;
+}
 
 #define T1_N 10
 #define T2_N 12
@@ -308,6 +399,7 @@ static void montarCatalogo(void) {
       e->episodio  = i + 1;
       snprintf(e->nome, sizeof e->nome, "Título do episódio %d", i + 1);
       snprintf(e->duracao, sizeof e->duracao, "%d min", 42 + (i % 7));
+      if (!(t == 2 && i + 1 >= T3_PROX_EP)) { e->nota = 70 + (i * 7) % 20; e->notaImdb = 75 + (i * 5) % 20; }
       snprintf(e->sinopse, sizeof e->sinopse, "%s", SINOPSE_ENSAIO);
       if (t == 2) snprintf(e->data, sizeof e->data, "%s", DATA_T3[i]);
       else snprintf(e->data, sizeof e->data, "%d de março de %d",
@@ -358,26 +450,77 @@ static void gravar(const char *nome) {
 // Um quadro so nao basta: text.c rasteriza no maximo TXT_POR_QUADRO linhas por
 // quadro, e tex.c ainda esta decodificando a arte de fundo. Repetir e o que o
 // aparelho faz nos primeiros quadros da tela.
-static int parado;
+static int parado, comMenu;
+// NV_FPS: custo por quadro (CPU de atualizar+desenhar, texto rasterizado, envios
+// de textura, capturas de vidro) de quem esta medindo.
+#define FPS_MAX 4096
+static int medindo, fpsN;
+static struct { double ms, fill; int txt, upl, vid, rects, cheio; } fpsQ[FPS_MAX];
 static void quadros(int n) {
   int i;
   for (i = 0; i < n; i++) {
+    Uint64 t0 = SDL_GetPerformanceCounter();
     SDL_PumpEvents();
+    tex_upl_n = 0; txt_rasterizadas = 0;
     // BOMBEAR ANTES DE TUDO, como main.c faz. Sem isto nada decodifica: a fila
     // de texturas so anda dentro do tex_bombear, e a captura sairia com a arte
     // do backdrop e as miniaturas dos episodios em cinza — de volta ao chao
     // chapado que este arquivo existe para nao ter.
     tex_bombear(3);
-    if (!parado) detail_atualizar(1.0f / 60.0f, SDL_GetTicks());
+    if (getenv("NV_EP_PERF") && !parado) fxTick += 16;
+    if (!parado) detail_atualizar(1.0f / 60.0f, fx_ticks());
+    if (fxTrailerVivo) trailerFade = 1.0f;
     txt_novo_quadro();
     tex_novo_quadro();
     gfx_novo_quadro();
     glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     glViewport(0, 0, 1920, 1080);
     glClearColor(NV_COR_FUNDO_R, NV_COR_FUNDO_G, NV_COR_FUNDO_B, 1.0f);
+    gfx_sem_recorte();
+    gfx_ambiente_preparar();
     glClear(GL_COLOR_BUFFER_BIT);
-    detail_desenhar(SDL_GetTicks());
+    gfx_ambiente(1.0f);
+    detail_desenhar(fx_ticks());
+    gfx_ambiente_descarregar();
+    // MENU OVER THE PAGE (NV_MENU_SOBRE): the same order as app.c — page,
+    // side menu on top, clock island last (always top-right).
+    if (comMenu) {
+      menu_atualizar(1.0f / 60.0f, SDL_GetTicks());
+      if (menu_sobre()) { menu_pilula_mostrar(-1.0f); menu_desenhar(SDL_GetTicks()); }
+      ilha_relogio_visivel(1);
+      ilha_posicionar(1);
+      ilha_desenhar(SDL_GetTicks());
+    }
+    if (medindo && fpsN < FPS_MAX) {
+      glFinish();
+      fpsQ[fpsN].ms = (SDL_GetPerformanceCounter() - t0) * 1000.0 / SDL_GetPerformanceFrequency();
+      fpsQ[fpsN].txt = txt_rasterizadas; fpsQ[fpsN].upl = tex_upl_n;
+      fpsQ[fpsN].vid = gfx_vidro_capturas; fpsQ[fpsN].fill = gfx_fill_gpu; fpsQ[fpsN].rects = gfx_n_rect; fpsQ[fpsN].cheio = gfx_n_cheio; fpsN++;
+    }
   }
+}
+static int cmpMs(const void *a, const void *b) {
+  double x = *(const double *)a, y = *(const double *)b;
+  return x < y ? -1 : x > y;
+}
+// Fecha a janela de medida aberta por fpsN = 0: uma linha por fase.
+static void fpsRelata(const char *fase) {
+  static double v[FPS_MAX];
+  double soma = 0, pior = 0, fill = 0;
+  int rects = 0, cheio = 0;
+  int i, txt = 0, upl = 0, vid = 0, ip = 0;
+  for (i = 0; i < fpsN; i++) {
+    fill += fpsQ[i].fill; rects += fpsQ[i].rects; cheio += fpsQ[i].cheio; v[i] = fpsQ[i].ms; soma += v[i]; txt += fpsQ[i].txt; upl += fpsQ[i].upl; vid += fpsQ[i].vid;
+    if (v[i] > pior) { pior = v[i]; ip = i; }
+  }
+  if (getenv("NV_FPS_Q"))
+    for (i = 0; i < fpsN && i < 40; i++)
+      if (fpsQ[i].ms > 1.5 || fpsQ[i].txt || fpsQ[i].upl)
+        printf("  q%d %.2fms txt=%d upl=%d\n", i, fpsQ[i].ms, fpsQ[i].txt, fpsQ[i].upl);
+  qsort(v, fpsN, sizeof *v, cmpMs);
+  printf("[detfps] %-14s n=%d media=%.2f p95=%.2f pior=%.2f(q%d) ms txt=%d upl=%d vidro=%d fill=%.2f rects=%.0f cheias=%.1f\n",
+         fase, fpsN, soma / fpsN, v[(int)(fpsN * 0.95)], pior, ip, txt, upl, vid, fill / fpsN, (double)rects / fpsN, (double)cheio / fpsN);
+  fpsN = 0;
 }
 
 // Abre a pagina do item `i` e deixa o foco na TEMPORADA `tc` (coluna da fileira
@@ -395,7 +538,9 @@ static void abrir(int i, int tc) {
   detail_abrir(&hi);
   nivel = 1;
   foco.fileira = SEC_TEMPORADAS;
-  foco.coluna = tc;
+  // O botao de episodio aleatorio abriu a fileira (#205): temporada t mora na
+  // coluna t+1; em filme a fileira nao existe e a coluna fica onde estava.
+  foco.coluna = secaoN(SEC_TEMPORADAS) > 0 ? tc + 1 : tc;
   quadros(120);
 }
 
@@ -406,8 +551,119 @@ static void nosEpisodios(int col) {
   quadros(120);
 }
 
+// Compare the shared helper with the approved cached-line overdraw, including
+// pixel snapping at fractional positions and fades used by the detail tabs.
+static void checkTextWeight(void) {
+  unsigned char expected[512 * 128 * 4], actual[sizeof expected];
+  const float weights[] = {0, .5f, 1.0f, 1.1f, 1.4f};
+  const TxtEstilo styles[] = {TXT_CAPTION2, TXT_CALLOUT, TXT_CAPTION};
+  for (unsigned s = 0; s < sizeof styles / sizeof styles[0]; s++) {
+    TxtLinha line = txt_linha(styles[s], "EPISODE 9 / Season / Info", 245, 199, 77, 255);
+    assert(line.tex);
+    for (unsigned w = 0; w < sizeof weights / sizeof weights[0]; w++) {
+      for (int fade = 0; fade < 2; fade++) {
+        float a = fade ? .43f : 1, x = fade ? 10.4f : 10;
+        glClear(GL_COLOR_BUFFER_BIT);
+        txt_desenhar_alpha(line, x, 980, a);
+        if (weights[w] > .05f) txt_desenhar_alpha(line, x + weights[w] * .5f, 980, a);
+        if (weights[w] > .9f) txt_desenhar_alpha(line, x + weights[w], 980, a);
+        glReadPixels(0, 0, 512, 128, GL_RGBA, GL_UNSIGNED_BYTE, expected);
+        glClear(GL_COLOR_BUFFER_BIT);
+        txt_peso(line, x, 980, a, weights[w]);
+        glReadPixels(0, 0, 512, 128, GL_RGBA, GL_UNSIGNED_BYTE, actual);
+        int maxDelta = 0;
+        for (unsigned i = 0; i < sizeof expected; i++) {
+          int delta = abs((int)expected[i] - actual[i]);
+          if (delta > maxDelta) maxDelta = delta;
+        }
+        // Separate framebuffer blends round to 8 bits after each copy.
+        if (maxDelta > 2) {
+          fprintf(stderr, "Typography mismatch: style=%d weight=%.2f alpha=%.2f delta=%d\n", styles[s], weights[w], a, maxDelta);
+          assert(!"approved detail text weight changed");
+        }
+      }
+    }
+  }
+  puts("[detail-weight] approved pixels preserved across styles, weights and fades");
+}
+
+// Freeze identical fixtures for the approved Modern and restored Standard cards.
+static void episodeShots(const char *out) {
+  unsigned char *rest = malloc(1920 * 1080 * 4);
+  unsigned char *pixels = malloc(1920 * 1080 * 4);
+  assert(rest && pixels);
+  extras_carregar("deploy/app/art");
+  dados_gravar("aparencia-20.txt", "1\n");
+  for (int layout = 0; layout < 2; layout++) {
+    char settings[700];
+    snprintf(settings, sizeof settings, "%s/ajustes.txt", dados_dir());
+    FILE *file = fopen(settings, "w"); assert(file);
+    fprintf(file, "idioma 1\nhomeLayoutLocal %d\nvidroLocal 1\nbordaFocoCartaz 1\n"
+                  "epTamanhoLocal 1\nselected_theme 2\nnotaEpisodio 3\n"
+                  "escalaTextoVersaoLocal 1\nescalaTextoLocal 2\n", layout);
+    fclose(file); ajustes_dir(dados_dir());
+    assert(!ajustes_vidro() && ajustes_home_layout() == layout);
+    montarCatalogo();
+    snprintf(itens[0].sinopse, sizeof itens[0].sinopse,
+             "After a family tragedy, three siblings move into their ancestral home "
+             "and discover keys with unusual powers. Each discovery reveals another mystery.");
+    snprintf(itens[0].genero, sizeof itens[0].genero, "Drama · Fantasy · Mystery");
+    cat_definir_tudo(itens, 2, &filEnsaio, 1);
+    for (int i = 0; i < T1_N; i++) {
+      snprintf(episodios[i].thumb, sizeof episodios[i].thumb,
+               "deploy/app/art/ep/27_1_%02d.jpg", i % 10 + 1);
+      snprintf(episodios[i].nome, sizeof episodios[i].nome, "Episode title %d", i + 1);
+      snprintf(episodios[i].sinopse, sizeof episodios[i].sinopse,
+               "The family follows a new clue while an unexpected visitor changes their plans. "
+               "As the mystery deepens, each discovery brings them closer to the truth "
+               "and forces them to reconsider who they can trust.");
+      snprintf(episodios[i].data, sizeof episodios[i].data, "March %d, 2024", i + 1);
+    }
+    if (layout == HOME_LAYOUT_PADRAO) {
+      snprintf(episodios[1].data, sizeof episodios[1].data, "Wednesday, September 22, 2024");
+      episodios[2].notaImdb = episodios[2].nota = 0;
+    }
+    cat_definir_episodios(0, episodios, T1_N + T2_N + T3_N);
+    semear(1, T1_N, 3); abrir(0, 0); nosEpisodios(0);
+    // Allow worker decode/reveal to settle before freezing both navigation states.
+    for (int i = 0; i < 40; i++) { SDL_Delay(10); fxTick += 16; quadros(1); }
+    parado = 1; fxTick = 10000;
+    GfxRect card = {100, 100, epCardW(), epCardH()};
+    GfxRect holes[N_ITENS * 2];
+    int n = epFuros(holes);
+    assert(layout == HOME_LAYOUT_MODERNA ? n > 0 : n == 0);
+    for (int i = 0; i < n; i++) assert(holes[i].h <= epThumbH());
+    for (int focused = 0; focused < 2; focused++) {
+      memset(animFoco, 0, sizeof animFoco);
+      animFoco[SEC_EPISODIOS][0] = focused;
+      for (int warm = 0; warm < 3; warm++) {
+        gfx_novo_quadro(); txt_novo_quadro(); gfx_sem_recorte();
+        glClearColor(.02f, .02f, .025f, 1); glClear(GL_COLOR_BUFFER_BIT);
+        desenhaEpisodio(card, 0, focused, 1, fxTick);
+        assert(gfx_n_cheio == 0);
+      }
+      glReadPixels(0, 0, 1920, 1080, GL_RGBA, GL_UNSIGNED_BYTE, focused ? pixels : rest);
+      if (focused && layout == HOME_LAYOUT_MODERNA) {
+        for (int y = 140; y < 420; y++) for (int x = 150; x < 690; x++)
+          for (int channel = 0; channel < 4; channel++) {
+            int p = ((1079 - y) * 1920 + x) * 4 + channel;
+            assert(abs(rest[p] - pixels[p]) <= 1);
+          }
+      }
+      quadros(3);
+      char path[900];
+      snprintf(path, sizeof path, "%s/final-%s-%s.png", out,
+               layout ? "standard" : "modern", focused ? "foco" : "rest");
+      gravar(path);
+      assert(glGetError() == GL_NO_ERROR);
+    }
+  }
+  free(rest); free(pixels);
+  puts("PASS: episode PNGs, fixed Modern still pixels and thumbnail-only culling");
+}
+
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nuvio-deteps";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nuvio-deteps");
   char nome[600];
   SDL_GLContext gl;
 
@@ -437,6 +693,7 @@ int main(int argc, char **argv) {
   gfx_icones_dir("deploy/app/art");   // o check do card visto e icone (#74)
   ajustes_iniciar();
   dados_iniciar("deploy/app/art");
+  if (getenv("NV_EP_PERF")) dados_gravar("aparencia-20.txt", "1\n");
   // EM PORTUGUES, e nao no padrao de fabrica. `valor[AJ_IDIOMA]` nasce em 1
   // (ingles) e a captura saia com "Season 2 / EPISODE 9 / Cast & Crew" — o que
   // se precisa julgar aqui e a largura das frases que o dono ve na TV dele, e
@@ -447,13 +704,381 @@ int main(int argc, char **argv) {
     snprintf(cam, sizeof cam, "%s/ajustes.txt", dados_dir());
     f = fopen(cam, "w");
     assert(f);
+    if (getenv("NV_AVALIAR_SHOTS")) fprintf(f, "vidroLocal 1\n");
     // NUVIO_SHOT_IDIOMA=N troca o idioma das capturas que nao sao as das notas
     // da release (0 pt ... 7 es; ver idiomacod.h): serve a conferir traducao.
     fprintf(f, "idioma %d\n", getenv("NUVIO_SHOT_IDIOMA") ? atoi(getenv("NUVIO_SHOT_IDIOMA")) : 0);
+    if (getenv("NV_AJ")) fprintf(f, "%s\n", getenv("NV_AJ"));   // linhas cruas de ajustes.txt
+    if (getenv("NV_APPLE_EP")) fprintf(f,"homeLayoutLocal %d\n",HOME_LAYOUT_DINAMICA);
+    // #205: NV_EP_TAMANHO=0/1/2 captura os tres tamanhos dos cards de episodio
+    // da Moderna (Pequeno/Medio/Grande).
+    if (getenv("NV_EP_TAMANHO")) fprintf(f,"epTamanhoLocal %d\n",atoi(getenv("NV_EP_TAMANHO")));
     fclose(f);
     ajustes_dir(dados_dir()); }
 
   montarCatalogo();
+  if (getenv("NV_674_SHOTS")) {
+    itens[0].progresso = 0;
+    cat_definir_tudo(itens, 2, &filEnsaio, 1);
+    cat_definir_episodios(0, episodios, T1_N + T2_N + T3_N);
+    semear(1, T1_N, T1_N); semear(2, T2_N, 8); semear(3, T3_N, 0);
+    HomeItem hi = {0}; hi.indice = 0;
+    detail_abrir(&hi); quadros(120);
+    nivel = 1; foco.fileira = SEC_EPISODIOS;
+    foco.coluna = foco.colunaLembrada[SEC_EPISODIOS];
+    quadros(120);
+    snprintf(nome, sizeof nome, "%s-pt-BR.png", saida); gravar(nome);
+    return 0;
+  }
+  if (getenv("NV_AVALIAR_SHOTS")) {
+    ajustes_definir_vidro(0);
+    semear(1, T1_N, 3);
+    reacao_nota_definir(IMDB_SERIE ":1:2", 9);
+    abrir(0, 0); nosEpisodios(1); quadros(120);
+    snprintf(nome, sizeof nome, "%s/episode-rating.png", saida); gravar(nome);
+    nivel = 0; quadros(120);
+    assert(reacao_detalhe_abrir(cat_item(0)));
+    quadros(120);
+    assert(reacao_aberta() && reacao_passo() == 0);
+    snprintf(nome, sizeof nome, "%s/reacao-detalhe.png", saida); gravar(nome);
+    SDL_Event ratingKey = {0};
+    ratingKey.type = SDL_KEYDOWN; ratingKey.key.keysym.sym = SDLK_RETURN;
+    assert(reacao_evento(&ratingKey, 1));
+    assert(reacao_passo() == 2 && reacao_nota(IMDB_SERIE) == 8);
+    ratingKey.key.keysym.sym = SDLK_ESCAPE;
+    assert(reacao_evento(&ratingKey, 1));
+    quadros(120);
+    assert(!reacao_aberta() && reacao_nota(IMDB_SERIE) == 8);
+    snprintf(nome, sizeof nome, "%s/reacao-detalhe-nota.png", saida); gravar(nome);
+    foco.fileira = SEC_NOTAS; foco.coluna = 0; nivel = 1; quadros(120);
+    SDL_Delay(200); quadros(3); // Finish the text gate's wall-clock fade.
+    snprintf(nome, sizeof nome, "%s/title-rating.png", saida); gravar(nome);
+    return 0;
+  }
+  if (getenv("NV_EP_FINAL_SHOTS")) { episodeShots(saida); return 0; }
+  if (getenv("NV_EP_PERF")) {
+    assert(ajustes_home_layout() == HOME_LAYOUT_MODERNA && ajustes_vidro());
+    semear(1, T1_N, 3);
+    for (int i = 0; i < T1_N; i++)
+      snprintf(episodios[i].thumb, sizeof episodios[i].thumb,
+               "deploy/app/art/%02d.jpg", i + 1);
+    cat_definir_episodios(0, episodios, T1_N + T2_N + T3_N);
+    abrir(0, 0); nosEpisodios(0);
+    // Freeze animation/time so the before/after pixels can be compared.
+    parado = 1;
+    medindo = 1; fpsN = 0;
+    quadros(8);
+    fpsRelata("episode-rest");
+    snprintf(nome, sizeof nome, "%s-episodes.png", saida); gravar(nome);
+    int rects = gfx_n_rect;
+    double fill = gfx_fill_gpu;
+    assert(epVisiveis() >= 8);
+    int count = gfx_n_rect;
+    TxtLinha probe = txt_linha(TXT_CAPTION, "Layout probe", 255, 255, 255, 255);
+    txt_desenhar_alpha(probe, 0, 0, 0);
+    // Baseline lacks the alpha-zero guard: measure its full navigation too,
+    // then fail the common cast budget below, rather than stopping this probe.
+#ifndef NV_EP_BASELINE_BUILD
+    assert(gfx_n_rect == count);
+#endif
+    // Measurement-only rating layout must submit no GL draws.
+    notasui_fontes_altura(notasDados());
+#ifndef NV_EP_BASELINE_BUILD
+    assert(gfx_n_rect == count);
+#endif
+    parado = 0;
+    medindo = 0;
+    foco.fileira = SEC_ELENCO; foco.coluna = 0; quadros(120);
+    const int castRects = gfx_n_rect;
+    const double castFill = gfx_fill_gpu;
+    int overBudget = rects > castRects || fill > castFill;
+    int churn = 0, checked = 0;
+    printf("[episode-cast] episodes=%d/%.3f cast=%d/%.3f\n",
+           rects, fill, castRects, castFill);
+    nosEpisodios(0);
+    // Check the first frame of each focus move, not only settled frames.
+    // First traversal admits newly visible cards; the warm return admits no
+    // uploads/rasterizations. Repeat with zoom, whose texture size must stay fixed.
+    int border = ajustes_rapido_op("bordaFocoCartaz");
+    assert(border >= 0 && ajustes_borda_foco());
+    for (int zoom = 0; zoom < 2; zoom++) {
+      if (zoom) {
+        assert(ajustes_rapido_passo(border, 1));
+        assert(!ajustes_borda_foco());
+        quadros(120); // Allow the new maximum thumbnail size once.
+      }
+      for (int pass = 0; pass < 2; pass++) {
+        for (int step = 0; step < T1_N; step++) {
+          int col = pass ? T1_N - 1 - step : step;
+          foco.coluna = col;
+          int uploads = 0, rasterizations = 0;
+          for (int frame = 0; frame < 128; frame++) {
+            quadros(1);
+            uploads += tex_upl_n; rasterizations += txt_rasterizadas;
+            if (gfx_n_rect > castRects || gfx_fill_gpu > castFill)
+              printf("[episode-over] zoom=%d pass=%d col=%d frame=%d rect=%d fill=%.3f\n",
+                     zoom, pass, col, frame, gfx_n_rect, gfx_fill_gpu);
+            overBudget += gfx_n_rect > castRects || gfx_fill_gpu > castFill;
+            checked++;
+          }
+          churn += uploads > (pass ? 0 : 2) || rasterizations > (pass ? 0 : 16);
+          if (uploads || rasterizations)
+            printf("[episode-move] zoom=%d pass=%d col=%d upl=%d txt=%d\n",
+                   zoom, pass, col, uploads, rasterizations);
+          if (col == T1_N - 1) {
+            snprintf(nome, sizeof nome, "%s-%s-scroll.png", saida, zoom ? "zoom" : "ring");
+            gravar(nome);
+          }
+        }
+      }
+    }
+    printf("[episode-navigation] frames=%d over-cast=%d churn=%d\n",
+           checked, overBudget, churn);
+    fflush(stdout);
+    assert(churn == 0);
+    assert(overBudget == 0);
+    checkTextWeight();
+#ifndef NV_EP_BASELINE_BUILD
+    // Frost samples the backdrop before the thumbnails, including the 68 px
+    // fringe. Compare actual GL pixels with the same page without occlusion.
+    nosEpisodios(0); parado = 1;
+    setenv("NUVIO_SHOT_VIDRO_FOSCO", "1", 1);
+    ajustes_teste_vidro_env();
+    unsigned char *actual = malloc(1920 * 1080 * 4), *expected = malloc(1920 * 1080 * 4);
+    assert(actual && expected && ajustes_vidro_fosco());
+    gfx_vidro_sujar(); quadros(8);
+    snprintf(nome, sizeof nome, "%s-frost.png", saida); gravar(nome);
+    glReadPixels(0, 0, 1920, 1080, GL_RGBA, GL_UNSIGNED_BYTE, actual);
+    fxIntactBackdrop = 1;
+    gfx_vidro_sujar(); quadros(8);
+    glReadPixels(0, 0, 1920, 1080, GL_RGBA, GL_UNSIGNED_BYTE, expected);
+    int changed = 0;
+    for (int i = 0; i < 1920 * 1080 * 4; i++) changed += abs(actual[i] - expected[i]) > 2;
+    printf("[glass-backdrop] channels-differing-over-2=%d\n", changed);
+    fflush(stdout);
+    free(actual); free(expected);
+    assert(changed == 0);
+    GfxRect holes[N_ITENS * 2];
+    assert(epFuros(holes) == 0);
+#endif
+    return 0;
+  }
+  if (getenv("NV_APPLE_EP")) {
+    semear(1,2,T1_N);
+    itens[0].temporada=1; itens[0].episodio=3;
+    itens[0].progresso=45; itens[0].restanteMin=24;
+    cat_definir_tudo(itens,2,&filEnsaio,1);
+    cat_definir_episodios(0,episodios,T1_N+T2_N+T3_N);
+    abrir(0,0); nosEpisodios(0);
+    snprintf(nome,sizeof nome,"%s-apple-episodes.png",saida); gravar(nome);
+    foco.fileira=SEC_ELENCO; foco.coluna=0; quadros(120);
+    snprintf(nome,sizeof nome,"%s-apple-cast.png",saida); gravar(nome);
+    HomeItem replacement={0}; replacement.indice=0;
+    replacement.rect=(GfxRect){0,0,NV_TELA_W,NV_TELA_H};
+    replacement.titulo=itens[0].titulo;
+    assert(aberto && !saindo);
+    detail_abrir(&replacement); assert(t==1.0f && pg==1.0f);
+    carro=0; nivel=0; botao=0; maisAcoes=0;
+    assert(acoesAgrupadas() && nBotoes()==2+(temInicio()?1:0));
+    assert(acaoEm(1+(temInicio()?1:0))==ACAO_LISTA);
+    quadros(120);
+    // TextGate fades by wallclock time, unlike the frame-stepped springs.
+    for (int step=0;step<20;step++) {SDL_Delay(16);quadros(1);}
+    snprintf(nome,sizeof nome,"%s-hero-actions.png",saida); gravar(nome);
+    carro=1; carCheia=0; nivel=0; botao=0; maisAcoes=0;
+    carN=2; carIdx[0]=0; carIdx[1]=1; carPos=carAplicado=0; carOff=0;
+    carEsperaRect=0; cartao=carTxt=1; cartaoVel=carTxtVel=0;
+    assert(epTempY() == 1160 && epRowY() == 1286);
+    assert(epCardW()==420 && epCardH()==500 && epThumbH()==236);
+    for (int step=0;step<25;step++) {SDL_Delay(16);quadros(1);}
+    snprintf(nome,sizeof nome,"%s-actions-closed.png",saida); gravar(nome);
+    botao=1+(temInicio()?1:0);
+    for (int step=0;step<28;step++) {
+      SDL_Delay(16);quadros(1);
+      if (step==3 || step==10 || step==27) {
+        snprintf(nome,sizeof nome,"%s-actions-open-%d.png",saida,step);gravar(nome);
+      }
+    }
+    SDL_Event down = {0}; down.type=SDL_KEYDOWN; down.key.keysym.sym=SDLK_DOWN;
+    botao=0; maisAcoes=0; detail_evento(&down); assert(carCheia);
+    // CAR_MOLA_PAG=9 settles below2% after0.8s;32frames still leave4.8%.
+    for (int step=0;step<48;step++) {SDL_Delay(16);quadros(1);}
+    assert(carTxt < .02f && cartao < .02f);
+    down.key.keysym.sym=SDLK_LEFT; detail_evento(&down); assert(carPos==0 && !saindo);
+    snprintf(nome,sizeof nome,"%s-carousel-expanded-series.png",saida); gravar(nome);
+    replacement.indice=1; replacement.titulo=itens[1].titulo;
+    detail_abrir(&replacement);
+    carro=1; carCheia=1; nivel=0; botao=0; maisAcoes=0;
+    carN=2; carIdx[0]=0; carIdx[1]=1; carPos=carAplicado=1; carOff=1;
+    carEsperaRect=0; cartao=carTxt=0; cartaoVel=carTxtVel=0;
+    quadros(120);
+    for (int step=0;step<20;step++) {SDL_Delay(16);quadros(1);}
+    snprintf(nome,sizeof nome,"%s-carousel-expanded-film.png",saida); gravar(nome);
+    down.key.keysym.sym=SDLK_RIGHT; botao=nBotoes()-1;
+    detail_evento(&down); assert(carPos==1 && !saindo);
+    // A compact artwork fixture makes the first-screen order reviewable.
+    // Unknown logo language keeps the artwork without a duplicate caption.
+    snprintf(itens[1].titulo,sizeof itens[1].titulo,"The Devil Wears Prada 2");
+    snprintf(itens[1].logo,sizeof itens[1].logo,"deploy/app/art/logo/07.png");
+    itens[1].logoIdiomaUrl[0]=itens[1].logoIdioma[0]=0;
+    snprintf(itens[1].pais,sizeof itens[1].pais,"Brazil");
+    snprintf(itens[1].direcao,sizeof itens[1].direcao,"Diretor de Ensaio");
+    cat_definir_tudo(itens,2,&filEnsaio,1);
+    detail_abrir(&replacement);
+    carro=1; carCheia=1; nivel=0; botao=0; maisAcoes=0;
+    cartao=carTxt=0; cartaoVel=carTxtVel=0;
+    for (int step=0;step<24;step++) {SDL_Delay(16);quadros(1);}
+    snprintf(nome,sizeof nome,"%s-carousel-expanded-film-logo.png",saida); gravar(nome);
+    // Stress the measured bottom limit with actual fonts and real wrapping:
+    // foreign artwork, a complete long title, hidden large synopsis, resume,
+    // country/direction and the received recommendation chip.
+    snprintf(itens[1].titulo,sizeof itens[1].titulo,
+      "Uma história extraordinariamente longa sobre a viagem de volta para casa e os amigos que encontramos pelo caminho através de mundos desconhecidos");
+    snprintf(itens[1].sinopse,sizeof itens[1].sinopse,
+      "Durante uma longa viagem de volta para casa, uma família precisa atravessar "
+      "cidades desconhecidas e enfrentar escolhas difíceis. Quando antigos amigos "
+      "reaparecem com notícias inesperadas, cada encontro revela uma parte esquecida "
+      "de sua história. Entre lembranças, descobertas e caminhos que parecem não ter "
+      "fim, eles aprendem a encontrar esperança nos pequenos gestos e decidem juntos "
+      "qual futuro desejam construir. A jornada transforma o modo como enxergam o "
+      "mundo e as pessoas que sempre estiveram ao seu lado.");
+    snprintf(itens[1].logo,sizeof itens[1].logo,"deploy/app/art/logo/07.png");
+    snprintf(itens[1].logoIdiomaUrl,sizeof itens[1].logoIdiomaUrl,"%s",itens[1].logo);
+    snprintf(itens[1].logoIdioma,sizeof itens[1].logoIdioma,"en");
+    snprintf(itens[1].pais,sizeof itens[1].pais,"Brazil");
+    snprintf(itens[1].direcao,sizeof itens[1].direcao,"Diretor de Ensaio");
+    itens[1].progresso=45; itens[1].restanteMin=92;
+    cat_definir_tudo(itens,2,&filEnsaio,1);
+    fxRecomendacaoLigada=1;
+    detail_abrir(&replacement);
+    carro=1; carCheia=1; nivel=0; botao=0; maisAcoes=0;
+    cartao=carTxt=0; cartaoVel=carTxtVel=0;
+    quadros(120);
+    for (int step=0;step<20;step++) {SDL_Delay(16);quadros(1);}
+    fxTituloEsperado=itens[1].titulo; fxTituloDesenhado=0;
+    fxSinopseEsperada=itens[1].sinopse; fxSinopseDesenhada=0;
+    quadros(3);
+    assert(fxTituloDesenhado>0 && fxSinopseDesenhada>0);
+    assert(fxTituloY >= 109);
+    assert(fxTituloY > fxPlayY + 24);
+
+    printf("release1.7.4 localized caption after actions at %.0f; synopsis visible\n",fxTituloY);
+    snprintf(nome,sizeof nome,"%s-carousel-expanded-film-long.png",saida); gravar(nome);
+    puts("PASS: Apple episode/cast, Add reveal, expanded carousel and measured long movie captures"); return 0;
+  }
+  if (getenv("NUVIO_SHOT_TITULO")) {
+    CatFileira fil=filEnsaio;
+    snprintf(itens[1].titulo,sizeof itens[1].titulo,"O Senhor dos Anéis: A Sociedade do Anel");
+    snprintf(itens[1].logo,sizeof itens[1].logo,"deploy/app/art/logo/01.png");
+    snprintf(itens[1].logoIdiomaUrl,sizeof itens[1].logoIdiomaUrl,"%s",itens[1].logo);
+    snprintf(itens[1].logoIdioma,sizeof itens[1].logoIdioma,"en");
+    cat_definir_tudo(itens,2,&fil,1);
+    fxTituloEsperado=NULL;abrir(1,0);nivel=0;SDL_Delay(400);quadros(120);
+    fxTituloEsperado=itens[1].titulo;fxTituloDesenhado=0;quadros(3);
+    assert(fxTituloDesenhado>0);assert(tex_obter_larg_qualquer(logoDe(idx),NV_DETW_LOGO_MAXW));
+    snprintf(nome,sizeof nome,"%s-localizado.png",saida);gravar(nome);
+    // Metadata can localize after opening; read the live catalog every frame.
+    snprintf(itens[1].titulo,sizeof itens[1].titulo,"Uma história extraordinariamente longa sobre a viagem de volta para casa e os amigos que encontramos pelo caminho através de mundos desconhecidos");
+    cat_definir_tudo(itens,2,&fil,1);fxTituloDesenhado=0;quadros(120);
+    assert(fxTituloDesenhado>0);
+    snprintf(nome,sizeof nome,"%s-longo.png",saida);gravar(nome);
+    // A new opening resets the frozen artwork session, like a real title.
+    itens[1].logo[0]=0;
+    snprintf(itens[1].imdb,sizeof itens[1].imdb,"tt99887766");
+    cat_definir_tudo(itens,2,&fil,1);fxTituloEsperado=NULL;
+    abrir(1,0);nivel=0;SDL_Delay(400);quadros(120);
+    fxTituloEsperado=itens[1].titulo;fxTituloDesenhado=0;quadros(3);
+    assert(!logoDe(idx));
+    assert(fxTituloDesenhado>0);
+    snprintf(nome,sizeof nome,"%s-sem-logo.png",saida);gravar(nome);
+    puts("detail title: live localized caption, complete wrapping and no-logo rendering passed");
+    return 0;
+  }
+
+  // --- MENU OVER THE TITLE PAGE (owner 03/10, "pode abrir por cima"): Left
+  //     on the first episode of S1 asks for the side menu; it opens ON TOP and
+  //     the page keeps its focus/scroll; Right hands the focus back.
+  //     NV_MENU_SOBRE=1 bash tests/detail_eps_shot.sh /Volumes/ExternalSSD/nv-ui-w14-shots/det
+  if (getenv("NV_MENU_SOBRE")) {
+    SDL_Event ev = {0};
+    int f0, c0; float s0;
+    semear(1, T1_N, 3);
+    progVis = 3; progExib = T1_N + T2_N + (T3_PROX_EP - 1);
+    abrir(0, 0); nosEpisodios(0);
+    for (int step = 0; step < 20; step++) { SDL_Delay(16); quadros(1); }
+    f0 = foco.fileira; c0 = foco.coluna; s0 = scrollY;
+    ev.type = SDL_KEYDOWN; ev.key.keysym.sym = SDLK_LEFT;
+    detail_evento(&ev);
+    assert(!saindo && detail_pediu_menu());
+    comMenu = 1;
+    menu_abrir_sobre(1);
+    detail_sob_menu(1);
+    for (int step = 0; step < 6; step++) { SDL_Delay(16); quadros(1); }
+    snprintf(nome, sizeof nome, "%s-menu-sobre-abrindo.png", saida); gravar(nome);
+    for (int step = 0; step < 40; step++) { SDL_Delay(16); quadros(1); }
+    snprintf(nome, sizeof nome, "%s-menu-sobre-aberto.png", saida); gravar(nome);
+    assert(aberto && !saindo && foco.fileira == f0 && foco.coluna == c0 && scrollY == s0);
+    ev.key.keysym.sym = SDLK_RIGHT; menu_evento(&ev);
+    assert(!menu_aberto() && !menu_escolheu());
+    detail_sob_menu(0);
+    for (int step = 0; step < 50; step++) { SDL_Delay(16); quadros(1); }
+    assert(!menu_sobre());
+    snprintf(nome, sizeof nome, "%s-menu-sobre-voltou.png", saida); gravar(nome);
+    assert(aberto && !saindo && foco.fileira == f0 && foco.coluna == c0 && scrollY == s0);
+    puts("menu over detail: page kept alive under the menu, Right returns");
+    return 0;
+  }
+
+  // --- NV_FPS: custo por quadro ao abrir a pagina da serie e ao passar de card em
+  //     card na fileira de episodios (queixa 205: "drop fps when u open detail
+  //     page, and swipe between the episodes cards").
+  //     NV_FPS=1 bash tests/detail_eps_shot.sh /tmp/x
+  if (getenv("NV_FPS")) {
+    SDL_Event ev = {0};
+    semear(1, T1_N, 3); semear(2, T2_N, 0); semear(3, T3_N, 0);
+    progVis = 3; progExib = T1_N + T2_N + (T3_PROX_EP - 1);
+    medindo = 1; fpsN = 0;
+    { HomeItem hi; memset(&hi, 0, sizeof hi);
+      hi.rect.w = NV_TELA_W; hi.rect.h = NV_TELA_H;
+      hi.titulo = itens[0].titulo; hi.genero = itens[0].genero; hi.meta = itens[0].meta;
+      detail_abrir(&hi); }
+    nivel = 1;
+    quadros(30); fpsRelata("abrir 0-30");
+    quadros(120); fpsRelata("abrir 30-150");
+    foco.fileira = SEC_EPISODIOS; foco.coluna = 0;
+    quadros(120); fpsRelata("foco-eps");
+    for (int k = 0; k < 8; k++) {
+      ev.type = SDL_KEYDOWN; ev.key.keysym.sym = SDLK_RIGHT; detail_evento(&ev);
+      ev.type = SDL_KEYUP; detail_evento(&ev);
+      quadros(24);
+    }
+    fpsRelata("passa-cards");
+    snprintf(nome, sizeof nome, "%s-fps.png", saida); gravar(nome);
+    // Hero trailer live (queixa 205: 22-30 fps on the TCL while it plays): the
+    // video sits under the GL surface, so every full-screen layer drawn over
+    // it is paid in the compositor. Hero focus, page at rest.
+    nivel = 0; foco.fileira = SEC_TEMPORADAS; foco.coluna = 0;
+    fxTrailerVivo = 1; fpsN = 0;
+    quadros(120); fpsRelata("trailer-vivo");
+    snprintf(nome, sizeof nome, "%s-fps-trailer.png", saida); gravar(nome);
+    // Carousel card at rest (cartao=1) with the trailer live: where the TCL
+    // sat for the 22-30 fps. Fake the carousel, same as the app opening a card.
+    carro = 1; carN = 2; carIdx[0] = 0; carIdx[1] = 1; carPos = carAplicado = 0; carOff = 0;
+    carEsperaRect = 0; carCheia = 0; nivel = 0; botao = 0;
+    cartao = carTxt = 1; cartaoVel = carTxtVel = 0;
+    fpsN = 0; quadros(60); fpsRelata("trailer-cartao");
+    if (getenv("NV_FPS_RASTRO")) { gfx_rastro_grandes = 1; quadros(1); gfx_rastro_grandes = 0; }
+    snprintf(nome, sizeof nome, "%s-fps-trailer-cartao.png", saida); gravar(nome);
+    // NV_FPS_CHEIAS_MAX=N: fail when the live-trailer page OR card submits more
+    // than N full-screen fills per frame (gfx_n_cheio, the [quadro-des] "cheias").
+    if (getenv("NV_FPS_CHEIAS_MAX")) {
+      int n = 0, i, mx = atoi(getenv("NV_FPS_CHEIAS_MAX"));
+      for (i = 0; i < 60; i++) { quadros(1); n += gfx_n_cheio; }
+      printf("[detfps] trailer-cartao cheias=%.1f max=%d\n", n / 60.0, mx);
+      return n / 60.0 > mx ? 1 : 0;
+    }
+    return 0;
+  }
 
   // --- 1. HISTORICO NAO CHEGOU. Nada foi semeado: vistoep_estado devolve -1
   //        em tudo. Nenhum check, e a temporada nao pode afirmar "0 vistos".

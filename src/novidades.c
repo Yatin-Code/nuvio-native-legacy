@@ -23,6 +23,8 @@
 #include "anim.h"
 #include "layout.h"
 #include "idioma.h"
+#define NV_ESCALA_TELA_ATIVA   // mede pela tela do fator ativo (escala.h)
+#include "escala.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -133,7 +135,14 @@ static float desenhaFeature(float x, float y, float w, const char *icone,
     return h > ND_FEAT_H - 40.0f ? h + 40.0f : ND_FEAT_H; }
 }
 
+static void novidades_desenharCorpo_(Uint32 agora);
+// Cartao de tela quase cheia: ampliado so se ainda couber (escala.h).
 void novidades_desenhar(Uint32 agora) {
+  ESCALA_SE_COUBER_INI(ND_W, ND_H);
+  novidades_desenharCorpo_(agora);
+  ESCALA_SE_COUBER_FIM();
+}
+static void novidades_desenharCorpo_(Uint32 agora) {
   float a = anim_suave(entrada), dy, y;
   (void)agora;
   if (entrada < 0.002f) return;
@@ -149,7 +158,7 @@ void novidades_desenhar(Uint32 agora) {
   // (GFX_LUZ). Com o veu de tela cheia ja pago, e a ultima camada grande daqui.
   { GfxRect p = { ND_X, ND_Y + dy, ND_W, ND_H };
     float ar, ag, ab; ajustes_acento(&ar, &ag, &ab);
-    gfx_cor(p, 28.0f / ND_H, 0.055f, 0.058f, 0.068f, 0.94f * a);
+    gfx_vidro_ou_solido(p, 28.0f / ND_H, GFX_VIDRO_DENS_MODAL, a, 0.055f, 0.058f, 0.068f, 0.94f);
     gfx_luz_canto(p, 28.0f / ND_H, ND_H * 0.1f, -ND_H * 0.1f, ND_H * 0.65f, ar, ag, ab, 0.22f * a);
     gfx_recorte(ND_X, ND_Y + dy, ND_W, ND_H); }
 

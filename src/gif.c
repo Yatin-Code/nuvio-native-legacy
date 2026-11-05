@@ -1,6 +1,7 @@
 // GIF animado das capas de colecao (#29) e das fotos de perfil (#45).
 // Ver gif.h para onde anima e por que.
 #include "gif.h"
+#include "gfx.h"
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -150,6 +151,20 @@ size_t gif_orcamento_para(double memGB) {
   if (memGB <= 1.0) return 0;
   if (memGB < 4.0) return (size_t)20 * 1024 * 1024;
   return GIF_SEM_TETO;
+}
+
+// #589 (Tizen 6.5, 1,7 GB): o "Apple TV+" (241 quadros 500x281 a 20 ms) custa
+// 26,5 MB/s, 1,3x o teto, e ficava parado. Encolher a SAIDA nao baixa o custo
+// (LZW e composicao rodam na tela inteira; so o filtro final usa a saida), mas
+// esticar o relogio baixa: o fio so decodifica o que o relogio consome, e com
+// a volta `k` vezes mais longa o ritmo cai para custo/k. Ate GIF_ESTICA_MAX o
+// GIF anima em camera lenta dentro do mesmo teto; acima disso, parado.
+double gif_estica(size_t custo, size_t orc) {
+  double k;
+  if (orc == GIF_SEM_TETO || custo <= orc) return 1.0;
+  if (!orc) return 0.0;
+  k = (double)custo / (double)orc;
+  return k <= GIF_ESTICA_MAX ? k : 0.0;
 }
 
 #ifdef NV_GIF_ANIMA
@@ -569,7 +584,8 @@ static int webpProximo(GifDec *d, int *y0s, int *y1s) {
 int gif_webp_suportado(void) { return 0; }
 #endif
 
-GifDec *gif_dec_abrir(unsigned char *b, size_t n, int saidaW, int saidaH) {
+static GifDec *decAbrir(unsigned char *b, size_t n, int saidaW, int saidaH,
+                        int primeiro) {
   GifDec *d;
   GifQuadro *q;
   int nq, telaW, telaH, i, precisaSalvo = 0;
@@ -584,10 +600,10 @@ GifDec *gif_dec_abrir(unsigned char *b, size_t n, int saidaW, int saidaH) {
   // de 65535x65535 pediria 17 GB. Nenhuma capa ou avatar chega perto.
   if (telaW < 1 || telaH < 1 || (long)telaW * telaH > GIF_TELA_MAX ||
       saidaW < 1 || saidaH < 1 || saidaW > telaW || saidaH > telaH) { free(b); return NULL; }
-  q = (GifQuadro *)malloc(sizeof *q * NV_GIF_MAX_Q);
+  q = (GifQuadro *)malloc(sizeof *q * (primeiro ? 1 : NV_GIF_MAX_Q));
   if (!q) { free(b); return NULL; }
-  nq = gif_mapear(b, n, q, NV_GIF_MAX_Q);
-  if (nq < 2) { free(q); free(b); return NULL; }
+  nq = gif_mapear(b, n, q, primeiro ? 1 : NV_GIF_MAX_Q);
+  if (nq < (primeiro ? 1 : 2)) { free(q); free(b); return NULL; }
   { GifQuadro *menor = (GifQuadro *)realloc(q, sizeof *q * (size_t)nq); if (menor) q = menor; }
   d = (GifDec *)calloc(1, sizeof *d);
   if (!d) { free(q); free(b); return NULL; }
@@ -607,6 +623,43 @@ GifDec *gif_dec_abrir(unsigned char *b, size_t n, int saidaW, int saidaH) {
   for (i = 0; i <= saidaW; i++) d->colX[i] = (int)((long)i * telaW / saidaW);
   for (i = 0; i <= saidaH; i++) d->linY[i] = (int)((long)i * telaH / saidaH);
   return d;
+}
+
+GifDec *gif_dec_abrir(unsigned char *b, size_t n, int saidaW, int saidaH) {
+  return decAbrir(b, n, saidaW, saidaH, 0);
+}
+
+unsigned char *gif_primeiro_rgba(const unsigned char *b, size_t n, int largMax,
+                                 int *w, int *h, int *originalW, int *originalH) {
+  int ow, oh, sw, sh, y0, y1;
+  unsigned char *copia, *rgba = NULL;
+  GifDec *d;
+  if (w) *w = 0;
+  if (h) *h = 0;
+  if (originalW) *originalW = 0;
+  if (originalH) *originalH = 0;
+  if (!b || n < 14 || n > 32u * 1024u * 1024u || memcmp(b, "GIF8", 4)) return NULL;
+  ow = b[6] | (b[7] << 8); oh = b[8] | (b[9] << 8);
+  if (ow < 1 || oh < 1 || (long)ow * oh > GIF_TELA_MAX) return NULL;
+  gif_tamanho_saida(ow, oh, largMax > 0 ? largMax : ow, &sw, &sh);
+  copia = malloc(n);
+  if (!copia) return NULL;
+  memcpy(copia, b, n);
+  d = decAbrir(copia, n, sw, sh, 1);
+  if (!d) return NULL;
+  if (gif_dec_proximo(d, &y0, &y1) == 0) {
+    size_t bytes = (size_t)sw * sh * 4;
+    rgba = malloc(bytes);
+    if (rgba) {
+      memcpy(rgba, gif_dec_saida(d), bytes);
+      if (w) *w = sw;
+      if (h) *h = sh;
+      if (originalW) *originalW = ow;
+      if (originalH) *originalH = oh;
+    }
+  }
+  gif_dec_fechar(d);
+  return rgba;
 }
 
 int gif_dec_quadros(const GifDec *d) { return d ? d->nq : 0; }
@@ -895,6 +948,8 @@ static int    contouVolta;
 // O GIF preso passou do orcamento: gif_textura devolve 0 sem reler o arquivo
 // ate o caminho mudar (ou gif_parar/gif_ocioso soltar).
 static int    recusado;
+// Fator de camera lenta (gif_estica) do GIF preso: 1 = no ritmo do arquivo.
+static double estica = 1.0;
 // Ultima vez que alguem pediu gif_textura (ms). E o que gif_ocioso olha.
 static double ultimoUso;
 #ifndef NV_GIF_OCIOSO_MS
@@ -926,6 +981,12 @@ static void abrir(const char *caminho, int largAlvo) {
     telaW = b[6] | (b[7] << 8);
     telaH = b[8] | (b[9] << 8);
   }
+#ifdef NV_ANDROID
+  /* Low-RAM TVs keep the same first-frame artwork without an animation worker. */
+  if (gif_js_memoria_gb() < 3.0) {
+    free(b); recusado = 1; return;
+  }
+#endif
   gif_tamanho_saida(telaW, telaH, largAlvo, &fioW, &fioH);
   fio = gif_fio_abrir(b, n, fioW, fioH);      // dono de `b` daqui em diante
   if (!fio) {
@@ -941,13 +1002,19 @@ static void abrir(const char *caminho, int largAlvo) {
   // foto parada.
   custo = gif_custo(fioQ, telaW, telaH, nominal);
   orc = orcamento();
-  if (orc != GIF_SEM_TETO && custo > orc) {
-    printf("[gif] %d quadros %dx%d em %d ms = %.1f MB/s, acima do orcamento de %u MB/s: fica o primeiro quadro\n",
-           fioQ, telaW, telaH, nominal, custo / (1024.0 * 1024.0), (unsigned)(orc / (1024 * 1024)));
+  estica = gif_estica(custo, orc);
+  if (estica == 0.0) {
+    printf("[gif] %d quadros %dx%d em %d ms = %.1f MB/s, acima de %.0fx o orcamento de %u MB/s: fica o primeiro quadro\n",
+           fioQ, telaW, telaH, nominal, custo / (1024.0 * 1024.0), (double)GIF_ESTICA_MAX, (unsigned)(orc / (1024 * 1024)));
     fflush(stdout);
     soltarFioAtual();
     recusado = 1;
     return;
+  }
+  if (estica > 1.0) {
+    printf("[gif] %d quadros %dx%d em %d ms = %.1f MB/s, acima do orcamento de %u MB/s: anima %.2fx mais lento\n",
+           fioQ, telaW, telaH, nominal, custo / (1024.0 * 1024.0), (unsigned)(orc / (1024 * 1024)), estica);
+    fflush(stdout);
   }
   texW = texH = 0;
   proxTroca = 0.0;
@@ -970,9 +1037,11 @@ static void subir(const GifFaixa *f) {
   }
   // SO AS LINHAS QUE MUDARAM. Linhas inteiras sao contiguas no buffer, entao
   // uma faixa e um glTexSubImage2D so (WebGL 1 nao tem UNPACK_ROW_LENGTH).
-  if (f->y1 > f->y0)
+  if (f->y1 > f->y0) {
     glTexSubImage2D(GL_TEXTURE_2D, 0, 0, f->y0, fioW, f->y1 - f->y0,
                     GL_RGBA, GL_UNSIGNED_BYTE, f->px);
+    gfx_vidro_sujar();   // mesmo nome, outra imagem: o hash do vidro nao ve
+  }
 }
 
 GLuint gif_textura(const char *caminho, int largAlvo) {
@@ -1011,13 +1080,13 @@ GLuint gif_textura(const char *caminho, int largAlvo) {
     gif_fio_devolver(fio);
     if (!mostrou) {
       mostrou = 1;
-      proxTroca = agora + f.atraso;
+      proxTroca = agora + f.atraso * estica;
       inicioVolta = agora;
       continue;
     }
     // Relogio ancorado no vencimento ANTERIOR, nao em `agora`: chegar 20 ms
     // atrasado num quadro nao empurra todos os seguintes.
-    proxTroca += f.atraso;
+    proxTroca += f.atraso * estica;
     if (f.quadro == 0 && !contouVolta) {
       int nq = 0; double ms = 0.0;
       contouVolta = 1;

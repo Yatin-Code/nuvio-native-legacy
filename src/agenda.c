@@ -1,3 +1,4 @@
+#include "arteurl.h"
 #include "agenda.h"
 #include "dados.h"
 #include "perfis.h"
@@ -6,9 +7,14 @@
 #include "descoberta.h"
 #include "idioma.h"
 #include "rede.h"
+#include "metaprov.h"
 #include "js.h"
 #include "trakt.h"
 #include "vistoep.h"
+#include "addons.h"
+#include "streams.h"
+#include "perfisessao.h"
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +38,7 @@
 typedef struct {
   char imdb[24];
   char titulo[160];
-  char poster[512];
+  char poster[NV_ARTE_URL_MAX];
   int  situacao;
   int  temporada, episodio;
   char nomeEp[120];
@@ -51,6 +57,8 @@ typedef struct {
   // progresso ou de um lembrete e que, sem isto, ficava com a linha de apoio
   // vazia. Ultimo campo da linha do TSV, pela regra de gravarCache.
   char genero[48];
+  // Arte de paisagem (still do proximo episodio ou backdrop). 17o campo.
+  char fundo[512];
 } AgReg;
 
 static AgReg cache[AG_CACHE_MAX];
@@ -68,10 +76,16 @@ static int   cacheSujo;
 // Nao e `data`: essa acompanha os adiamentos e ja nao diz quando o pedido foi
 // feito. Arquivo antigo, sem o campo: o historico usa `data` no lugar, que e o
 // primeiro episodio que o lembrete podia ter anunciado.
-typedef struct { char imdb[24]; char data[12]; int avisado; char desde[12]; } AgLembrete;
+typedef struct {
+  char imdb[24], data[12]; int avisado; char desde[12];
+  int filme, disponivel;
+  long long ultima;
+  char titulo[160], poster[NV_ARTE_URL_MAX];
+} AgLembrete;
 #define AG_LEMB_MAX 120
 static AgLembrete lembretes[AG_LEMB_MAX];
 static int nLembretes;
+static unsigned filmesRevisao;
 
 static AgItem lista[AG_MAX];
 static int    nLista;
@@ -279,12 +293,8 @@ void agenda_apoio(const AgItem *it, char *dst, size_t tam) {
     u += (size_t)snprintf(dst + u, tam - u, "%s", u ? " \xc2\xb7 " : "");
   if (it->duracao > 0 && u < tam)
     u += (size_t)snprintf(dst + u, tam - u, i18n("%d min"), it->duracao);
-  if (it->temporadas > 0 && u + 1 < tam)
-    u += (size_t)snprintf(dst + u, tam - u, "%s", u ? " \xc2\xb7 " : "");
-  if (it->temporadas > 0 && u < tam)
-    snprintf(dst + u, tam - u,
-             it->temporadas == 1 ? i18n("%d temporada") : i18n("%d temporadas"),
-             it->temporadas);
+  // A CONTAGEM DE TEMPORADAS SAIU (mockup, tela 8): a meta do cartao e "rede ·
+  // duracao". O campo continua no registro e no disco.
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +368,7 @@ static const char *campo(const char *p, char *dst, size_t tam) {
 // perde a sinopse e ganha de volta na proxima passada do fio. Inserir no MEIO
 // deslocaria todos os campos seguintes em silencio, e o sintoma seria uma data
 // no lugar do nome do episodio.
-#define AG_LINHA_BYTES 1600
+#define AG_LINHA_BYTES (2200 + NV_ARTE_URL_MAX - 512)
 
 static void gravarCache(void) {
   char *txt;
@@ -369,22 +379,23 @@ static void gravarCache(void) {
   if (!txt) return;
   txt[0] = 0;
   for (i = 0; i < nCache; i++) {
-    char t[160], po[512], ne[120], si[400], re[64], ge[48];
+    char t[160], po[NV_ARTE_URL_MAX], ne[120], si[400], re[64], ge[48], fu[512];
     limpo(t, sizeof t, cache[i].titulo);
     limpo(po, sizeof po, cache[i].poster);
     limpo(ne, sizeof ne, cache[i].nomeEp);
     limpo(si, sizeof si, cache[i].sinopse);
     limpo(re, sizeof re, cache[i].rede);
     limpo(ge, sizeof ge, cache[i].genero);
+    limpo(fu, sizeof fu, cache[i].fundo);
     usado += (size_t)snprintf(txt + usado, cap - usado,
                               "%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%lld"
-                              "\t%s\t%s\t%s\t%d\t%d\t%s\n",
+                              "\t%s\t%s\t%s\t%d\t%d\t%s\t%s\n",
                               cache[i].imdb, t, po, cache[i].situacao,
                               cache[i].temporada, cache[i].episodio, ne,
                               cache[i].dataProx, cache[i].dataUlt,
                               cache[i].visto,
                               si, cache[i].tipoEp, re,
-                              cache[i].duracao, cache[i].temporadas, ge);
+                              cache[i].duracao, cache[i].temporadas, ge, fu);
     if (usado + AG_LINHA_BYTES >= cap) break;
   }
   dados_gravar_leve(arquivo("agenda"), txt);
@@ -419,6 +430,7 @@ static void lerCache(void) {
     q = campo(q, n, sizeof n); r.duracao = atoi(n);
     q = campo(q, n, sizeof n); r.temporadas = atoi(n);
     q = campo(q, r.genero, sizeof r.genero);
+    q = campo(q, r.fundo, sizeof r.fundo);
     (void)q;
     if (r.imdb[0]) cache[nCache++] = r;
     while (*p && *p != '\n') p++;
@@ -428,15 +440,19 @@ static void lerCache(void) {
 }
 
 static void gravarLembretes(void) {
-  char txt[AG_LEMB_MAX * 64 + 8];
-  size_t usado = 0;
+  size_t cap = AG_LEMB_MAX * (NV_ARTE_URL_MAX + 256u), usado = 0;
+  char *txt = malloc(cap);
+  if (!txt) return;
   int i;
   txt[0] = 0;
   for (i = 0; i < nLembretes; i++)
-    usado += (size_t)snprintf(txt + usado, sizeof txt - usado, "%s\t%s\t%d\t%s\n",
+    usado += (size_t)snprintf(txt + usado, cap - usado, "%s\t%s\t%d\t%s\t%d\t%d\t%lld\t%s\t%s\n",
                               lembretes[i].imdb, lembretes[i].data,
-                              lembretes[i].avisado, lembretes[i].desde);
+                              lembretes[i].avisado, lembretes[i].desde,
+                              lembretes[i].filme, lembretes[i].disponivel, lembretes[i].ultima,
+                              lembretes[i].titulo, lembretes[i].poster);
   dados_gravar(arquivo("lembretes"), txt);
+  free(txt);
 }
 
 static void lerLembretes(void) {
@@ -453,7 +469,12 @@ static void lerLembretes(void) {
     q = campo(q, l.imdb, sizeof l.imdb);
     q = campo(q, l.data, sizeof l.data);
     if (q) { q = campo(q, n, sizeof n); l.avisado = atoi(n); }
-    if (q) campo(q, l.desde, sizeof l.desde);
+    if (q) q = campo(q, l.desde, sizeof l.desde);
+    if (q) { q = campo(q, n, sizeof n); l.filme = atoi(n) == 1; }
+    if (q) { q = campo(q, n, sizeof n); l.disponivel = atoi(n) == 1; }
+    if (q) { q = campo(q, n, sizeof n); l.ultima = atoll(n); }
+    if (q) q = campo(q, l.titulo, sizeof l.titulo);
+    if (q) campo(q, l.poster, sizeof l.poster);
     if (!ehIso(l.desde)) l.desde[0] = 0;
     if (l.imdb[0]) lembretes[nLembretes++] = l;
     while (*p && *p != '\n') p++;
@@ -560,7 +581,7 @@ void agenda_registrar(const char *imdb, const char *titulo, const char *poster,
     // mais e volta a estar por dar.
     int i;
     for (i = 0; i < nLembretes; i++)
-      if (!strcmp(lembretes[i].imdb, id) &&
+      if (!lembretes[i].filme && !strcmp(lembretes[i].imdb, id) &&
           strcmp(lembretes[i].data, r->dataProx)) {
         snprintf(lembretes[i].data, sizeof lembretes[i].data, "%s", r->dataProx);
         lembretes[i].avisado = 0;
@@ -594,6 +615,22 @@ void agenda_registrar_extra(const char *imdb, const char *sinopse,
   pthread_mutex_unlock(&trava);
 }
 
+void agenda_registrar_fundo(const char *imdb, const char *url) {
+  char id[24];
+  AgReg *r;
+  if (!url || !url[0]) return;
+  serieDe(id, sizeof id, imdb);
+  if (!id[0]) return;
+  pthread_mutex_lock(&trava);
+  r = acharTrancado(id);
+  if (r && strcmp(r->fundo, url)) {
+    snprintf(r->fundo, sizeof r->fundo, "%s", url);
+    cacheSujo = 1;
+    gravarCache();
+  }
+  pthread_mutex_unlock(&trava);
+}
+
 const AgItem *agenda_registro(const char *imdb) {
   static AgItem it;
   char id[24];
@@ -615,6 +652,7 @@ const AgItem *agenda_registro(const char *imdb) {
   snprintf(it.tipoEp, sizeof it.tipoEp, "%s", r->tipoEp);
   snprintf(it.rede, sizeof it.rede, "%s", r->rede);
   snprintf(it.genero, sizeof it.genero, "%s", r->genero);
+  snprintf(it.fundo, sizeof it.fundo, "%s", r->fundo);
   it.duracao = r->duracao; it.temporadas = r->temporadas;
   pthread_mutex_unlock(&trava);
   it.lembrete = agenda_lembrete(id);
@@ -685,9 +723,131 @@ int agenda_lembrete(const char *imdb) {
   if (!id[0]) return 0;
   pthread_mutex_lock(&trava);
   for (i = 0; i < nLembretes; i++)
-    if (!strcmp(lembretes[i].imdb, id)) { tem = 1; break; }
+    if (!strcmp(lembretes[i].imdb, lembretes[i].filme ? imdb : id)) { tem = 1; break; }
   pthread_mutex_unlock(&trava);
   return tem;
+}
+
+int agenda_filme_elegivel(const char *lancamento, const char *digital, int fontes) {
+  return fontes == 0 || (!ehIso(lancamento) && !ehIso(digital)) ||
+    (ehIso(lancamento) && strncmp(lancamento, agenda_hoje(), 10) > 0) ||
+    (ehIso(digital) && strncmp(digital, agenda_hoje(), 10) > 0);
+}
+
+int agenda_filme_alternar(const char *imdb, const char *titulo, const char *poster) {
+  int novo = 0;
+  if (!imdb || !*imdb || strlen(imdb) >= sizeof lembretes[0].imdb) return 0;
+  agenda_iniciar();
+  pthread_mutex_lock(&trava);
+  for (int i = 0; i < nLembretes; i++) if (!strcmp(lembretes[i].imdb, imdb)) {
+    lembretes[i] = lembretes[--nLembretes]; filmesRevisao++;
+    gravarLembretes(); pthread_mutex_unlock(&trava); return 0;
+  }
+  filmesRevisao++;
+  if (nLembretes < AG_LEMB_MAX) {
+    AgLembrete *l = &lembretes[nLembretes++];
+    memset(l, 0, sizeof *l); l->filme = 1;
+    snprintf(l->imdb, sizeof l->imdb, "%s", imdb);
+    limpo(l->titulo, sizeof l->titulo, titulo);
+    limpo(l->poster, sizeof l->poster, poster);
+    novo = 1; gravarLembretes();
+  }
+  pthread_mutex_unlock(&trava);
+  return novo;
+}
+
+int agenda_filme_devido(AgItem *saida) {
+  int achou = 0;
+  pthread_mutex_lock(&trava);
+  for (int i = 0; i < nLembretes; i++) {
+    AgLembrete *l = &lembretes[i];
+    if (!l->filme || !l->disponivel) continue;
+    memset(saida, 0, sizeof *saida);
+    snprintf(saida->imdb, sizeof saida->imdb, "%s", l->imdb);
+    snprintf(saida->titulo, sizeof saida->titulo, "%s", l->titulo);
+    snprintf(saida->poster, sizeof saida->poster, "%s", l->poster);
+    achou = 1; break;
+  }
+  pthread_mutex_unlock(&trava);
+  return achou;
+}
+
+void agenda_filme_aberto(const char *imdb) {
+  pthread_mutex_lock(&trava);
+  for (int i = 0; i < nLembretes; i++)
+    if (lembretes[i].filme && lembretes[i].disponivel && !strcmp(lembretes[i].imdb, imdb)) {
+      lembretes[i] = lembretes[--nLembretes]; gravarLembretes(); break;
+    }
+  pthread_mutex_unlock(&trava);
+}
+
+static int filmeVenceu(const AgLembrete *l, long long agora) {
+  return l->filme && !l->disponivel && (!l->ultima || agora - l->ultima >= 6 * 60 * 60);
+}
+static int filmeResultado(AgLembrete *l, int fontes) {
+  if (!l->filme || l->disponivel || fontes <= 0) return 0;
+  l->disponivel = 1; return 1;
+}
+
+typedef struct {
+  AddonsConsulta *consulta;
+  uint64_t sessao;
+  unsigned revisao;
+  long long agora;
+  Uint32 inicio;
+  char ids[AG_LEMB_MAX][24];
+  int n, resultado[AG_LEMB_MAX];
+  atomic_int pronto;
+} AgFilmesBusca;
+static AgFilmesBusca filmesBusca;
+static pthread_t filmesFio;
+static int filmesVivo;
+
+static int filmesCancelados(void *u) {
+  AgFilmesBusca *b = u;
+  return !nv_perfil_sessao_atual(b->sessao) || SDL_GetTicks() - b->inicio >= 60000u;
+}
+static void *filmesBuscar(void *u) {
+  AgFilmesBusca *b = u;
+  // Every request has its own deadline; remaining alerts continue serially.
+  for (int i = 0; i < b->n && !filmesCancelados(b); i++)
+    b->resultado[i] = stream_filme_consultar(b->consulta, b->ids[i], filmesCancelados, b);
+  atomic_store(&b->pronto, 1);
+  return NULL;
+}
+void agenda_filmes_atualizar(void) {
+  AgFilmesBusca *b = &filmesBusca;
+  if (filmesVivo) {
+    if (!atomic_load(&b->pronto)) return;
+    pthread_join(filmesFio, NULL); filmesVivo = 0;
+    if (nv_perfil_sessao_atual(b->sessao) && b->revisao == filmesRevisao && addons_consulta_atual(b->consulta)) {
+      pthread_mutex_lock(&trava);
+      for (int i = 0; i < b->n; i++) for (int k = 0; k < nLembretes; k++)
+        if (b->resultado[i] != -2 && !strcmp(b->ids[i], lembretes[k].imdb)) {
+          lembretes[k].ultima = b->agora;
+          filmeResultado(&lembretes[k], b->resultado[i]);
+        }
+      gravarLembretes(); pthread_mutex_unlock(&trava);
+    }
+    addons_consulta_liberar(b->consulta); b->consulta = NULL;
+  }
+  agenda_iniciar();
+  if (!addons_n() || addons_ocupado()) return;
+  long long agora = (long long)time(NULL);
+  b->n = 0;
+  pthread_mutex_lock(&trava);
+  for (int i = 0; i < nLembretes; i++) if (filmeVenceu(&lembretes[i], agora))
+    snprintf(b->ids[b->n++], sizeof b->ids[0], "%s", lembretes[i].imdb);
+  pthread_mutex_unlock(&trava);
+  if (!b->n || !(b->consulta = addons_consulta_capturar())) return;
+  b->sessao = nv_perfil_sessao_ler(); b->inicio = SDL_GetTicks();
+  b->revisao = filmesRevisao; b->agora = agora;
+  for (int i = 0; i < b->n; i++) b->resultado[i] = -2;
+  atomic_store(&b->pronto, 0);
+  if (pthread_create(&filmesFio, NULL, filmesBuscar, b)) {
+    addons_consulta_liberar(b->consulta); b->consulta = NULL; return;
+  }
+  filmesVivo = 1;
 }
 
 int agenda_pode_lembrar(const char *imdb) {
@@ -733,9 +893,21 @@ void agenda_marcar_avisado(const char *imdb) {
   serieDe(id, sizeof id, imdb);
   pthread_mutex_lock(&trava);
   for (i = 0; i < nLembretes; i++)
-    if (!strcmp(lembretes[i].imdb, id)) { lembretes[i].avisado = 1; break; }
+    if (!strcmp(lembretes[i].imdb, lembretes[i].filme ? imdb : id)) {
+      if (lembretes[i].filme) lembretes[i] = lembretes[--nLembretes];
+      else lembretes[i].avisado = 1;
+      break;
+    }
   gravarLembretes();
   pthread_mutex_unlock(&trava);
+}
+
+int agenda_lembretes_pendentes(void) {
+  int i, q = 0;
+  pthread_mutex_lock(&trava);
+  for (i = 0; i < nLembretes; i++) if (!lembretes[i].filme && !lembretes[i].avisado) q++;
+  pthread_mutex_unlock(&trava);
+  return q;
 }
 
 int agenda_devidos(const AgItem **saida, int max) {
@@ -812,6 +984,7 @@ static void poe(const char *imdb, const char *titulo, const char *poster) {
     snprintf(it->tipoEp, sizeof it->tipoEp, "%s", r->tipoEp);
     snprintf(it->rede, sizeof it->rede, "%s", r->rede);
     snprintf(it->genero, sizeof it->genero, "%s", r->genero);
+    snprintf(it->fundo, sizeof it->fundo, "%s", r->fundo);
     it->duracao = r->duracao; it->temporadas = r->temporadas;
     // O cache e quem tem o titulo bom quando o catalogo ainda nao publicou —
     // e o caso do primeiro arranque, em que a tela abre antes da descoberta.
@@ -819,6 +992,13 @@ static void poe(const char *imdb, const char *titulo, const char *poster) {
       snprintf(it->titulo, sizeof it->titulo, "%s", r->titulo);
     if (!it->poster[0] && r->poster[0])
       snprintf(it->poster, sizeof it->poster, "%s", r->poster);
+  }
+  // Sem arte de paisagem no registro, o backdrop que o CATALOGO ja tem (e que a
+  // home provavelmente ja pos no cache de textura).
+  if (!it->fundo[0]) {
+    int idc = cat_indice_por_imdb(id);
+    const CatItem *ci = idc >= 0 ? cat_item(idc) : NULL;
+    if (ci && ci->backdrop[0]) snprintf(it->fundo, sizeof it->fundo, "%s", ci->backdrop);
   }
   it->lembrete = agenda_lembrete(id);
 }
@@ -856,8 +1036,9 @@ int agenda_montar(void) {
   { char ids[AG_LEMB_MAX][24];
     int k, q;
     pthread_mutex_lock(&trava);
-    q = nLembretes;
-    for (k = 0; k < q; k++) snprintf(ids[k], sizeof ids[k], "%s", lembretes[k].imdb);
+    q = 0;
+    for (k = 0; k < nLembretes; k++)
+      if (!lembretes[k].filme) snprintf(ids[q++], sizeof ids[0], "%s", lembretes[k].imdb);
     pthread_mutex_unlock(&trava);
     for (k = 0; k < q && nLista < AG_MAX; k++) poe(ids[k], NULL, NULL); }
 
@@ -948,14 +1129,26 @@ static char *baixar(const char *url, const char *const *cab, int *st) {
   return c;
 }
 
+// GET do metaprov (Nuvio, depois Cinemeta) pelo mesmo gancho de teste.
+static char *metaGetAg(const char *url, int seg, int *st, void *ctx) {
+  int s = 0;
+  char *c = baixarTeste ? baixarTeste(url, seg, NULL, &s)
+                        : rede_baixar_st(url, seg, NULL, &s);
+  (void)ctx;
+  if (st) *st = s;
+  if (c && (s < 200 || s >= 300)) { free(c); c = NULL; }
+  return c;
+}
+
 // O que as fontes juntaram para UMA serie, antes de ir ao cache. Mesmos campos
 // de AgReg; `prox`/`ult` = alguma fonte ja AFIRMOU o proximo/ultimo episodio
 // (inclusive "nao ha"), e a seguinte nao mexe mais nele.
 typedef struct {
-  char titulo[160], poster[512], status[32];
+  char titulo[160], poster[NV_ARTE_URL_MAX], status[32];
   int  temp, ep;
   char nomeEp[120], dataProx[16], dataUlt[16];
   char sinopse[400], tipoEp[24], rede[64], genero[48];
+  char fundo[512];         // still do proximo episodio, senao backdrop
   int  duracao, temporadas;
   int  prox, ult;
   const char *fonte;       // quem decidiu o proximo; NULL = ninguem
@@ -998,6 +1191,11 @@ static int tmdbLer(AgBusca *b, const char *corpo) {
       js_texto(o, of, "overview", b->sinopse, sizeof b->sinopse);
       js_texto(o, of, "episode_type", b->tipoEp, sizeof b->tipoEp);
       b->duracao = (int)js_num(o, of, "runtime", 0.0);
+      // O STILL do episodio, quando o TMDB ja tem (raro antes de ir ao ar).
+      { char sp[200] = "";
+        js_texto(o, of, "still_path", sp, sizeof sp);
+        if (sp[0] == '/')
+          snprintf(b->fundo, sizeof b->fundo, "https://image.tmdb.org/t/p/w780%s", sp); }
     }
   }
   bl = strstr(corpo, "\"last_episode_to_air\"");
@@ -1043,6 +1241,13 @@ static int tmdbLer(AgBusca *b, const char *corpo) {
     js_texto_raiz_em(corpo, fim, "name", b->titulo, sizeof b->titulo);
     js_texto_raiz_em(corpo, fim, "poster_path", pp, sizeof pp);
     if (pp[0] == '/') snprintf(b->poster, sizeof b->poster, "https://image.tmdb.org/t/p/w342%s", pp); }
+  // O BACKDROP da raiz, quando o episodio nao trouxe still: a arte grande da
+  // coluna da esquerda da Agenda.
+  if (!b->fundo[0]) {
+    char bp[200] = "";
+    js_texto_raiz_em(corpo, fim, "backdrop_path", bp, sizeof bp);
+    if (bp[0] == '/') snprintf(b->fundo, sizeof b->fundo, "https://image.tmdb.org/t/p/w780%s", bp);
+  }
   // `status` sempre vem no corpo do TMDB; e ele que autoriza apagar uma data
   // velha em agenda_registrar. Sem ele nao se conclui nada.
   if (!b->status[0] && !b->dataProx[0]) return 0;
@@ -1217,12 +1422,13 @@ static int cinemetaLer(AgBusca *b, const char *corpo, const char *hoje) {
     // cartaz sai do cache de textura em vez de ser uma segunda copia.
     char *k = strstr(b->poster, "/poster/small/");
     if (k) {
-      char resto[512];
+      char resto[NV_ARTE_URL_MAX];
       snprintf(resto, sizeof resto, "%s", k + strlen("/poster/small/"));
       snprintf(k, sizeof b->poster - (size_t)(k - b->poster), "/poster/medium/%s", resto);
     }
   }
   if (!b->status[0]) js_texto_raiz_em(m, fim, "status", b->status, sizeof b->status);
+  if (!b->fundo[0]) js_texto_raiz_em(m, fim, "background", b->fundo, sizeof b->fundo);
   if (!b->genero[0]) {
     const char *g = js_array(m, fim, "genres");
     if (g && *g == '"') {
@@ -1234,6 +1440,7 @@ static int cinemetaLer(AgBusca *b, const char *corpo, const char *hoje) {
   if (b->duracao <= 0) {
     if (js_texto_raiz_em(m, fim, "runtime", s, sizeof s)) b->duracao = atoi(s);
   }
+  if (js_videos_temporadas_falsas(m)) return achouAlgo || b->status[0];
   for (v = js_array(m, fim, "videos"); v && v < fim; ) {
     const char *vf = js_fim(v);
     char rel[40] = "", dia[12];
@@ -1250,6 +1457,8 @@ static int cinemetaLer(AgBusca *b, const char *corpo, const char *hoje) {
           pT = t; pE = e;
           pNome[0] = 0; pSin[0] = 0;
           js_texto_raiz_em(v, vf, "name", pNome, sizeof pNome);
+          // O catalogo do Nuvio chama o nome do episodio de "title".
+          if (!pNome[0]) js_texto_raiz_em(v, vf, "title", pNome, sizeof pNome);
           js_texto_raiz_em(v, vf, "overview", pSin, sizeof pSin);
         }
       } else if (strcmp(dia, uData) > 0) {
@@ -1282,10 +1491,7 @@ static int cinemetaLer(AgBusca *b, const char *corpo, const char *hoje) {
 }
 
 static void cinemetaBuscar(AgBusca *b, const char *imdb, const char *hoje) {
-  char url[160];
-  char *corpo;
-  snprintf(url, sizeof url, "https://v3-cinemeta.strem.io/meta/series/%s.json", imdb);
-  corpo = baixar(url, NULL, NULL);
+  char *corpo = metaprov_meta_com("series", imdb, AG_REDE_S, metaGetAg, NULL, NULL);
   if (!corpo) return;
   cinemetaLer(b, corpo, hoje);
   free(corpo);
@@ -1302,6 +1508,7 @@ static int gravarBusca(const char *imdb, const char *titulo, const AgBusca *b) {
                    b->nomeEp, b->dataProx, b->dataUlt);
   agenda_registrar_extra(imdb, b->sinopse, b->tipoEp, b->rede, b->genero,
                          b->duracao, b->temporadas);
+  agenda_registrar_fundo(imdb, b->fundo);
   return 1;
 }
 
@@ -1343,7 +1550,7 @@ static void buscarSerie(const char *imdb, const char *titulo, const char *poster
 // garante uma fila so por vez, entao os vetores podem ser estaticos.
 static char filaImdb[AG_MAX][24];
 static char filaTit[AG_MAX][160];
-static char filaPoster[AG_MAX][512];
+static char filaPoster[AG_MAX][NV_ARTE_URL_MAX];
 static long filaTmdb[AG_MAX];
 static int  nFila;
 static char filaHoje[12];
@@ -1455,7 +1662,7 @@ static int lerVideos(const char *corpo, AgEp *saida, int max) {
   const char *m = corpo ? strstr(corpo, "\"meta\"") : NULL;
   const char *fim, *v;
   int n = 0, i, j;
-  if (!m || !(m = strchr(m, '{'))) return 0;
+  if (!m || !(m = strchr(m, '{')) || js_videos_temporadas_falsas(m)) return 0;
   fim = js_fim(m);
   for (v = js_array(m, fim, "videos"); v && v < fim && n < max; ) {
     const char *vf = js_fim(v);
@@ -1545,13 +1752,11 @@ static void *fioHistorico(void *arg) {
   HistPedido *p = arg;
   static AgEp tmp[AG_EPS_MAX];
   for (;;) {
-    char url[160];
     char *corpo;
     char feito[24];
     int n = 0, outra;
     snprintf(feito, sizeof feito, "%s", p->imdb);
-    snprintf(url, sizeof url, "https://v3-cinemeta.strem.io/meta/series/%s.json", p->imdb);
-    corpo = baixar(url, NULL, NULL);
+    corpo = metaprov_meta_com("series", p->imdb, AG_REDE_S, metaGetAg, NULL, NULL);
     if (corpo) n = lerVideos(corpo, tmp, AG_EPS_MAX);
     pthread_mutex_lock(&trava);
     outra = strcmp(histImdb, p->imdb) != 0;

@@ -20,6 +20,7 @@
 // dentro de um processo); o disco dublado e uma pasta de verdade, entao o
 // que uma sessao grava a seguinte le. Ver tests/syncordem.sh.
 #include "sync.h"
+#include "nvtmp.h"
 #include "addons.h"
 #include "catordem.h"
 #include "catordemcache.h"
@@ -35,10 +36,15 @@
 
 static const char *pasta(void) {
   const char *d = getenv("NV_T_DIR");
-  return d && *d ? d : "/tmp";
+  return d && *d ? d : nvt_dir();
 }
 static void caminho(char *dst, size_t tam, const char *nome) {
   snprintf(dst, tam, "%s/%s", pasta(), nome);
+}
+const char *dados_dir(void) { return pasta(); }
+void dados_uuid(char *dst, unsigned tam) {
+  static unsigned seq;
+  snprintf(dst, tam, "%08x-0000-4000-8000-%012x", (unsigned)getpid(), ++seq);
 }
 char *dados_ler(const char *nome) {
   char c[600];
@@ -56,14 +62,16 @@ char *dados_ler(const char *nome) {
   return b;
 }
 int dados_gravar(const char *nome, const char *conteudo) {
-  char c[600];
+  char c[600], tmp[608];
   FILE *f;
   caminho(c, sizeof c, nome);
-  f = fopen(c, "wb");
+  snprintf(tmp, sizeof tmp, "%s.tmp", c);
+  f = fopen(tmp, "wb");
   if (!f) return 0;
-  fputs(conteudo ? conteudo : "", f);
-  fclose(f);
-  return 1;
+  int ok = fputs(conteudo ? conteudo : "", f) >= 0;
+  if (fclose(f)) ok = 0;
+  if (ok && !rename(tmp, c)) return 1;
+  remove(tmp); return 0;
 }
 int dados_apagar(const char *nome) {
   char c[600];
@@ -87,6 +95,9 @@ void perfis_esquecer(void)       { ativo = 1; escolhido = 0; }
 const ContaPerfil *perfis_item(int i) { (void)i; return NULL; }
 // Ajustes por perfil (ajustes.c) e a arte escolhida (arteescolha.c) nao entram
 // neste teste; o sync so os chama.
+const char *i18n(const char *s) { return s; }
+int ajustes_social(void) { return 1; }
+int ajustes_hist_conta(void) { return 1; }
 void ajustes_perfil_guardar(int perfil) { (void)perfil; }
 int  ajustes_perfil_restaurar(int perfil) { (void)perfil; return 0; }
 void ajustes_perfil_esquecer(void) { }
@@ -149,8 +160,24 @@ static int rpcCredencial;
 // Modo "troca": a RPC das colecoes do perfil 1 fica presa ate a pessoa trocar
 // para o 2 — o ciclo do 1 termina com o 2 ja ativo.
 static int segurarCol, puxandoCol;
+// #378: modo "legconta" — a conta devolve um blob de ajustes com o idioma da
+// legenda, e o que sync.c faz com ele fica anotado (stubs mais abaixo).
+static int modoBlob, blobsAplicados;
+static char idiomasConta[512];
+static const char *legContaValor = "en";   // valor da legenda no proximo blob
+static int idiomasChamadas;
 char *sessao_rpc(const char *funcao, const char *corpo, int *st) {
   *st = 200;
+  // modoBlob 2: so o perfil 1 tem blob na conta; o 2 nunca salvou ajustes.
+  if (modoBlob == 2 && !strcmp(funcao, "sync_pull_profile_settings_blob") &&
+      strstr(corpo, "\"p_profile_id\":2"))
+    return strdup("[]");
+  if (modoBlob && !strcmp(funcao, "sync_pull_profile_settings_blob"))
+  { char b[256];
+    snprintf(b, sizeof b, "[{\"settings_json\":{\"features\":{\"player_settings\":{"
+             "\"subtitle_preferred_language\":{\"type\":\"string\",\"value\":\"%s\"}}}}}]",
+             legContaValor);
+    return strdup(b); }
   if (!strcmp(funcao, "sync_pull_collections")) {
     int p1 = strstr(corpo, "\"p_profile_id\":1") != NULL;
     pthread_mutex_lock(&trava);
@@ -173,9 +200,14 @@ char *sessao_rpc(const char *funcao, const char *corpo, int *st) {
   }
   return strdup("[]");
 }
-char *sessao_tabela(const char *t, const char *q, int *st) { (void)t; (void)q; *st = 200; return strdup("[]"); }
-int  sessao_logada(void)          { return 1; }
-const char *sessao_usuario(void)  { return "conta-a"; }
+char *sessao_tabela(const char *t, const char *q, int *st) {
+  (void)t; (void)q; *st = 200;
+  return strdup("[]");
+}
+static const char *usuario = "conta-a";
+static int logada = 1;
+int  sessao_logada(void)          { return logada; }
+const char *sessao_usuario(void)  { return usuario; }
 int  nuvem_freio_ativo(void)      { return 0; }
 int  nuvem_erro_ausente(const char *c) { (void)c; return 0; }
 const char *nuvem_trakt_cliente(void) { return ""; }
@@ -192,21 +224,46 @@ void desc_remontar_fileiras(void) {
   snprintf(primeiraNaRemontagem, sizeof primeiraNaRemontagem, "%s", catordem_chave(0));
 }
 static int repeticoes;
+void desc_repetir_silencioso(void) {}
+#include "plugins.h"
+/* sync.c pushes/reads plugin repos (F09); this test has none. */
+void plugins_retrato(PlugRetrato *r) { memset(r, 0, sizeof *r); }
+int  plugins_confirmar(unsigned rev, unsigned geracao) { (void)rev; (void)geracao; return 0; }
+int  plugins_definir_da_conta(const PlugRepo *l, int n, unsigned g) { (void)l; (void)n; (void)g; return 0; }
+int  plugins_ler_conta(const char *json, PlugRepo *saida, int max) { (void)json; (void)saida; (void)max; return -1; }
+void plugins_esquecer(void) {}
+void plugins_perfil_mudou(void) {}
 void desc_repetir(void) { repeticoes++; }
 void desc_repetir_addons(void) { repeticoes++; }
 void desc_refazer_continuar(void) {}
+void desc_loc_apagar(void) {}
 void desc_esquecer(void) {}
 void desc_tmdb_definir(const char *c) { (void)c; }
 
 // ------------------------------------------------------------ o resto, mudo
 
+static int historicoPerfil;
+static char historicoDono[80];
+void cat_historico_contexto(const char *u, int p) {
+  snprintf(historicoDono, sizeof historicoDono, "%s", u); historicoPerfil = p;
+}
+
 int  addons_definir_lista(const AddonRemoto *l, int n) { (void)l; (void)n; return 0; }
 void addons_marcar_da_conta(int perfil) { (void)perfil; }
 void addons_esquecer(void) {}
 int  addons_exportar(AddonRemoto *s, int m) { (void)s; (void)m; return 0; }
+void addons_diferenca(const AddonRemoto *a, int na, const AddonRemoto *d, int nd,
+                      int *e, int *s, int *m) {
+  (void)a; (void)na; (void)d; (void)nd;
+  if (e) *e = 0; if (s) *s = 0; if (m) *m = 0;
+}
 void agenda_esquecer(void) {}
 void lembrete_esquecer_todos(void) {}
-int  ajustes_aplicar_blob(const char *j) { (void)j; return 0; }
+int  ajustes_aplicar_blob(const char *j) { (void)j; blobsAplicados++; return 0; }
+void ajustes_idiomas_da_conta(const char *b) {
+  idiomasChamadas++;
+  snprintf(idiomasConta, sizeof idiomasConta, "%s", b ? b : "");
+}
 void ajustes_definir_ocultar_nao_lancados(int l) { (void)l; }
 int  ajustes_mesclar_blob(const char *b, char **s) { (void)b; *s = NULL; return 0; }
 void ajustes_tmdb_idioma_relatar(const char *b) { (void)b; }
@@ -219,6 +276,11 @@ int  col_definir_json(const char *j) {
   if (j && strstr(j, "perfil2")) colDoCerto++;
   return 0;
 }
+unsigned col_revisao(void) { return 0; }
+int col_resposta_valida(const char *j) { return j && *j; }
+void colfileiras_sincronizar(void) {}
+int colfileiras_receber(const char *j) { return col_definir_json(j); }
+void colfileiras_contexto(void) {}
 int  contalib_aplicar_catalogo(void) { return 0; }
 int  contalib_aplicar_vistos(void) { return 0; }
 void contalib_esquecer(void) {}
@@ -231,12 +293,39 @@ void debrid_definir_chave(const char *s, const char *c) { (void)s; (void)c; }
 void debrid_esquecer(void) {}
 void extras_definir_chave(const char *c) { (void)c; }
 void fontepref_esquecer(void) {}
+void legmem_esquecer(void) {}
+void audiomem_esquecer(void) {}
 void homeestado_esquecer(void) {}
 void mapa_esquecer(void) {}
 void prog_esquecer_tudo(void) {}
+void perfilcont_esquecer(void) {}
 void recomenda_esquecer(void) {}
 void salvos_esquecer(void) {}
 void stalker_esquecer(void) {}
+int sessao_token_copiar(char *j, size_t nj) { snprintf(j, nj, "tok"); return 1; }
+uint64_t perfis_sessao_geracao(void) { return 0; }
+int perfis_sessao_atual(uint64_t g) { return !g; }
+int perfis_sessao_travar(uint64_t g) { return !g; }
+void perfis_sessao_destravar(void) {}
+void perfis_invalidar_sessao(void) {}
+int perfis_puxar_sessao(uint64_t s, const char *u, const char *t) { (void)s;(void)u;(void)t; return perfis_puxar(); }
+int sessao_identidade_local_copiar(char *u, size_t nu, char *j, size_t nj) {
+  snprintf(u, nu, "%s", sessao_usuario()); return sessao_token_copiar(j, nj);
+}
+void sessao_token_recusado(const char *t) { (void)t; }
+char *nuvem_rpc_com(const char *f, const char *c, const char *b, int *s) { return sessao_rpc(f, c, s); }
+char *nuvem_tabela(const char *f, const char *c, const char *b, int *s) { return sessao_tabela(f, c, s); }
+void debrid_conta_iniciar(void *p) { (void)p; }
+void debrid_conta_definir(const char *j) { (void)j; }
+void debrid_aplicar_chaves_conta(void) {}
+void desc_abrir_sessao(void) {}
+void desc_sessao_passo(void) {}
+int desc_sessao_preparada(void) { return 1; }
+void extras_abrir_sessao(void) {}
+void ajustes_perfil_padrao(void) {}
+void recomenda_esquecer_conta(void) {}
+int syncprog_puxar_sessao(int p, uint64_t s) { (void)p;(void)s; return 0; }
+int syncprog_empurrar_sessao(int p, uint64_t s) { (void)p;(void)s; return 0; }
 int  syncprog_aplicar(int *c) { (void)c; return 0; }
 int  syncprog_empurrar(void) { return 0; }
 void syncprog_esquecer(void) {}
@@ -249,6 +338,7 @@ void trakt_esquecer(void) {}
 TraEstado traktauth_estado(void) { return TRA_LIGADO; }
 void vistoep_esquecer(void) {}
 void xtream_esquecer(void) {}
+void servidores_esquecer_todos(void) {}
 
 // ------------------------------------------------------------ roteiro
 
@@ -270,6 +360,8 @@ static void ateTerminar(void) {
   quadros(3);
 }
 
+static void ciclo(void) { sync_iniciar(); ateTerminar(); }
+
 // argv[1] = perfil que a pessoa escolhe; argv[2] = "segura" para responder
 // com o primeiro ciclo ainda no ar, "tarde" para responder depois de ele
 // acabar e antes de sync_passo o recolher; argv[3] = o que se espera ("frio" quando
@@ -285,6 +377,59 @@ int main(int argc, char **argv) {
   int remAntes, rpcAntes;
 
   setvbuf(stdout, NULL, _IOLBF, 0);
+  if (argc > 1 && !strcmp(argv[1], "legconta-troca")) {
+    // Revisao P1: troca do 1 para o 2 com o ciclo do 1 no ar. O blob do 1
+    // ("en") chega DEPOIS da troca (sync_reaplicar_ajustes ja o tinha
+    // soltado), o ciclo do 1 e descartado, e o 2 nao tem blob na conta. Os
+    // idiomas do 1 nao podem virar "Da conta" do 2.
+    printf("-- sessao: troca 1 -> 2 com o blob do 1 chegando depois\n");
+    modoBlob = 2;
+    escolher(1);
+    segurarCol = 1;
+    sync_iniciar();
+    pthread_mutex_lock(&trava);
+    while (!puxandoCol) pthread_cond_wait(&sinal, &trava);
+    pthread_mutex_unlock(&trava);
+    escolher(2);
+    sync_trocar_perfil(1);
+    sync_iniciar();
+    pthread_mutex_lock(&trava);
+    segurarCol = 0;
+    pthread_cond_broadcast(&sinal);
+    pthread_mutex_unlock(&trava);
+    ateTerminar();
+    ateTerminar();
+    ciclo();                           // mais um ciclo do 2, ainda sem blob
+    confere("idiomas do perfil 1 nao vazam para o 2", !strstr(idiomasConta, "\"en\""));
+    printf("%s\n", falhas ? "FALHOU" : "PASSOU");
+    return falhas ? 1 : 0;
+  }
+  if (argc > 1 && !strcmp(argv[1], "legconta")) {
+    // #378: uma mudanca anterior em Ajustes deixou a protecao gravada. O blob
+    // nao e aplicado (certo), mas os idiomas da conta tem de chegar a
+    // linguas.c: e deles que "Da conta" vive, e eles nao sobrescrevem escolha
+    // local nenhuma.
+    printf("-- sessao: ajustes locais protegidos, conta com legenda en\n");
+    dados_gravar("ajustes-locais.txt", "1\n");
+    modoBlob = 1;
+    escolher(1);
+    ciclo();
+    confere("blob protegido nao aplicado", blobsAplicados == 0);
+    confere("idiomas da conta entregues mesmo protegido",
+            strstr(idiomasConta, "subtitle_preferred_language") && strstr(idiomasConta, "\"en\""));
+    // Revisao P2: troca de perfil solta o blob (sync_reaplicar_ajustes) e o
+    // do perfil novo, do MESMO tamanho, tende a cair no mesmo endereco. A
+    // deteccao de "blob novo" pelo ponteiro pulava os idiomas dele.
+    { sync_reaplicar_ajustes();
+      confere("troca de perfil limpa os idiomas da conta", idiomasChamadas >= 2 && !idiomasConta[0]);
+      sync_proteger_ajustes_locais();
+      legContaValor = "pt";
+      ciclo();
+      confere("blob do perfil novo entrega os idiomas dele",
+              strstr(idiomasConta, "\"pt\"") != NULL); }
+    printf("%s\n", falhas ? "FALHOU" : "PASSOU");
+    return falhas ? 1 : 0;
+  }
   if (argc > 1 && !strcmp(argv[1], "credencial")) {
     // O servidor recusa a credencial: a primeira tentativa sai, as seguintes
     // (renovacao do token, proximo ciclo) nao voltam a perguntar.
@@ -298,6 +443,18 @@ int main(int argc, char **argv) {
       return 1;
     }
     printf("  credencial recusada perguntada uma vez por provedor\n");
+    return 0;
+  }
+  if (argc > 1 && !strcmp(argv[1], "credencial-reabrir")) {
+    // Outro arranque, mesmo disco: a recusa gravada vale, nenhum RPC sai.
+    int a = sync_empurrar_credencial("trakt", "{\"access_token\":\"x\"}");
+    int c = sync_empurrar_credencial("simkl", "{\"access_token\":\"z\"}");
+    printf("-- sessao: reabre depois da recusa\n");
+    if (a != -1 || c != -1 || rpcCredencial != 0) {
+      printf("  FALHOU: %d %d, %d RPCs (esperado -1 -1, 0)\n", a, c, rpcCredencial);
+      return 1;
+    }
+    printf("  recusa lembrada do disco, sem pergunta\n");
     return 0;
   }
   if (argc > 1 && !strcmp(argv[1], "troca")) {
@@ -320,6 +477,8 @@ int main(int argc, char **argv) {
       free(p1); free(g); }
     confere("home do 2 ainda nao pronta com o ciclo do 1 no ar", !sync_perfil_pronto());
     sync_iniciar();                    // app.c, ramo da escolha: fio vivo
+    confere("historico muda antes da resposta do perfil anterior",
+            historicoPerfil == 2 && !strcmp(historicoDono, "conta-a"));
     pthread_mutex_lock(&trava);
     segurarCol = 0;
     pthread_cond_broadcast(&sinal);
@@ -379,3 +538,8 @@ int main(int argc, char **argv) {
   printf("%s\n", falhas ? "FALHOU" : "PASSOU");
   return falhas ? 1 : 0;
 }
+
+// sync.c 2.0 chama no logout; faltava aqui e o teste nao ligava (igual a contaoffline.c)
+void psparede_esquecer(void) {}
+
+__attribute__((weak)) int addons_perfil_da_lista(void) { return 0; }

@@ -14,6 +14,7 @@
 #include <SDL2/SDL.h>
 #include <time.h>
 #include "epg.h"
+#include "gfx.h"
 
 // --- ZAPPING COM DEBOUNCE -----------------------------------------------------
 // Apertar CH+ tres vezes seguidas nao pode abrir tres canais (cada um custa uma
@@ -47,6 +48,7 @@ typedef struct {
 void aovivo_selecionar(time_t t, const EpgProg *l, int n, int *iAg, int *iPx);
 // Monta a partir da grade: `epgIdx` >= 0 usa a XMLTV (epg.c); senao, `xtId`
 // (canal Xtream) usa a grade curta do painel (xtepg.c). 1 se achou algo.
+int  aovivo_epg_de_faixa(const EpgProg *l, int n, time_t t, AoVivoEpg *o);
 int  aovivo_epg_montar(int epgIdx, const char *xtId, time_t t, AoVivoEpg *o);
 
 // --- OSD ----------------------------------------------------------------------
@@ -56,6 +58,7 @@ enum { AV_B_PAUSA, AV_B_GUIA, AV_B_ANT, AV_B_PROX, AV_B_FAV, AV_B_AUDIO,
        AV_B_LEGENDA, AV_B_INFO, AV_B_RECARREGAR, AV_B_FONTE,
        AV_B_AOVIVO,   // "Voltar ao vivo": so atras da transmissao (depois do Pausar)
        AV_B_ASPECTO,  // proporcao/zoom, os modos do player de filme
+       AV_B_ULTIMO,   // ultimo canal (recall): o mesmo do "0" na Live TV
        AV_B_N };
 
 #define AV_INFO_LINHAS 7
@@ -72,12 +75,20 @@ typedef struct {
   char res[16];                      // "4K", "1080p", "720p" (viram marca), "SD" ou ""
   const char *aspecto;               // rotulo do modo de proporcao em vigor
   int infoAberta, nInfo;
-  char info[AV_INFO_LINHAS][72];
+  char info[AV_INFO_LINHAS][72];     // "Rotulo: valor"
+  // As MESMAS marcas do OSD de filme (FormatoMarca) no topo do painel de
+  // Informacoes, no lugar de "Imagem: HDR10" em texto.
+  int nMarcas, marcas[4];
 } AoVivoOsd;
 // Foco, barra e botoes leem o acento de ajustes_acento() (via botoes.c), como
 // o guia: o OSD nao recebe cor de quem chama.
 const char *aovivo_rotulo(int botao);
+// O OSD NAO desenha a hora nem as Informacoes: as duas sao a ilha do relogio
+// do player (plrilha.h). player.c chama plrilha_relogio e, com infoAberta,
+// pede a ilha com o corpo abaixo (u = o AoVivoOsd, vivo ate o proximo quadro).
 void aovivo_osd_desenhar(const AoVivoOsd *o, float a);
+float aovivo_info_altura(const AoVivoOsd *o);
+void aovivo_info_corpo(GfxRect c, float a, void *u);
 
 // Banner do zapping: quem vai tocar quando o debounce vencer.
 typedef struct {
@@ -85,9 +96,22 @@ typedef struct {
   int numero, salto;                 // salto: quantos canais desde o atual (+/-)
 } AoVivoBanner;
 void aovivo_banner_desenhar(const AoVivoBanner *b, float a);
+// Selo do numero digitado ("1 0 2" e o canal que ele leva), no canto de cima.
+// `nome` NULL = nenhum canal com esse numero. `fonte` "" = numero sem ambiguidade.
+void aovivo_numero_desenhar(const char *digitos, const char *nome, const char *fonte, float a);
 
 // Cartao de erro no estilo do modo ao vivo (causas do provedor / da conta).
+// Os botoes do modal do erro do canal (Recarregar, Fonte, Guia): `foco` em
+// 0..2. Quem trata a tecla e player.c.
+void aovivo_erro_foco(int foco);
 void aovivo_erro_desenhar(const char *nome, const char *logo, const char *titulo,
                           const char *dica, float a);
+#ifdef NV_TOUCH_UI
+typedef void (*AoVivoToqueFn)(int acao, int erro, int quadro);
+// The player owns channel/state validation and the existing action dispatch.
+void aovivo_toque_definir(AoVivoToqueFn fn, int quadro);
+void aovivo_toque_reiniciar(void);
+#endif
 
 #endif
+

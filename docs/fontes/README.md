@@ -39,6 +39,7 @@ A Inter não tem kana nem hanzi. `text.c` manda a linha para uma fonte de reserv
 
 - Origem: Droid Sans Fallback 2.54, copyright Google 2006, Apache License 2.0 (o texto está em `DroidSansFallback-LICENSE.txt`). Foi lida de `/usr/share/fonts/DroidSansFallback.ttf` de uma LG C9.
 - Modificada: subconjunto de 7.943 caracteres (ASCII, Latin-1, pontuação, kana, GB2312 nível 1, JIS X 0208 nível 1, Big5 de uso corrente e tudo o que as tabelas ja/zhcn/zhtw usam), sem hinting. Um subconjunto só dos textos da interface teria 0,34 MB; este tem 1,2 MB porque títulos e sinopses do TMDB em chinês ou japonês também aparecem com a interface em outro idioma.
+- Negrito arabe (#335): `NotoNaskhArabic-Bold.ttf` inteiro (OFL, mesma licenca), usado pelo SDL_ttf e pelo libass quando presente; sem ele, arabe fica sem negrito sintetico.
 - Regerar: `python3 tools/fonte-cjk.py /tmp/DroidSansFallback.ttf` (precisa de fontTools).
 - Quem usa: só a reserva CJK, depois das fontes de sistema (`LG_Display_JP`, `DroidSansFallback`, `LG_Display-Regular`, `LG_Display_HK-Regular`; no Mac Hiragino/STHeiti). `tools/idiomas.py` confere que o que as tabelas ja/zh usam existe nela.
 - Ver o que o WASM desenha, no Mac: `NUVIO_SEM_RESERVA_DE_SISTEMA=1 bash tests/idioma_shot.sh /tmp/x 27,28,29`.
@@ -46,3 +47,19 @@ A Inter não tem kana nem hanzi. `text.c` manda a linha para uma fonte de reserv
 | Arquivo | Bytes | SHA-256 |
 |---|---:|---|
 | `DroidSansFallback-Subset.ttf` | 1226652 | `7f4ff9c7ad1d4dd471e2f24ab27bc48b09d9dec0329a22b524f6664062eb7bc2` |
+
+## Fonte árabe embarcada
+
+Arabic UI prefers bundled **Noto Sans Arabic 2.009**, before TV system Naskh fonts. Both Regular and real Bold faces are subsetted; shaping/bidi still uses `src/bidi.c` presentation forms (#335, #205).
+
+- Source: https://github.com/notofonts/noto-fonts/tree/main/hinted/ttf/NotoSansArabic (The Noto Project Authors, SIL OFL 1.1; `NotoSansArabic-OFL.txt`).
+- Subsets keep Arabic U+0600–06FF, U+0750–077F, U+08A0–08FF, presentation forms U+FB50–FDFF/U+FE70–FEFF, spaces and available punctuation/digits. No hinting or layout tables; no HarfBuzz dependency.
+- Regenerate: `python3 tools/fonte-arabe.py /path/NotoSansArabic-Regular.ttf /path/NotoSansArabic-Bold.ttf` (fontTools required).
+- Naskh Regular/Bold remain for libass subtitles. The old Naskh subset remains a UI fallback and libass recovery asset for older installations; it is still used.
+- Android copies `deploy/app/fonts/*`; webOS copies `deploy/app`; Tizen `.wgt` preloads `deploy/app/fonts@/app/fonts` (also split font data); `.tpk` copies `deploy/app/fonts` into `res/fonts`. All include both Sans faces and OFL without filename lists.
+- Selection/real Bold regression: `bash tests/text_arabe_negrito.sh`. Arabic Home/Settings: `bash tests/arabe_ui_shot.sh /Volumes/ExternalSSD/tmp/rev/arabe-fonte-png/after`.
+- Sans assets plus OFL add 165,033 bytes uncompressed. Android stores `.ttf` without compression (`androidResources.noCompress`); ZIP font entries plus compressed OFL add about 163,075 bytes before APK alignment/signing (estimate, not a rebuilt APK).
+
+| Arquivo | Bytes | SHA-256 |
+|---|---:|---|
+| `NotoNaskhArabic-Subset.ttf` (fallback) | 90372 | `a43af24c9307d838d89593fc86342ab024973ffa0d7f71bac76849afe2ce5675` |

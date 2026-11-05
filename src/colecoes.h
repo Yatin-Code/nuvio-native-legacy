@@ -1,7 +1,20 @@
 #ifndef NV_COLECOES_H
 #define NV_COLECOES_H
-#define COL_MAX 256
+/* TETOS (#255). Uma conta do Xperience chega a ~300 pastas e ~600 fontes em
+   7 colecoes; o teto antigo de 256 pastas cortava a sexta colecao no meio e
+   jogava a setima fora, e as fontes delas viravam fileiras soltas na Home.
+
+   A memoria agora acompanha a conta: as pastas moram em blocos de 64 alocados
+   quando a montagem chega neles (e nunca devolvidos, para o ponteiro de
+   col_folder continuar valendo), e as fontes num bloco so do tamanho do que a
+   conta mandou. Antes eram 256 pastas x 32 fontes embutidas = 13,4 MB fixos,
+   fosse a conta de 3 pastas ou de 256.
+
+   O teto que sobra e de seguranca, nao de conta real. Quando ele e atingido a
+   colecao INTEIRA fica de fora (nunca cortada no meio) e o log diz qual. */
+#define COL_MAX 2048
 #define COL_SOURCE_MAX 32
+#define COL_FONTES_MAX 4096
 typedef struct {
   char title[128], base[600], type[8], catId[96], genre[96]; char addonId[96];
   // PROVEDOR NAO-ADDON (issue #44). Vazio = catalogo de addon, identificado por
@@ -16,7 +29,7 @@ typedef struct {
   char ordenar[48];    // sort_by do TMDB / sort_by da lista Trakt
   char ordem[8];       // sort_how do Trakt: "asc" | "desc"
   long traktLista;     // id da lista no Trakt
-  char filtros[384];   // objeto "filters" cru; o montador da URL traduz
+  char filtros[1024];  // Web snapshots include every null default (~500 bytes).
 } ColSource;
 typedef struct {
   char id[96], title[128], group[64], cover[512], hero[512], logo[512];
@@ -43,7 +56,13 @@ typedef struct {
   /* FORMA DO CARTAO da pasta (COL_FORMA_*): o `tileShape` que o editor de
      colecoes do app web grava por pasta. Ver col_forma_texto. */
   int forma;
-  ColSource sources[COL_SOURCE_MAX];
+  /* AS FONTES NAO MORAM MAIS NA PASTA (#255): eram 32 x 1512 bytes embutidos
+     em cada uma, para uma media de 2 fontes por pasta. `sources` aponta para o
+     bloco de fontes do conjunto (colecoes.c) e e valido para ler ate
+     COL_SOURCE_MAX posicoes — o bloco termina com essa folga zerada. Quem
+     monta uma pasta fora de colecoes.c (extras, a pasta sintetica do detalhe)
+     aponta para um vetor seu; col_extra_definir copia as fontes. */
+  ColSource *sources;
 } ColFolder;
 /* As tres formas do app web (collectionsStore.js, normalizePosterShape:
    POSTER, LANDSCAPE/WIDE, SQUARE). PAISAGEM e o zero de proposito: e como o
@@ -75,9 +94,16 @@ int col_extra_definir(const ColFolder *v, int n);
 // web: collections[{id,title,backdropImageUrl,folders[{id,title,coverImageUrl,
 // heroBackdropUrl,titleLogoUrl,hideTitle,sources[{provider,addonBaseUrl,type,
 // catalogId,title,genre}]}]}]. Aceita o array, o objeto {collections}, a linha
-// da RPC ({collections_json}) e collections_json como STRING escapada. Vazio
-// nao apaga as locais (mesma regra dos addons). Devolve quantas pastas entraram.
+// da RPC ({collections_json}) e collections_json como STRING escapada. An
+// explicit empty snapshot clears account/package folders, retaining extras.
+// Missing/null/truncated replies retain the current snapshot. Returns folders;
+// callers use col_revisao(), including deletions and unchanged nonempty pulls.
 int col_definir_json(const char *json);
+// Retira referencias de addon comprovadamente desinstalado; pasta sem fonte
+// sai. Fontes TMDB/Trakt e as demais de uma pasta mista permanecem.
+int col_podar_fontes_addon(int (*ausente)(const char *id, const char *base));
+// Pure validation, safe on the sync worker before caching an account reply.
+int col_resposta_valida(const char *json);
 // TROCA DE PERFIL: tira da tela as colecoes do perfil anterior (as da conta e
 // as do pacote). As do perfil novo entram quando o sync as trouxer; se ele nao
 // tiver nenhuma, a home fica sem colecoes. As extras (listas fixadas) ficam.
@@ -95,8 +121,30 @@ int col_n(void);
 // Muda sempre que o conjunto de pastas muda. Quem decide remontar a tela deve
 // olhar ISTO e nao col_n(): trocar N pastas por outras N mantem o numero.
 unsigned col_revisao(void);
+// A complete account snapshot was accepted for this profile, even when empty.
+int col_tem_conta(void);
 const ColFolder *col_folder(int i);
+// IMPRESSAO DA ESTRUTURA das colecoes para o snapshot da Home (homeestado.c):
+// grupo, id e fontes de cada pasta, SEM arte (URL de arte muda sem criar
+// fileira nova). Calculada inteira sob a trava das colecoes (#203): pode ser
+// chamada de qualquer fio. Antes homeestado lia col_folder(i)->sources[s] no
+// fio da montagem, sem trava, enquanto o sync no laco principal liberava o
+// bloco de fontes (fecharMontagem / col_esquecer_perfil) — leitura de memoria
+// ja liberada. Mesmo valor que o hashColecoes antigo de homeestado.c.
+unsigned col_hash_estrutura(void);
+// Identity-based grouping: two collections can have the same display title.
+void col_chave_pasta(const ColFolder *pasta, char *dst, unsigned n);
+int col_grupo_chave(const char *chave, int *indices, int max);
+int col_grupo_forma_chave(const char *chave);
 int col_grupo(const char *nome, int *indices, int max);
+// A ORDEM DAS PASTAS da fileira de um grupo, pela escolha da fileira
+// (fil_ordem, fileiras.h): recebe os indices como col_grupo_chave os devolve e
+// os ordena NO LUGAR. FIL_ORD_LISTA nao mexe em nada. O ANO e o do TITULO da
+// pasta (nv_ano_meta) — a pasta nao tem campo de data; sem ano vai para o fim,
+// na ordem que ja estava. A semente fixa o embaralhado: a montagem da home
+// passa a dela e o teste a sua, para o aleatorio ser estavel de um quadro para
+// o outro e reproduzivel.
+void col_ordenar_pastas(int *indices, int n, int ordem, unsigned semente);
 // addonId dominante do grupo (1) ou "" quando as fontes sao de addons
 // diferentes / nao sao de addon (0). Ver a definicao.
 int col_grupo_addon(const char *nome, char *dst, unsigned n);

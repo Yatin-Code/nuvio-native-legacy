@@ -259,7 +259,13 @@ int main(void) {
         CONFERE(r2 && !strcmp(r2->sinopse, "O Império responde."),
                 "sinopse sobreviveu ao disco: [%s]", r2 ? r2->sinopse : "(nulo)");
         CONFERE(r2 && r2->duracao == 58 && r2->temporadas == 3,
-                "duracao e temporadas sobreviveram ao disco"); }
+                "duracao e temporadas sobreviveram ao disco");
+        // A ARTE DA ESQUERDA DA AGENDA (C1): o proximo episodio nao tem still
+        // (null), entao vale o backdrop da raiz — e nunca o still do ULTIMO
+        // episodio, que esta no corpo logo abaixo. 17o campo do TSV.
+        CONFERE(r2 && !strcmp(r2->fundo,
+                "https://image.tmdb.org/t/p/w780/uDgy6hyPd82kOHh6I95FLtLnj6p.jpg"),
+                "backdrop sobreviveu ao disco: [%s]", r2 ? r2->fundo : "(nulo)"); }
     }
     CONFERE(agenda_frase("tt10255564", frase, sizeof frase), "ha frase para a serie que volta");
     printf("frase (volta): %s\n", frase);

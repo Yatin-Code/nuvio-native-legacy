@@ -40,7 +40,17 @@ typedef struct {
   double posSeg, durSeg;
   long long lastWatchedMs;    // 0 = desconhecido (linha migrada)
   int  pendente;              // 1 = escrito aqui, ainda nao empurrado
+  // COMO ESTA POSICAO FOI ALCANCADA (#205), so deste aparelho e nao
+  // sincronizado: 1 tocando, 0 por seek, -1 desconhecido (linha antiga ou vinda
+  // do servidor) — vale como 1, como antes da #205. Descreve ESTA posSeg.
+  int  tocou;
 } ProgRegistro;
+
+// A confirmed local checkpoint remains resumable even early in a long movie.
+static inline int prog_inicio_continuar(const ProgRegistro *r, int pctMinimo) {
+  return r->posSeg * 100.0 >= r->durSeg * pctMinimo ||
+         (pctMinimo == 1 && r->tocou == 1 && r->posSeg >= 30.0);
+}
 
 // Chave no formato do web (toProgressKey): "%s_s%de%d" quando temporada >= 0 e
 // episodio > 0; senao so o contentId. `contentId` pode vir com ":temp:ep" no
@@ -54,6 +64,14 @@ void prog_content_id(char *dst, unsigned n, const char *imdb, int *temporada, in
 // Registros do PERFIL ATIVO, do mais recente para o mais antigo. Devolve quantos.
 int  prog_ler(ProgRegistro *saida, int max);
 
+// O item mais recente AINDA NAO TERMINADO de um perfil qualquer (ativo ou nao),
+// pelos mesmos limites de "Continuar assistindo": duracao >= 60 s, entre 1% e
+// `pctConcluido` (ajustes_cw_concluido), e fora do que a pessoa tirou da fileira
+// (prog_marcar_removido). Le so o disco/cache local. 1 se achou.
+int  prog_continuar_de_perfil(int perfil, int pctConcluido, ProgRegistro *saida);
+// Idem, com o piso do Continuar (ajustes_cw_minimo, #326); o de cima e este com piso 1.
+int  prog_continuar_de_perfil_min(int perfil, int pctMinimo, int pctConcluido, ProgRegistro *saida);
+
 // Copia para `saida` o registro do perfil ativo com essa chave. 1 se havia.
 // Copia, e nao ponteiro: dois fios leem aqui, e um ponteiro para o cache
 // interno valeria so ate a proxima escrita do outro.
@@ -61,10 +79,16 @@ int  prog_por_chave(const char *chave, ProgRegistro *saida);
 
 // Escrita LOCAL (player ao fechar, botao do olho, pos-play). `imdb` pode ser
 // composto; temporada/episodio explicitos ganham dos que vierem no id.
-// Marca pendente e lastWatched = agora. Recusa durSeg <= 1 (ruido do player).
+// Marca pendente e lastWatched = agora. Recusa durSeg <= 1 (ruido do player),
+// tempos nao finitos ou que nao caibam em milissegundos inteiros para o sync.
+// `tocou` e o de ProgRegistro, sempre informado por quem grava a posicao.
 // Devolve 1 quando gravou.
 int  prog_gravar_local(const char *imdb, int temporada, int episodio,
-                       double posSeg, double durSeg);
+                       double posSeg, double durSeg, int tocou);
+
+// `tocou` do registro local do FILME (perfil ativo); -1 sem registro. 0 segura
+// o selo de progresso >= 90% (cat_visto).
+int  prog_tocou(const char *imdb);
 
 // Aplicacao de uma linha REMOTA (pull). Regra: local pendente vence; senao o
 // mais novo vence; empate mantem o local. `r->perfil` e ignorado — vale o
@@ -74,8 +98,13 @@ int  prog_aplicar_remoto(const ProgRegistro *r);
 // Pendentes do perfil ativo, para o push. Devolve quantos.
 int  prog_pendentes(ProgRegistro *saida, int max);
 
-// Depois de um push com sucesso: as chaves deixam de ser pendentes. So elas —
-// o player pode ter gravado outra linha durante a viagem.
+// Depois de um push com sucesso: somente os registros enviados que ainda
+// tem o mesmo instante, posicao e duracao deixam de ser pendentes. O perfil
+// vem da copia enviada, pois pode ter mudado durante a viagem.
+void prog_confirmar_empurrados(const ProgRegistro *enviados, int n);
+
+// Confirmacao imediata por chave, mantida para compatibilidade. Pedidos de
+// rede devem usar prog_confirmar_empurrados com sua copia anterior ao envio.
 void prog_marcar_empurrados(const char *const *chaves, int n);
 
 void prog_remover(const char *chave);
@@ -95,6 +124,17 @@ void prog_marcar_removido(const char *imdb);
 // mesma obra gravado depois da remocao (assistiu de novo aqui) tambem derruba
 // a remocao. 0 quando nunca foi removido.
 int  prog_removido_vence(const char *imdb, long long instanteMs);
+
+// "OCULTO DE CONTINUAR ASSISTINDO", em disco (#203): vale para o item "A seguir",
+// que nao tem ponto de retomada para apagar. Mesma regra de instante de
+// prog_removido_vence, mas SOBREVIVE ao reinicio. Volta quando ha episodio NOVO.
+void prog_ocultar_continuar(const char *imdb);
+// 1 quando `imdb` (obra, perfil ativo) continua oculto para um item de instante
+// `instanteMs`. Nao altera nada.
+int  prog_oculto_vence(const char *imdb, long long instanteMs);
+// Se a obra estava oculta e `instanteMs` a desfaz (episodio novo), apaga o
+// registro e devolve 1: quem chama desfaz tambem o oculto do Trakt.
+int  prog_oculto_soltar(const char *imdb, long long instanteMs);
 
 // Apaga o arquivo inteiro, todos os perfis. Chamar no logout, junto de
 // sync_esquecer_usuario.

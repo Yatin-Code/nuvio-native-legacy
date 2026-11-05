@@ -1,4 +1,6 @@
 #!/bin/bash
+export TMPDIR="${TMPDIR:-/tmp}"
+TMPDIR="${TMPDIR%/}"
 # TESTE DE VELOCIDADE do diagnostico: a conta (src/vazao.c) e a medida
 # (rede_medir_vazao em src/rede.c) contra um servidor HTTP local com Range e
 # vazao LIMITADA, sem rede de fora:
@@ -16,7 +18,7 @@
 #   bash tests/vazao.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
-DIR=$(mktemp -d /tmp/nuvio-vazao.XXXXXX)
+DIR=$(mktemp -d ${TMPDIR:-/tmp}/nuvio-vazao.XXXXXX)
 SRV=
 trap 'if [ -n "$SRV" ]; then kill $SRV 2>/dev/null || true; fi; rm -rf "$DIR"' EXIT
 
@@ -112,7 +114,7 @@ for i in $(seq 50); do [ -s "$DIR/porta" ] && break; sleep 0.1; done
 "$DIR/t" "$(cat "$DIR/porta")"
 
 sources=()
-for source in src/*.c; do
+for source in src/*.c src/dts/*.c; do
   case "$source" in src/main.c|src/diagnostico.c) continue;; esac
   sources+=("$source")
 done

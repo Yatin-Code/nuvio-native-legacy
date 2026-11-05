@@ -13,6 +13,8 @@
 #include "anim.h"
 #include "layout.h"
 #include "idioma.h"
+#define NV_ESCALA_TELA_ATIVA   // mede pela tela do fator ativo (escala.h)
+#include "escala.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -355,7 +357,14 @@ static void feature(float x, float y, float w, const N1312Feature *f,
             tx, yy + 44.0f, tw, 24.0f, alpha * 0.96f, 2);
 }
 
+static void novidades1312_desenharCorpo_(Uint32 agora);
+// Cartao de tela quase cheia: ampliado so se ainda couber (escala.h).
 void novidades1312_desenhar(Uint32 agora) {
+  ESCALA_SE_COUBER_INI(N1312_W, N1312_H);
+  novidades1312_desenharCorpo_(agora);
+  ESCALA_SE_COUBER_FIM();
+}
+static void novidades1312_desenharCorpo_(Uint32 agora) {
   float a = anim_suave(entrada), dy;
   float ar, ag, ab;
   (void)agora;

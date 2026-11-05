@@ -15,6 +15,14 @@ void cachearte_estatisticas_pedir(void) {}
 void tex_cache_marcar_larg(int grupo, const char *url, float larg, int essencial, int emUso) {
   (void)grupo; (void)url; (void)larg; (void)essencial; (void)emUso; }
 #include "../src/home.c"
+// heroAquecerVizinhos (home_atualizar) pede a arte dos vizinhos: sem textura aqui.
+unsigned long tex_hash_public(const char *c) { (void)c; return 0; }
+GLuint tex_obter_hero_quente(const char *c) { (void)c; return 0; }
+GLuint tex_obter_larg(const char *c, float w) { (void)c; (void)w; return 0; }
+GLuint tex_obter_logo_larg_qualquer(const char *c, float w) { (void)c; (void)w; return 0; }
+void marco(const char *m) { (void)m; }
+void desc_sinopse_hero(const int *idx, int n) { (void)idx; (void)n; }
+void desc_ocultar_vistos_atualizar(void) {}
 #include "../src/cwordem.h"
 
 char *dados_ler(const char *nome) { (void)nome; return NULL; }
@@ -27,9 +35,25 @@ int   dados_apagar(const char *nome) { (void)nome; return 1; }
 void  dados_marcar_sujo(int leve) { (void)leve; }
 const char *ling_legenda(void) { return ""; }
 const char *ling_audio(void) { return ""; }
+const char *ling_audio2(void) { return ""; }
+const char *ling_conta_audio2_valor(void) { return ""; }
+void ling_conta_audio2(const char *v) { (void)v; }
+void legenda2_atualizar_offset_manual(int ms) { (void)ms; }
+unsigned addons_versao(void) { return 1; }
+int curadoria_ativa(void) { return 0; }
+const char *curadoria_imdb(void) { return ""; }
+unsigned curadoria_revisao(void) { return 0; }
+void curadoria_passo(void) {}
+int curadoria_escolher(const int *itens, int n, int catN, int curadoria, unsigned *semente) {
+  (void)itens; (void)n; (void)catN; (void)curadoria; (void)semente; return -1; }
+const char *ling_conta_legenda_valor(void) { return ""; }
+const char *ling_conta_legenda2_valor(void) { return ""; }
+const char *ling_conta_audio_valor(void) { return ""; }
 void ling_conta_legenda(const char *v) { (void)v; }
 void ling_conta_legenda2(const char *v) { (void)v; }
 void ling_conta_audio(const char *v) { (void)v; }
+void selospacote_conta_do_blob(const char *blob) { (void)blob; }
+int selospacote_n(void) { return 0; }
 int   perfis_ativo(void) { return 1; }
 const char *addons_base_por_id(const char *id) { (void)id; return ""; }
 const char *addons_nome_por_id(const char *id) { (void)id; return ""; }
@@ -40,8 +64,10 @@ int  player_aberto(void) { return 0; }
 int  detail_aberto(void) { return 0; }
 int  trailer_aberto(void) { return 0; }
 int  trailer_tocando(void) { return 0; }
+int ctx_aberto(void) { return 0; }
 void ctx_abrir(int indice) { (void)indice; }
 void ctx_fileira(const char *c, const char *t) { (void)c; (void)t; }
+void ctx_dispensar_retomar(int on) { (void)on; }
 void ctx_abrir_fileira(const char *c, const char *t) { (void)c; (void)t; }
 void vertudo_abrir(const char *b, const char *t, const char *c, const char *ti) {
   (void)b; (void)t; (void)c; (void)ti;
@@ -193,3 +219,6 @@ int main(void) {
   puts("cwordem_home: tudo ok");
   return 0;
 }
+
+// Sem textura carregada nesta fixture de navegacao: usa proporcao padrao.
+float tex_aspecto(const char *caminho) { (void)caminho; return 0.0f; }

@@ -1,5 +1,6 @@
 // P2P experimental via servidor de streaming do Stremio. Ver p2p.h.
 #include "p2p.h"
+#include "p2pmotor.h"
 #include "ajustes.h"
 #include "debrid.h"
 #include "js.h"
@@ -10,12 +11,20 @@
 #include <string.h>
 #include <strings.h>
 
-static int ultimoErro;
-int p2p_ultimo_erro(void) { return ultimoErro; }
+#include <stdatomic.h>
+
+// Escrito pelo fio do torrent, lido pelo fio da tela: atomico (TSan).
+static _Atomic int ultimoErro;
+int p2p_ultimo_erro(void) { return atomic_load(&ultimoErro); }
 
 int p2p_ativo(void) {
   const char *u = ajustes_p2p_url();
-  return ajustes_p2p_ligado() && u && u[0];
+  return ajustes_p2p_ligado() && ((u && u[0]) || p2pmotor_disponivel());
+}
+
+int p2p_usa_motor(void) {
+  const char *u = ajustes_p2p_url();
+  return ajustes_p2p_ligado() && !(u && u[0]) && p2pmotor_disponivel();
 }
 
 int p2p_hash_valido(const char *h) {
@@ -129,34 +138,118 @@ static int ehVideo(const char *nome) {
   return 0;
 }
 
-int p2p_escolher_arquivo(const char *json, int fileIdx, int temporada, int episodio) {
+int p2p_escolher_lista(const char *const *nomes, const double *tams, int n,
+                       int fileIdx, int temporada, int episodio) {
   char pad1[16] = "", pad2[16] = "";
-  const char *p;
-  int idx = 0, melhor = -1, porPadrao = -1, doAddon = -1;
+  int idx, melhor = -1, porPadrao = -1, doAddon = -1;
   double melhorTam = -1;
-  if (!json) return -1;
-  if (temporada > 0 && episodio > 0) {
+  if (!nomes || !tams || n <= 0) return -1;
+  if (temporada >= 0 && episodio > 0) {
     snprintf(pad1, sizeof pad1, "s%02de%02d", temporada, episodio);
     snprintf(pad2, sizeof pad2, "%dx%02d", temporada, episodio);
   }
-  for (p = js_array(json, NULL, "files"); p && *p == '{'; p = js_prox(js_fim(p)), idx++) {
-    const char *f = js_fim(p);
-    char nome[600]; double tam;
-    // O stats.json do Stremio manda "path" e "name"; "path" cobre o nome com
-    // pasta ("Temporada 1/Serie.S01E02.mkv").
-    if (!js_texto(p, f, "path", nome, sizeof nome) &&
-        !js_texto(p, f, "name", nome, sizeof nome)) continue;
+  for (idx = 0; idx < n; idx++) {
+    char nome[600];
+    if (!nomes[idx] || !nomes[idx][0]) continue;
+    snprintf(nome, sizeof nome, "%s", nomes[idx]);
     for (char *c = nome; *c; c++) *c = (char)tolower((unsigned char)*c);
     if (!ehVideo(nome)) continue;
-    tam = js_num(p, f, "length", 0);
     if (idx == fileIdx) doAddon = idx;
     if (porPadrao < 0 && pad1[0] && (strstr(nome, pad1) || strstr(nome, pad2))) porPadrao = idx;
-    if (tam > melhorTam) { melhor = idx; melhorTam = tam; }
+    if (tams[idx] > melhorTam) { melhor = idx; melhorTam = tams[idx]; }
   }
   // O indice do addon vem primeiro: e o arquivo que ELE mediu (Torrentio manda
   // o fileIdx exato do episodio dentro do pacote de temporada). O padrao
   // SxxEyy so entra quando o addon nao disse, ou disse um que nao e video.
-  return doAddon >= 0 ? doAddon : porPadrao >= 0 ? porPadrao : melhor;
+  if (doAddon >= 0) return doAddon;
+  if (porPadrao >= 0) return porPadrao;
+  if (temporada == 0 && episodio > 0) return -1; // especial nao e o maior episodio regular
+  return melhor;
+}
+
+#define P2P_MAX_ARQ 4096
+int p2p_escolher_arquivo(const char *json, int fileIdx, int temporada, int episodio) {
+  const char *p;
+  int n = 0, r;
+  if (!json) return -1;
+  // O stats.json do Stremio manda "path" e "name"; "path" cobre o nome com
+  // pasta ("Temporada 1/Serie.S01E02.mkv"). Ate P2P_MAX_ARQ arquivos.
+  {
+    char (*buf)[600] = malloc(sizeof(char[600]) * P2P_MAX_ARQ);
+    const char **pp = malloc(sizeof *pp * P2P_MAX_ARQ);
+    double *tt = malloc(sizeof *tt * P2P_MAX_ARQ);
+    if (!buf || !pp || !tt) { free(buf); free(pp); free(tt); return -1; }
+    for (p = js_array(json, NULL, "files"); p && *p == '{' && n < P2P_MAX_ARQ;
+         p = js_prox(js_fim(p)), n++) {
+      const char *f = js_fim(p);
+      buf[n][0] = 0;
+      if (!js_texto(p, f, "path", buf[n], sizeof buf[n]) &&
+          !js_texto(p, f, "name", buf[n], sizeof buf[n])) buf[n][0] = 0;
+      pp[n] = buf[n];
+      tt[n] = js_num(p, f, "length", 0);
+    }
+    r = p2p_escolher_lista(pp, tt, n, fileIdx, temporada, episodio);
+    free(buf); free(pp); free(tt);
+  }
+  return r;
+}
+
+// Trackers de reserva para o magnet quando o addon nao manda "sources": os
+// mesmos que o Torrentio poe na maioria dos streams.
+static const char *TRACKERS_RESERVA[] = {
+  "udp://tracker.opentrackr.org:1337/announce",
+  "udp://open.stealth.si:80/announce",
+  "udp://tracker.torrent.eu.org:451/announce",
+  "udp://exodus.desync.com:6969/announce",
+  NULL
+};
+
+static int pctCodificar(const char *s, size_t L, char *out, unsigned n) {
+  static const char hx[] = "0123456789ABCDEF";
+  unsigned u = 0;
+  for (size_t i = 0; i < L; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (isalnum(c) || c == '-' || c == '.' || c == '_' || c == '~') {
+      if (u + 1 >= n) return -1;
+      out[u++] = (char)c;
+    } else {
+      if (u + 3 >= n) return -1;
+      out[u++] = '%'; out[u++] = hx[c >> 4]; out[u++] = hx[c & 15];
+    }
+  }
+  out[u] = 0;
+  return (int)u;
+}
+
+int p2p_magnet(const char *hash, const char *fontes, char *out, unsigned n) {
+  unsigned u;
+  int i, e, k = 0;
+  if (!p2p_hash_valido(hash) || !out || n < 64) return 0;
+  e = snprintf(out, n, "magnet:?xt=urn:btih:");
+  u = (unsigned)e;
+  for (i = 0; i < 40; i++) out[u++] = (char)tolower((unsigned char)hash[i]);
+  out[u] = 0;
+  for (const char *p = fontes; p && *p;) {
+    const char *nl = strchr(p, '\n');
+    size_t L = nl ? (size_t)(nl - p) : strlen(p);
+    int ok = L > 8 && L < 300 && !strncmp(p, "tracker:", 8);
+    for (size_t q = 0; ok && q < L; q++)
+      if ((unsigned char)p[q] < 33 || p[q] == 127) ok = 0;
+    if (ok && u + 5 < n) {
+      memcpy(out + u, "&tr=", 4);
+      e = pctCodificar(p + 8, L - 8, out + u + 4, n - u - 4);
+      if (e > 0) { u += 4 + (unsigned)e; k++; }
+      else out[u] = 0;                         // nao coube: o resto fica de fora
+    }
+    p = nl ? nl + 1 : p + L;
+  }
+  for (i = 0; !k && TRACKERS_RESERVA[i]; i++) {
+    if (u + 5 >= n) break;
+    memcpy(out + u, "&tr=", 4);
+    e = pctCodificar(TRACKERS_RESERVA[i], strlen(TRACKERS_RESERVA[i]), out + u + 4, n - u - 4);
+    if (e > 0) u += 4 + (unsigned)e; else { out[u] = 0; break; }
+  }
+  return 1;
 }
 
 int p2p_url_reproducao(const char *base, const char *hash, int idx, char *out, unsigned n) {
@@ -179,9 +272,18 @@ int p2p_testar(char *detalhe, unsigned n) {
   int st = 0;
   char *r;
   if (detalhe && n) detalhe[0] = 0;
+  // Sem endereco e com o motor embutido: nao ha rede a testar; o teste diz que
+  // o motor esta neste build, a versao dele e o teto de disco que ele teria
+  // agora (statvfs no fio do teste, nunca no da tela). statvfs falhou ou pouco
+  // livre: o mesmo erro que o motor daria ao subir.
+  if (!ajustes_p2p_url()[0] && p2pmotor_disponivel())
+    return ultimoErro = p2pmotor_resumo(detalhe, n);
   // Testa com o ajuste DESLIGADO tambem: a pessoa confere o endereco antes de
   // ligar. Sem endereco nao ha o que testar.
-  if (!ajustes_p2p_url()[0]) return ultimoErro = P2P_ERR_DESLIGADO;
+  if (!ajustes_p2p_url()[0]) {
+    printf("[p2p] sem endereco e sem motor: %s\n", p2pmotor_motivo_indisponivel());
+    return ultimoErro = P2P_ERR_DESLIGADO;
+  }
   snprintf(url, sizeof url, "%s/settings", ajustes_p2p_url());
   r = rede_baixar_st(url, P2P_PRAZO_TESTE, NULL, &st);
   if (!r) return ultimoErro = P2P_ERR_SERVIDOR;
@@ -203,6 +305,10 @@ int p2p_resolver(const char *hash, int fileIdx, const char *fontes, char *url, u
   if (!url || !n) return ultimoErro = P2P_ERR_DESLIGADO;
   if (!p2p_ativo()) return ultimoErro = P2P_ERR_DESLIGADO;
   if (!p2p_hash_valido(hash)) return ultimoErro = P2P_ERR_HASH;
+  if (p2p_usa_motor()) {
+    debrid_episodio(&temp, &ep);
+    return ultimoErro = p2pmotor_resolver(hash, fileIdx, fontes, temp, ep, url, n);
+  }
   snprintf(base, sizeof base, "%s", ajustes_p2p_url());
   // 1) o servidor esta la e e o certo? Falhar aqui em 6 s evita esperar os 30 s
   // dos metadados para descobrir que o IP estava errado.

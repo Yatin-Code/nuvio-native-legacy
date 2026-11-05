@@ -6,7 +6,20 @@
 // como tests/fimfileira.c): Direita no ultimo cartao, Esquerda na coluna 0
 // (continua abrindo o menu, sem batida) e Cima no destaque.
 #include <assert.h>
+int ctx_aberto(void) { return 0; }   // home.c asks whether the context menu is open
 #include "../src/home.c"
+// #204: o "Ocultar filmes assistidos" e o cartao do QR da home sem add-ons,
+// parados neste teste (descoberta.c e homevazio.c ficam fora do link).
+void desc_ocultar_vistos_atualizar(void) {}
+int  homevazio_ativo(int fileiras) { (void)fileiras; return 0; }
+int  homevazio_evento(const SDL_Event *e) { (void)e; return 0; }
+// heroAquecerVizinhos (home_atualizar) pede a arte dos vizinhos: sem textura aqui.
+unsigned long tex_hash_public(const char *c) { (void)c; return 0; }
+GLuint tex_obter_hero_quente(const char *c) { (void)c; return 0; }
+GLuint tex_obter_larg(const char *c, float w) { (void)c; (void)w; return 0; }
+GLuint tex_obter_logo_larg_qualquer(const char *c, float w) { (void)c; (void)w; return 0; }
+void marco(const char *m) { (void)m; }
+void desc_sinopse_hero(const int *idx, int n) { (void)idx; (void)n; }
 
 
 void cachearte_marcar_grupo(int grupo, const char *url, int variante, int essencial, int emUso) {
@@ -43,6 +56,7 @@ int  trailer_aberto(void) { return 0; }
 int  trailer_tocando(void) { return 0; }
 void ctx_abrir(int indice) { (void)indice; nCtx++; }
 void ctx_fileira(const char *c, const char *t) { (void)c; (void)t; }
+void ctx_dispensar_retomar(int on) { (void)on; }
 void ctx_abrir_fileira(const char *c, const char *t) { (void)c; (void)t; nCtx++; }
 void vertudo_abrir(const char *b, const char *t, const char *c, const char *ti) {
   (void)b; (void)t; (void)c; (void)ti; nVerTudo++;
@@ -160,8 +174,10 @@ static void parteHome(void) {
   teclaSo(SDLK_UP);
   assert(focoHero);
   assert(maxAbs(&bordaPag, 60) == 0.0f);
+  (void)home_pediu_ilha();
   teclaSo(SDLK_UP);
   assert(focoHero);
+  assert(home_pediu_ilha() == 1);   // #495: CIMA no destaque pede a ilha
   quadro(4);
   assert(bordaPag.x < -10.0f);      // a pagina sobe
   quadro(60);

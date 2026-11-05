@@ -21,6 +21,7 @@
 #include "ctxmenu.h"
 #include "dados.h"
 #include "gfx.h"
+#include "vidro_fundo.h"
 #include "home.h"
 #include "layout.h"
 #include "salvos.h"
@@ -37,6 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include "nvtmp.h"
 
 static int falhas;
 static void confere(const char *o_que, int ok) {
@@ -70,6 +72,7 @@ static void quadro(void) {
   ctx_atualizar(1.0f / 60.0f, agora);
   spainel_atualizar(1.0f / 60.0f, agora);
   spainel_fundo(!ctx_aberto() || ctx_do_painel(), cat_revisao(), homeFundo, NULL);
+  vidroFundoDesenhar();   // so com NUVIO_SHOT_VIDRO_*: arte de verdade atras do vidro
   if (spainel_visivel()) { spainel_desenhar(agora); ctx_desenhar(agora); }
   else ctx_desenhar(agora);
 }
@@ -148,7 +151,14 @@ static void tecladoAcao(int c) {
   toque(SDLK_RETURN);
 }
 static void tecladoAbriu(void) { tf = 0; tc = 0; }
-static void tecladoVoltarTopo(void) { toques(SDLK_UP, 7); tf = 0; tc = 0; }
+// ESQUERDA alem da primeira coluna entra na coluna do campo (o modo do
+// celular): encosta a esquerda e, se entrou, DIREITA volta a tecla de onde saiu.
+static void tecladoVoltarTopo(void) {
+  toques(SDLK_UP, 7);
+  toques(SDLK_LEFT, 6);
+  if (teclado_foco_campo()) toque(SDLK_RIGHT);
+  tf = 0; tc = 0;
+}
 
 // Segura OK na linha focada ate o menu do cartaz abrir e solta.
 static void segurarOk(void) {
@@ -254,7 +264,7 @@ int main(int argc, char **argv) {
   SDL_GLContext gl;
   GLuint fbo, fboTex;
   int kids, r0;
-  saida = argc > 1 ? argv[1] : "/tmp";
+  saida = argc > 1 ? argv[1] : nvt_dir();
   if (!dir || !dir[0]) { printf("NUVIO_DADOS ausente; recusando\n"); return 2; }
   dados_iniciar(dir);
   if (strcmp(dados_dir(), dir)) { printf("dados_dir() != NUVIO_DADOS; recusando\n"); return 2; }
@@ -265,6 +275,7 @@ int main(int argc, char **argv) {
     fprintf(f, "idioma 0\nselected_theme 2\n");   // portugues, acento oceano
     fclose(f); }
   ajustes_dir(dir);
+  ajustes_teste_vidro_env();   // NUVIO_SHOT_VIDRO_OPAC / _FOSCO
 
   SDL_SetHint("SDL_MAC_BACKGROUND_APP", "1");
   assert(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER | SDL_INIT_EVENTS) == 0);
@@ -291,6 +302,7 @@ int main(int argc, char **argv) {
   tex_iniciar(192);
   gfx_icones_dir("deploy/app/art");
   gfx_snap_iniciar(1920, 1080);
+  vidroFundoPreparar();
   glBindFramebuffer(GL_FRAMEBUFFER, fbo);
   assert(home_iniciar("deploy/app/art"));
   salvos_iniciar();
@@ -309,6 +321,15 @@ int main(int argc, char **argv) {
   confere("primeira linha: o primeiro com progresso (Pulp Fiction)",
           !strcmp(tituloFocado(), "tt0110912"));
   foto("01-lista-padrao.png");
+  // #203: titulo aberto no cartao (OK longo) com a lista agrupada por
+  // progresso: o rotulo da secao de baixo ("Nao comecados") tem de descer junto.
+  segurarOk();
+  durante(700);
+  foto("27c-cartao-aberto-secao.png");
+  empurrar(SDL_KEYDOWN, SDLK_ESCAPE); quadros(1);
+  empurrar(SDL_KEYUP, SDLK_ESCAPE); quadros(10);
+  toque(SDLK_UP);
+  toque(SDLK_DOWN);
   toque(SDLK_UP);
   foto("02-barra-foco-ordenar.png");
 
@@ -399,9 +420,9 @@ int main(int argc, char **argv) {
     snprintf(id, sizeof id, "%s", alvo);
     snprintf(movido, sizeof movido, "%s", alvo);
     toque(SDLK_DOWN);                    // tituloFocado reabriu o painel no topo
-    segurarOk();
+  segurarOk();
     confere("segurar OK abre o menu do cartaz", ctx_do_painel());
-    toques(SDLK_DOWN, 2);                // Mais informacoes, Remover, Mover
+    toque(SDLK_DOWN);                    // Remover, Mover
     foto("19-menu-mover.png");
     toque(SDLK_RETURN);
     quadros(4);
@@ -473,6 +494,7 @@ int main(int argc, char **argv) {
   toques(SDLK_UP, 8);
   toque(SDLK_RIGHT);                      // Social
   toque(SDLK_DOWN);                       // barra da Social
+  if (vidroFundoAtivo()) ajustes_definir_vidro(1);   // o teste compara VIDRO
   foto("28-social-barra.png");
   toque(SDLK_RETURN);
   foto("29-social-escolha.png");

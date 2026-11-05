@@ -33,9 +33,11 @@
 // quando o texto para (um pedido para "keanu" inteiro, nenhum por letra), a
 // URL leva o idioma, e OK nela pede SPOT_PESSOA com o titulo conhecido.
 #include "spotlight.h"
+#include "nvtmp.h"
 #include "buscasrec.h"
 #include "dados.h"
 #include "ajustes.h"
+#include "ajustes_ux.h"
 #include "gfx.h"
 #include "text.h"
 #include "tex_cache.h"
@@ -46,6 +48,7 @@
 #include "addons.h"
 #include "descoberta.h"
 #include "sistexto.h"
+#include "shot_arte.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <assert.h>
@@ -56,7 +59,7 @@
 #include <sys/stat.h>
 
 // Tipos de linha de spotlight.c (enum interno L_*).
-enum { T_AVISO = 1, T_TOPO = 2, T_PESSOA = 4, T_COLECAO = 5, T_RECENTE = 9 };
+enum { T_AVISO = 1, T_TOPO = 2, T_PESSOA = 4, T_COLECAO = 5, T_RECENTE = 9, T_AJUSTE = 11 };
 
 static SDL_Window *janela;
 static char ultimaUrl[800];
@@ -92,10 +95,14 @@ static void paraLista(void) { tecla(SDLK_DOWN); }
 // Voltar desfaz em ordem (lista -> campo -> limpa -> fecha): aperta ate fechar.
 static void fechar(void) { int i; for (i = 0; i < 5 && spot_aberto(); i++) tecla(SDLK_ESCAPE); }
 
-// O "fundo": fileiras de posteres do pacote, como uma home.
+// O "fundo": a arte de tela cheia de tests/shot_arte.h, para o vidro das
+// duas ilhas ser julgado sobre uma imagem de verdade (o mockup "ilha" tela 6
+// e assim); com NUVIO_SHOT_ARTE=- as fileiras de posteres, como uma home.
 static void fundo(void) {
   int r, c;
   char cam[700];
+  const char *sa = getenv("NUVIO_SHOT_ARTE");
+  if (!(sa && !strcmp(sa, "-"))) { shot_arte_desenhar(0.0f); return; }
   gfx_cor((GfxRect){ 0, 0, 1920, 1080 }, 0, 0.07f, 0.07f, 0.08f, 1.0f);
   for (r = 0; r < 3; r++)
     for (c = 0; c < 8; c++) {
@@ -161,7 +168,7 @@ static int achar(int tipo, const char *texto) {
 }
 
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nuvio-spotlight";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nuvio-spotlight");
   const char *dir = getenv("NUVIO_DADOS");
   SDL_GLContext gl;
   SpotPedido p;
@@ -188,6 +195,16 @@ int main(int argc, char **argv) {
   dados_iniciar(dir);
   assert(!strcmp(dados_dir(), dir));
   ajustes_iniciar();
+  // NUVIO_SHOT_PT=1: interface em portugues (a lingua dos mockups), para a
+  // comparacao lado a lado medir o mesmo texto.
+  if (getenv("NUVIO_SHOT_PT")) {
+    char aj[700];
+    FILE *f;
+    snprintf(aj, sizeof aj, "%s/ajustes.txt", dados_dir());
+    if ((f = fopen(aj, "w"))) { fprintf(f, "idioma 0\n"); fclose(f); }
+    ajustes_dir(dados_dir());
+  }
+  ajustes_definir_vidro(0);   // as capturas comuns sao do solido; -vidro* liga
 
   // Catalogo do pacote em duas fileiras "de addon" (base preenchida: e o que
   // faz a primeira virar "Em alta").
@@ -253,7 +270,9 @@ int main(int argc, char **argv) {
     capturaQuadros(saida, "crescendo", 7);
     h1 = spot_altura_corpo();
     printf("corpo: vazio %.0f -> crescendo %.0f\n", h0, h1);
-    assert(h1 > h0 + 20.0f && h1 < 780.0f); }
+    // A 150% a ilha ja nasce quase no teto da tela virtual (menor), entao o
+    // crescimento que sobra e curto: o piso acompanha o Tamanho da interface.
+    assert(h1 > h0 + (gfx_escala_ui() > 1.2f ? 5.0f : 20.0f) && h1 < 780.0f); }
   captura(saida, "digitado");
   assert(spot_altura_corpo() > 300.0f);
   assert(achar(T_TOPO, NULL) >= 0);
@@ -306,6 +325,52 @@ int main(int argc, char **argv) {
   assert(!spot_aberto());
   assert(!strcmp(buscasrec_termo(0), "chri"));
 
+  // Ajustes: a busca local encontra opcoes, seleciona o OpcaoId estavel e
+  // nao grava o termo no historico de pesquisas de midia.
+  { AjusteBuscaResultado esperado[1];
+    int antes = buscasrec_n(), alvo, passos;
+    char textoFoco[160];
+    assert(ajustes_buscar("idioma", esperado, 1) == 1);
+    spot_abrir_ajustes(0);
+    assert(achar(T_AJUSTE, NULL) >= 0); /* sugestoes locais sem consulta */
+    tecla(SDLK_ESCAPE);
+    assert(!spot_aberto() && buscasrec_n() == antes);
+    spot_abrir_ajustes(0);
+    spot_texto_externo("idioma");
+    alvo = achar(T_AJUSTE, NULL);
+    assert(alvo >= 0);
+    paraLista();
+    for (passos = 0; passos < 20 && spot_linha_focada() != alvo; passos++) tecla(SDLK_DOWN);
+    assert(spot_linha_focada() == alvo);
+    snprintf(textoFoco, sizeof textoFoco, "%s", spot_linha_texto(spot_linha_focada()));
+    tecla(SDLK_RETURN);
+    assert(spot_pediu(&p) && p.tipo == SPOT_AJUSTE && p.indice == esperado[0].op);
+    assert(buscasrec_n() == antes);
+    spot_reabrir_ajustes();
+    assert(spot_aberto() && !strcmp(spot_consulta(), "idioma"));
+    assert(spot_linha_focada() >= 0 && spot_linha_tipo(spot_linha_focada()) == T_AJUSTE);
+    assert(!strcmp(spot_linha_texto(spot_linha_focada()), textoFoco));
+    assert(buscasrec_n() == antes);
+    tecla(SDLK_ESCAPE);
+    assert(!spot_aberto() && buscasrec_n() == antes);
+    spot_abrir_ajustes(0);
+    assert(!spot_consulta()[0] && achar(T_AJUSTE, NULL) >= 0);
+    tecla(SDLK_ESCAPE);
+    // Buscar nos ajustes (mockup de Ajustes, quadro "busca"): solido e vidro.
+    spot_abrir_ajustes(0);
+    spot_texto_externo("legenda");
+    paraLista();
+    if (spot_linha_focada() > 1) tecla(SDLK_UP);   // o melhor resultado
+    captura(saida, "ajustes-solido");
+    ajustes_definir_vidro(1);
+    captura(saida, "ajustes-vidro");
+    ajustes_definir_vidro(0);
+    tecla(SDLK_ESCAPE);
+    ajustes_abrir_opcao(p.indice);
+    ajustes_iniciar();
+    assert(ajustes_opcao_em_foco() == p.indice);
+  }
+
   // Titulo: OK no melhor resultado pede o indice dele.
   spot_abrir(0);
   digitar("prestige");
@@ -339,6 +404,7 @@ int main(int argc, char **argv) {
   spot_abrir(0);
   digitar("the");
   paraLista();
+  captura(saida, "vidro-foco");
   tecla(SDLK_DOWN);
   captura(saida, "vidro");
   ajustes_definir_vidro(0);

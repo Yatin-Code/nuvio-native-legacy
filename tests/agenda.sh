@@ -1,4 +1,6 @@
 #!/bin/bash
+export TMPDIR="${TMPDIR:-/tmp}"
+TMPDIR="${TMPDIR%/}"
 # Agenda: parse do corpo /tv/<id> do TMDB, a frase da tela de titulo, e os
 # lembretes em disco (sobrevivencia e isolamento por perfil).
 #
@@ -10,19 +12,19 @@
 set -eu
 cd "$(dirname "$0")/.."
 
-NUVIO_DADOS=$(mktemp -d /tmp/nuvio-agenda-dados.XXXXXX)
+NUVIO_DADOS=$(mktemp -d ${TMPDIR:-/tmp}/nuvio-agenda-dados.XXXXXX)
 export NUVIO_DADOS
 trap 'rm -rf "$NUVIO_DADOS"' EXIT
 
 sources=()
-for source in src/*.c; do
+for source in src/*.c src/dts/*.c; do
   case "$source" in src/main.c|src/agenda.c) continue;; esac
   sources+=("$source")
 done
 # src/agenda.c e INCLUIDO pelo teste: `lerCorpoTv` e estatico e e o parse de
 # verdade, o mesmo que extras.c executa com o corpo vindo da rede.
-cc "${sources[@]}" tests/agenda.c -Isrc -o /tmp/nuvio-agenda \
+cc "${sources[@]}" tests/agenda.c -Isrc -o ${TMPDIR:-/tmp}/nuvio-agenda \
   -O1 -g -I/opt/homebrew/include -I/opt/homebrew/include/SDL2 \
   -L/opt/homebrew/lib -lSDL2 -lSDL2_image -lSDL2_ttf -lz -framework OpenGL \
   -Wall -Wextra -Wno-deprecated-declarations -Wno-macro-redefined
-/tmp/nuvio-agenda "$@"
+${TMPDIR:-/tmp}/nuvio-agenda "$@"

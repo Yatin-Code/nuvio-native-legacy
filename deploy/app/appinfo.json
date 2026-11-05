@@ -1,15 +1,16 @@
 {
   "id": "space.nuvio.native.legacy",
-  "version": "1.7.0",
+  "version": "2.0.8",
   "vendor": "iqui27",
   "type": "native",
   "main": "nuvio-proto",
-  "title": "Nuvio",
-  "icon": "icon.png",
-  "largeIcon": "icon-large.png",
+  "title": "Nuvio Legacy",
+  "icon": "icon-20.png",
+  "largeIcon": "icon-large-20.png",
+  "splashBackground": "splash.png",
   "resolution": "1920x1080",
-  "bgColor": "#141416",
-  "iconColor": "#141416",
+  "bgColor": "#0E0F12",
+  "iconColor": "#0D101E",
   "disableBackHistoryAPI": true,
   "requiredPermissions": [
     "all"

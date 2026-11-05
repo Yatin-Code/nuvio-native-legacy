@@ -6,7 +6,11 @@
 // com o Big Buck Bunny; o que nao tem resposta ("hash sem peers") e modelado
 // como o servidor real se comporta: nao responde nunca, e o prazo e nosso.
 #include "p2p.h"
+#include "idbase.h"
+#include "nvtmp.h"
 #include "streams.h"
+#include "p2pmotor.h"
+#include "rede.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,8 +21,15 @@ static int ligado;
 static char base[200];
 int ajustes_p2p_ligado(void) { return ligado; }
 const char *ajustes_p2p_url(void) { return base; }
-void debrid_episodio(int *t, int *e) { *t = 1; *e = 2; }
+static const char *episodioId = "tt1:1:2";
+void debrid_episodio(int *t, int *e) { idbase_episodio(episodioId, t, e); }
 uint64_t badges_detectar(const char *m) { (void)m; return 0; }
+uint64_t badges_bit(const char *id) { (void)id; return 0; }
+// p2pmotor.c (motor embutido) entra no link; sem -DNV_P2P_MOTOR ele so diz
+// "sem motor" e nunca chama estes.
+const char *dados_dir(void) { return nvt(""); }
+int rede_pedir(const RedePedido *p, RedeResposta *r) { (void)p; r->erro = REDE_INDISPONIVEL; return 0; }
+void rede_resposta_limpar(RedeResposta *r) { (void)r; }
 
 // ---------------------------------------------------------------- rede falsa
 static const char *respSettings; static int stSettings;   // NULL = sem resposta
@@ -44,7 +55,7 @@ char *rede_postar_st(const char *url, int s, const char *const *c, const char *c
   if (st) *st = respCreate ? stCreate : 0;
   return respCreate ? strdup(respCreate) : NULL;
 }
-char *rede_baixar_trecho_st(const char *url, int s, long ini, long fim, long *tam,
+char *rede_baixar_trecho_st(const char *url, int s, long long ini, long long fim, long *tam,
                             int *st, int *erro, char *final, unsigned tf) {
   (void)s; (void)ini; (void)fim; (void)erro; (void)final; (void)tf;
   nTrecho++;
@@ -237,6 +248,13 @@ int main(void) {
   assert(p2p_resolver(HASH, 0, NULL, url, sizeof url) == P2P_OK && strstr(url, "/0"));
   assert(p2p_resolver(HASH, -1, NULL, url, sizeof url) == P2P_OK);            // debrid_episodio = T1E2
   assert(strlen(url) > 2 && url[strlen(url) - 1] == '1');
+  episodioId = "kitsu:41370:5";
+  cenario(1, "http://h:11470", SETTINGS, 200,
+          "{\"files\":[{\"path\":\"[SubsPlease] Mushoku Tensei - 05 (1080p).mkv\",\"length\":1900000000}]}", 200, 1, 0);
+  assert(p2p_resolver(HASH, -1, NULL, url, sizeof url) == P2P_OK);
+  assert(url[strlen(url) - 1] == '0');
+  episodioId = "tt1:1:2";
+  puts("p2p: Kitsu absent season selects ordinary anime filename");
   puts("p2p: resolvedor e mapeamento de erros ok");
 
   // ---------------------------------------------------------- testar
@@ -249,6 +267,50 @@ int main(void) {
   cenario(0, "http://h:11470", "{}", 200, BBB, 200, 1, 0);
   assert(p2p_testar(det, sizeof det) == P2P_ERR_NAO_STREMIO && !det[0]);
   puts("p2p: testar conexao ok");
+
+  // ---------------------------------------------------------- motor embutido
+  // Sem -DNV_P2P_MOTOR os cotos dizem indisponivel: sem endereco, P2P inativo
+  // (o comportamento de antes deste build).
+  cenario(1, "", SETTINGS, 200, BBB, 200, 1, 0);
+  assert(!p2p_ativo() && !p2p_usa_motor());
+  cenario(1, "http://h:11470", SETTINGS, 200, BBB, 200, 1, 0);
+  assert(p2p_ativo() && !p2p_usa_motor());
+  {
+    char m[2400];
+    // trackers do addon: so os "tracker:", percent-encoded; dht: fica de fora
+    assert(p2p_magnet(HASH, "tracker:udp://t.example:1337/announce\ndht:x\ntracker:http://a.b/an?x=1",
+                      m, sizeof m));
+    assert(!strncmp(m, "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&tr=", 64));
+    assert(strstr(m, "&tr=udp%3A%2F%2Ft.example%3A1337%2Fannounce"));
+    assert(strstr(m, "&tr=http%3A%2F%2Fa.b%2Fan%3Fx%3D1"));
+    assert(!strstr(m, "dht"));
+    assert(!strstr(m, "opentrackr"));                     // reserva so sem trackers
+    // sem trackers: os de reserva
+    assert(p2p_magnet(HASH, NULL, m, sizeof m) && strstr(m, "&tr=udp%3A%2F%2Ftracker.opentrackr.org"));
+    // tracker com espaco/controle nao entra
+    assert(p2p_magnet(HASH, "tracker:udp://a b", m, sizeof m) && strstr(m, "opentrackr"));
+    assert(!p2p_magnet("xyz", NULL, m, sizeof m));
+    // buffer curto: o hash cabe, o tracker que nao cabe fica de fora inteiro
+    assert(p2p_magnet(HASH, "tracker:udp://muito-longo.example:1337/announce", m, 70) && strlen(m) < 70);
+  }
+  {
+    const char *nomes[] = { "Serie/S01E01.srt", "Serie/Serie.S01E01.mkv", "Serie/Serie.S01E02.mkv",
+                            NULL, "Serie/sample.mkv" };
+    double tam[] = { 10, 900e6, 950e6, 0, 5e6 };
+    assert(p2p_escolher_lista(nomes, tam, 5, -1, 0, 0) == 2);    // maior video
+    assert(p2p_escolher_lista(nomes, tam, 5, -1, 1, 1) == 1);    // SxxEyy
+    assert(p2p_escolher_lista(nomes, tam, 5, 4, 1, 1) == 4);     // fileIdx do addon vence
+    assert(p2p_escolher_lista(nomes, tam, 5, 0, 1, 2) == 2);     // fileIdx de legenda: cai no SxxEyy
+    assert(p2p_escolher_lista(nomes, tam, 0, -1, 0, 0) == -1);
+  }
+  {
+    const char *nomes[] = {"Show.S01E01.mkv", "Show.S00E01.mkv", "Show.S00E02.mkv"};
+    double tam[] = {3e9, 900e6, 800e6};
+    assert(p2p_escolher_lista(nomes, tam, 3, -1, 0, 2) == 2);
+    assert(p2p_escolher_lista(nomes, tam, 3, 1, 0, 2) == 1); // indice explicito vence
+    assert(p2p_escolher_lista(nomes, tam, 1, -1, 0, 2) == -1); // nao tocar S01 por engano
+  }
+  puts("p2p: motor (cotos, magnet, escolha) ok");
 
   puts("p2p: ok");
   return 0;

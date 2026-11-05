@@ -180,3 +180,14 @@ const char *parental_gravidade(int i) {
   pthread_mutex_unlock(&trava);
   return r;
 }
+
+#ifdef NV_SHOT_HOOKS
+// Capturas: linhas fixas (rotulo e gravidade ja em portugues, como as reais).
+void parental_shot(const char *const *rot, const char *const *grav, int n) {
+  int i;
+  pthread_mutex_lock(&trava);
+  nLinhas = n < PG_MAX ? n : PG_MAX;
+  for (i = 0; i < nLinhas; i++) { linhas[i].rotulo = rot[i]; linhas[i].gravidade = grav[i]; }
+  pthread_mutex_unlock(&trava);
+}
+#endif

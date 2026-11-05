@@ -59,6 +59,24 @@ int main(void) {
   quadros(60);
   assert(detail_indice() == 2);
   assert(!strcmp(cat_item(detail_indice())->titulo, "Twilight Zone"));
+
+  // 3) Id maior que 23 caracteres (canal de TV ao vivo "pp-live:..."). No D1
+  //    da 1.7.0 (tizen e tizen-tpk): "pp-live:binged~ev.p-pl- saiu de 740 para
+  //    741", "741 para 742"... uma linha e um cat_acrescentar POR QUADRO. O
+  //    idxImdb[24] cortava o id, a busca nao achava o titulo e a copia da
+  //    abertura era reinserida de novo a cada quadro.
+  { CatItem w[2]; int n0;
+    w[0] = item("tt0000001", "Outro", "movie");
+    w[1] = item("pp-live:binged~ev.p-pl-canal-longo-123", "Canal", "tv");
+    cat_definir_tudo(w, 2, NULL, 0);
+    memset(&hi, 0, sizeof hi);
+    hi.indice = 1;
+    detail_abrir(&hi);
+    n0 = cat_n();
+    printf("--- id longo\n"); fflush(stdout);
+    quadros(60);
+    assert(cat_n() == n0);
+    assert(detail_indice() == 1); }
   printf("FIM\n");
   return 0;
 }

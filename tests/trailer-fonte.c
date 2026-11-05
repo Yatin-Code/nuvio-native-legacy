@@ -46,6 +46,19 @@ int main(void) {
   int o[3], n, tz;
   TrailerCandidatos c;
   const char *u;
+  trailerfonte_definir_imdb_primeiro_destaque(1);
+  confere("native Home fallback order follows IMDb -> Apple",
+    trailerfonte_depois_destaque(TRF_AUTO,0,TRF_IMDB)==TRF_APPLE &&
+    trailerfonte_depois_destaque(TRF_AUTO,0,TRF_APPLE)==0);
+  confere("native Home explicit source has no implicit fallback",
+    trailerfonte_depois_destaque(TRF_IMDB,0,TRF_IMDB)==0 &&
+    trailerfonte_depois_destaque(TRF_APPLE,0,TRF_APPLE)==0);
+  trailerfonte_definir_imdb_primeiro_destaque(0);
+  confere("LG/WGT Home fallback retains Apple -> IMDb",
+    trailerfonte_depois_destaque(TRF_AUTO,0,TRF_APPLE)==TRF_IMDB);
+#ifdef NV_TPK
+  trailerfonte_definir_imdb_primeiro_destaque(NV_TRAILER_CONTINUA_DETALHE);
+#endif
 
   // --- Som
   confere("Samsung nunca pede com som", trailerfonte_com_som(1) == 0);

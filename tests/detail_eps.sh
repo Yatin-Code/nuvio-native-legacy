@@ -100,4 +100,11 @@ if ! rg -q 'if \(sabe\)' src/detail.c; then
   exit 1
 fi
 
+
+# Esquerda/direita na PONTA da fileira de episodios trocam de temporada (dono,
+# 03/10), e a folha vertical de episodios (episodios.c, tambem usada no player)
+# troca com o foco ja na lista.
+rg -q 'static int detail_ep_borda\(int dir\)' src/detail.c
+rg -q 'detail_ep_borda\(k == SDLK_RIGHT \? 1 : -1\)' src/detail.c
+rg -q 'if \(grupo >= 0 && \(k == SDLK_LEFT \|\| k == SDLK_RIGHT\)\)' src/episodios.c
 echo 'detail eps: PASS'

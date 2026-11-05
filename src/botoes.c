@@ -22,14 +22,14 @@
 // acento branco ou quase branco leva texto escuro. Escurecer so ajuda o texto
 // branco sobre cor; o branco escurecido a 88% fica em ~0.89 de luminancia, e
 // o texto escuro sobre ele segue com contraste de sobra.
+//
+// ACENTOS DE 03/10/2026 (acentos-mockup.html): a cor do foco e o PROPRIO
+// acento, sem escurecer. Os acentos novos ja foram medidos para isso — os
+// profundos estao no limite do branco a 4,6:1 e os claros levam tinta escura;
+// escurecer 74% deixaria o Dourado marrom com tinta escura a menos de 7:1, e
+// tiraria do botao a assinatura que liga Gradiente e Textura (gfx_rect).
 float botao_cor_foco(float *r, float *g, float *b) {
-  float ar, ag, ab, lum, k = 0.74f, ti = ajustes_acento_tinta(&ar, &ag, &ab);
-  lum = 0.2126f * ar + 0.7152f * ag + 0.0722f * ab;
-  if (lum > 0.88f) k = 0.88f;
-  if (r) *r = 0.055f + (ar - 0.055f) * k;
-  if (g) *g = 0.058f + (ag - 0.058f) * k;
-  if (b) *b = 0.068f + (ab - 0.068f) * k;
-  return ti;
+  return ajustes_acento_tinta(r, g, b);
 }
 
 // Foco no VIDRO: a mesma pilula cheia de gfx_vidro_pilula_cheia, mas na cor
@@ -66,9 +66,10 @@ int botao_superficie(GfxRect r, float foco, float a) {
   float fr, fg, fb, ti = botao_cor_foco(&fr, &fg, &fb);
   if (ajustes_vidro()) {
     // Acao principal: em repouso o vidro leva a lavagem e o aro do realce (e
-    // assim o tema continua visivel); em foco, a pilula CHEIA no realce.
+    // assim o tema continua visivel); em foco, a mesma pilula de vidro do
+    // Play do detalhe (realce coloridos = vidro com lavagem; branco = cheia).
     gfx_vidro_painel_acento(r, 0.5f, 0.55f, a);
-    vidroFoco(r, foco, a);
+    gfx_vidro_pilula_cheia(r, 0.5f, foco, a);
     return gfx_vidro_tinta(foco);
   }
   botao_luz(r, foco, a);

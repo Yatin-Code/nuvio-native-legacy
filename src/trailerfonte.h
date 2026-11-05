@@ -30,6 +30,7 @@ typedef struct {
   const char *apple;   int appleRespondeu, appleFalhou;
   const char *imdb;    int imdbRespondeu;
   const char *youtube; int youtubeRespondeu;
+  int youtubeIdiomaPreferido; // 1 youtube is in the chosen (non-English) trailer audio; -1 TMDB not answered yet
 } TrailerCandidatos;
 
 typedef enum {
@@ -49,6 +50,7 @@ TrailerDecisao trailerfonte_escolher(int ajuste, int tizen, const TrailerCandida
 // Proxima fonte da ordem depois de `qual`, ou 0: e o que decide se o prazo
 // vencido "tenta a proxima" ou "fica a arte".
 int  trailerfonte_depois(int ajuste, int tizen, int qual);
+int  trailerfonte_depois_dublado(int ajuste, int tizen, int qual);
 // "apple" / "imdb" / "youtube", para o log.
 const char *trailerfonte_nome(int qual);
 // 1 quando o trailer em tela cheia pode ter som. Samsung: NUNCA (decisao do
@@ -95,6 +97,8 @@ void trailerfonte_definir_imdb_primeiro_cheia(int sim);
 #endif
 #endif
 int  trailerfonte_ordem_destaque(int ajuste, int tizen, int ordem[3]);
+/* Uses the actual Home order (IMDb first on native TPK), unlike depois(). */
+int  trailerfonte_depois_destaque(int ajuste, int tizen, int qual);
 TrailerDecisao trailerfonte_escolher_destaque(int ajuste, int tizen, const TrailerCandidatos *c,
                                               const char **url, int *qual);
 int  trailerfonte_imdb_primeiro_destaque(void);

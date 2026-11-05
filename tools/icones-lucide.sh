@@ -42,12 +42,43 @@ SVG="$DIR/lucide"
 # cabecalhos dos grupos recolhiveis (TELA[] em src/ajustes.c) — as linhas nao
 # tem icone desde o merge da 1.5 (feat/ajustes-ux), e os ~60 desenhos por
 # opcao sairam da lista. fileiras.c usa house/folders/puzzle na folha de
-# fileiras.
+# fileiras. O menu do cartaz (ctxmenu.c) usa info/library/eye/eye-off/users/
+# x/rows-3/folders, o traco do mockup "ilha" tela 7.
 NOMES="
-circle-play database file-text folders gallery-vertical-end house
-images info layout-dashboard list-checks monitor-cog palette panel-top plug puzzle
-rotate-ccw-clock rows-3 scan star user-round mic keyboard
+circle-play file-text folders house
+images info layout-dashboard monitor-cog palette panel-top plug puzzle
+rotate-ccw-clock rows-3 star user-round mic keyboard smartphone shuffle
+rotate-cw x library eye eye-off users
+clock triangle-alert tv-minimal-play calendar download wifi-off wifi link-2-off
+cloud megaphone bookmark music
+clapperboard languages search chevron-right check plus minus memory-stick delete
+activity gauge zap database
+arrow-up-down heart moon sun-dim
+arrow-up arrow-down pencil
+pause send scroll-text server-crash shield-check cpu log-out
+panel-left list-x bell audio-lines layers type sliders-horizontal book-open user-plus
+alarm-clock badge-check captions chart-column chevrons-down circle-check circle-dot compass droplet feather film funnel globe image image-plus inbox key key-round layout-list life-buoy link list-ordered list-video loader log-in map maximize-2 menu message-square monitor-play mouse-pointer move-horizontal pause picture-in-picture-2 play quote send server settings-2 shield sparkle stethoscope telescope thumbs-up unlink wand sparkles corner-up-left book-open-text
+pipette blend spotlight paint-roller
+ellipsis
+hard-drive volume-2 package tag
 "
+# A linha que comeca em "clock" e da ILHA DO RELOGIO (02/10, mockup aprovado em design/ilha):
+# os icones dos avisos (alerta, wifi, debrid baixando, Trakt desconectado...) e
+# dos botoes dos modais (Depois, Salvar, Reconectar).
+# A antepenultima e dos AJUSTES no Glass UI (03/10, mockup aprovado): Trailers e
+# Idiomas com desenho proprio, a lupa e a seta das linhas, o "Salvo", o mais e
+# o menos do editor numerico e a memoria de imagens.
+# A penultima e do REGISTRO DO APP no Glass UI (03/10, logs-mockup.html): pausa,
+# envio, painel vazio, erro do servidor, consentimento e o rastro de etapas.
+# As duas ultimas sao do cartao de NOVIDADES DA 1.8.0 e do GUIA DE USO
+# (ajustes_ux_guia_dados.inc, um icone por capitulo e por recurso) (03/10, mockup aprovado):
+# os discos da lista, as pecas da previa, capitulos e recursos do guia.
+# A penultima linha e da REGUA de cores (05/10): um desenho por dinamica (Da arte,
+# Gradiente, Imersiva, Textura), que antes mostravam todas a mesma miniatura.
+# A ultima e do "..." da pagina do titulo (06/10): o circular "Mais opcoes" que
+# guarda trailer, Explorar, Trocar arte e Recomendar (src/detmais.h).
+# A de baixo e do TEXTO DO ADDON na folha de fontes (07/10): os emojis do AIOStreams
+# (💾 👤 🎞️ 🔊 🌐 ⚙️ ⚡ 📦 🏷️ ⏱️) viram estes icones — a TV nao tem emoji colorido.
 # Conferencia: todo aj_* citado em src/ tem de estar em NOMES, e todo NOMES
 # tem de ser citado — senao sobra PNG morto no pacote ou falta icone na tela
 # (gfx_icone falha em silencio).
@@ -77,7 +108,7 @@ for f in "$DIR"/aj_*.png "$SVG"/*.svg; do
   case " $(echo $NOMES) " in *" $n "*) ;; *) rm -f "$f"; echo "icones-lucide: removido $f" ;; esac
 done
 
-USADOS=$(grep -ho '"aj_[a-z0-9-]*"' src/*.c | tr -d '"' | sed 's/^aj_//' | sort -u)
+USADOS=$(grep -ho '"aj_[a-z0-9-]*"' src/*.c src/*.inc | tr -d '"' | sed 's/^aj_//' | sort -u)
 FALHA=0
 for n in $USADOS; do
   case " $(echo $NOMES) " in *" $n "*) ;; *) echo "icones-lucide: src/ usa aj_$n, que nao esta em NOMES" >&2; FALHA=1 ;; esac

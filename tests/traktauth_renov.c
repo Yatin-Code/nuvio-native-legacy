@@ -36,6 +36,8 @@ int trakt_definir(const char *tk, const char *cli) {
 }
 int trakt_ativo(void)    { return ativoFake; }
 int trakt_recusada(void) { return recusadaFake; }
+static int nMorta;
+void trakt_sessao_morta(void) { nMorta++; }
 void trakt_esquecer(void) { ativoFake = 0; }
 
 const char *nuvem_trakt_cliente(void) { return "cliente-teste"; }
@@ -71,6 +73,12 @@ int  sync_empurrar_credencial(const char *p, const char *j) {
 void desc_repetir(void)         { nRepetir++; }
 const char *i18n(const char *s) { return s; }
 const char *idioma_mes_data(int mes, const char *nomePt) { (void)mes; return nomePt; }
+
+char *rede_postar_st_retry(const char *url, int segundos, const char *const *cab,
+                           const char *corpo, int *status, int *retry) {
+  if (retry) *retry = 0;
+  return rede_postar_st(url, segundos, cab, corpo, status);
+}
 
 // ---- cenario ----------------------------------------------------------------
 
@@ -134,6 +142,15 @@ int main(void) {
   assert(traktauth_carregar() == 1);
   assert(nDefinir == 1);                       // sem refresh, nao ha o que antecipar
   printf("ok  vencido sem refresh: define e deixa o 401 derrubar\n");
+
+  // 3b. O 401 CHEGA e nao ha refresh: o estado cai para INVALIDO e os pedidos
+  //     autenticados param (trakt_sessao_morta), em vez de 401 a cada ciclo.
+  nMorta = 0;
+  recusadaFake = 1; ativoFake = 1;
+  traktauth_passo(1000u);
+  assert(traktauth_estado() == TRA_INVALIDO && nMorta == 1);
+  recusadaFake = 0;
+  printf("ok  401 sem refresh: sessao marcada morta, pedidos param\n");
 
   // 4. ARQUIVO ANTIGO (2 colunas): sem datas, sem refresh — comportamento velho.
   zera();

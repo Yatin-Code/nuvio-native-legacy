@@ -35,7 +35,14 @@ typedef enum {
   P2P_ERR_NAO_STREMIO,   // respondeu, mas nao e um servidor Stremio
   P2P_ERR_SEM_PEERS,     // metadados ou primeiros bytes nao chegaram no prazo
   P2P_ERR_SEM_VIDEO,     // o torrent nao tem arquivo de video
-  P2P_ERR_RECUSOU        // o servidor respondeu erro (5xx / 4xx)
+  P2P_ERR_RECUSOU,       // o servidor respondeu erro (5xx / 4xx)
+  P2P_ERR_MOTOR,         // motor embutido (p2pmotor.h) nao subiu (libtorrent recusou)
+  P2P_ERR_SEM_ESPACO,    // motor embutido: pouco livre (< 256 MB), ENOSPC ou teto duro
+  P2P_ERR_DISCO,         // motor embutido: statvfs falhou -> recusa (conservador)
+  P2P_ERR_RAM,           // motor embutido: cache em RAM passou do teto duro
+  P2P_ERR_CANCELADO,     // pedido cancelado (outra escolha, player fechado, perfil)
+  P2P_ERR_OCUPADO        // outro pedido ao motor ainda em curso
+
 } P2pErro;
 
 // Prazos em segundos. Metadados de um torrent com peers chegam em 1 a 5 s; 30
@@ -51,8 +58,12 @@ typedef enum {
 // colchetes). 1 se valido (em `out`), 0 se nao. Texto vazio NAO e valido.
 int p2p_normalizar_url(const char *entrada, char *out, unsigned n);
 
-// Ligado E com endereco valido: a unica pergunta que o resto do app faz.
+// Ligado E (com endereco valido OU com o motor embutido neste build): a unica
+// pergunta que o resto do app faz. Endereco preenchido vence o motor: quem
+// configurou um servidor na rede quer que a TV nao baixe nada.
 int p2p_ativo(void);
+// 1 quando o P2P ligado vai pelo motor embutido (sem endereco, com motor).
+int p2p_usa_motor(void);
 
 // 40 caracteres hexadecimais.
 int p2p_hash_valido(const char *hash);
@@ -68,6 +79,16 @@ int p2p_corpo_criar(const char *hash, const char *fontes, char *out, unsigned n)
 // video > SxxEyy (temporada/episodio de debrid_episodio) > maior video.
 // Devolve o indice no torrent (0..) ou -1 se nao ha video.
 int p2p_escolher_arquivo(const char *json, int fileIdx, int temporada, int episodio);
+
+// A mesma escolha sobre listas soltas (motor embutido): `nomes[i]` com pasta,
+// `tam[i]` em bytes; nome NULL/vazio e pulado.
+int p2p_escolher_lista(const char *const *nomes, const double *tam, int n,
+                       int fileIdx, int temporada, int episodio);
+
+// magnet:?xt=urn:btih:<hash>&tr=... com os "tracker:" de `fontes` (uma por
+// linha, como em p2p_corpo_criar) percent-encoded, mais trackers publicos de
+// reserva quando o addon nao mandou nenhum. 1 se coube.
+int p2p_magnet(const char *hash, const char *fontes, char *out, unsigned n);
 
 // <base>/<hash>/<idx>, hash em minusculas. 1 se coube.
 int p2p_url_reproducao(const char *base, const char *hash, int idx, char *out, unsigned n);

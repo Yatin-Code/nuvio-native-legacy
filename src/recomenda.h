@@ -1,3 +1,4 @@
+#include "arteurl.h"
 // RECOMENDAR UM TITULO A UM AMIGO — o lado cliente.
 //
 // POR QUE EXISTE E POR QUE CONTRA UM SERVIDOR PROPRIO: o Supabase do Nuvio nao
@@ -28,6 +29,7 @@
 #include "badges.h"
 #include <SDL2/SDL.h>
 #include <stddef.h>
+#include <stdint.h>
 
 // Teto da lista guardada. 60 x ~900 bytes = ~54 KB estaticos, pela mesma razao
 // de SALVOS_MAX: esta lista e percorrida por quadro com o painel aberto, e o
@@ -42,6 +44,7 @@
 #define REC_SUGESTOES_MAX 20
 // Quantos modelos prontos existem. Texto livre (modelo -1) e etapa posterior.
 #define REC_MODELOS        6
+#define REC_CONTATO_IDS    3
 
 typedef struct {
   long long id;        // id no servidor; e tambem o cursor
@@ -61,7 +64,7 @@ typedef struct {
   char imdb[24];
   char tipo[8];        // "movie" | "series"
   char titulo[160];
-  char poster[512];
+  char poster[NV_ARTE_URL_MAX];
   char ano[16];
   int  modelo;         // indice do template; -1 = texto livre
   char texto[72];      // so quando modelo == -1
@@ -81,6 +84,16 @@ typedef struct {
   char nome[64];
   char avatar[256];    // vazio = desenhar a inicial; ver RecItem.deAvatar
   char origem[8];      // "trakt" | "nuvio"
+  // O APELIDO que o amigo escolheu ("" = nunca escolheu, ou servidor antigo) e
+  // o SELO que o servidor deu a ele ("criador" | ""). O selo nunca e deduzido
+  // aqui: qualquer um pode escolher o apelido de quem fez o app.
+  char apelido[32];
+  char selo[12];
+  // IDENTIDADES LIGADAS (F08, servidor com migracao 008): "trakt:<slug>" que
+  // este amigo provou ser dele e deixou os amigos verem. E por elas que o feed
+  // do Trakt dele se junta ao nosso. Servidor antigo: nIds = 0.
+  char ids[REC_CONTATO_IDS][80];
+  int  nIds;
 } RecContato;
 
 // GENTE QUE A PESSOA TALVEZ CONHECA, e como o servico chegou ate ela.
@@ -102,6 +115,7 @@ typedef struct {
   char avatar[256];
   char origem[8];      // "trakt" | "amigo"
   char viaNome[64];    // nome do contato em comum; so em "amigo"
+  char selo[12];       // ver RecContato.selo
 } RecSugestao;
 
 // 0 quando o pacote saiu SEM NUVIO_REC_URL. Nesse caso nada mais aqui faz
@@ -111,6 +125,8 @@ int  recomenda_ativo(void);
 // Le cursor e cache do disco. Chamar UMA vez no arranque, depois de
 // dados_iniciar. Nao abre conexao.
 void recomenda_iniciar(void);
+void recomenda_abrir_sessao(void); // carrega somente dados locais deste perfil e invalida fios antigos
+void recomenda_esquecer_conta(void); // logout: apaga caches privados de TODOS os perfis
 
 // Liga a sondagem. A PRIMEIRA chamada cria o fio e faz um ciclo imediato; as
 // seguintes NAO FAZEM NADA.
@@ -264,6 +280,27 @@ void rec_quando_texto(char *dst, size_t tam, long long quandoS);
 // cima, foto ou letra), sem a parte de GIF — a foto do Trakt nao anima.
 void rec_avatar(GfxRect a, const char *url, const char *nome, const char *id,
                 float alfa);
+// O mesmo disco com o ESTILO da letra escolhido por quem chama (-1 = a regra
+// de rec_avatar). A ilha do relogio usa: rosto de 36 com a inicial em negrito
+// pequeno, e o de 150 do modal com a letra grande (mockup de 02/10).
+void rec_avatar_estilo(GfxRect a, const char *url, const char *nome, const char *id,
+                       float alfa, int estilo);
+
+// "Amigo #12" e a RESERVA de quem nao tem nome (o servidor e rec_nome_exibicao
+// a criam), nao um nome nem um apelido: quem desenha a pessoa pela identidade
+// trata como vazio. 1 quando `s` e essa reserva (em qualquer idioma: so olha o
+// "#<numero>" no fim).
+int  rec_nome_reserva(const char *s);
+// AS DUAS LINHAS DE QUEM E A PESSOA: o nome em cima e "@apelido" embaixo. Sem
+// um dos dois sobe o outro sozinho (sem buraco); sem nenhum, "Sem nome". `l2`
+// sai "" quando nao ha segunda linha.
+void rec_identidade(const char *nome, const char *apelido, char *l1, size_t n1,
+                    char *l2, size_t n2);
+// O SELO DE QUEM FEZ O APP ("Criador"), ao lado do nome: pilula de BADGE_H no
+// acento a 18 %, o icone de verificado e o texto no tom do acento. Desenha so
+// com `selo` == "criador" (o servidor decide); devolve a largura, 0 sem selo.
+float rec_selo_pessoa_largura(const char *selo);
+float rec_selo_pessoa(float x, float y, const char *selo, float alfa);
 
 // Altura unica dos dois selos, e o vao entre eles. Ficam aqui porque quem
 // desenha a linha precisa deles para centrar o texto ao lado.
@@ -337,6 +374,8 @@ void recomenda_apagar_dados_sociais(void);
 // 1 quando o perfil esta publicado neste aparelho.
 int  recomenda_pesquisavel(void);
 
+enum { REC_MOTIVO_NENHUM = 0, REC_MOTIVO_TITULOS, REC_MOTIVO_GENEROS, REC_MOTIVO_ATIVOS };
+
 // UMA PESSOA VISTA POR ESTRANHO: so o que ela escolheu mostrar.
 typedef struct {
   char pub[16];               // handle opaco; NUNCA o id da conta
@@ -346,10 +385,20 @@ typedef struct {
   unsigned generos;
   char relacao[12];           // "" | "amigo" | "enviado" | "recebido"
   int  emComum;               // titulos em comum (so nas sugestoes de gosto)
+  // POR QUE o servidor sugeriu esta pessoa (so em "Gosto parecido"). 0 = servidor
+  // antigo, sem o campo: a linha nao diz nada. `motivoGeneros` = generos que as
+  // duas pessoas escolheram (mascara, como `generos`); `emComum` = n de titulos.
+  int  motivo;                // REC_MOTIVO_*
+  unsigned motivoGeneros;
   // Ultimo dos "vistos recentemente" PUBLICOS (so na lista da comunidade, e so
   // de quem ligou "Mostrar o que assisti recentemente"). Nunca "assistindo
   // agora": isso e so para amigo.
   char vendo[80];
+  // O NOME so vem de quem ja e AMIGO (servidor: amigos.js, cartao); para
+  // estranho ele chega vazio e a linha mostra so o apelido. Servidor antigo:
+  // vazio sempre. `selo` = "criador" ou "" (ver RecContato.selo).
+  char nome[64];
+  char selo[12];
 } RecPessoa;
 
 #define REC_BUSCA_MAX    10
@@ -364,10 +413,12 @@ enum { REC_SOC_NADA = 0, REC_SOC_INDO, REC_SOC_OK,
        REC_SOC_LIMITE,         // 429: muitas buscas/pedidos, tente mais tarde
        REC_SOC_NAO_ACHOU,      // 404
        REC_SOC_SEM_APELIDO,    // 409: pedir amizade exige um apelido
-       REC_SOC_CURTA };        // busca com menos de 3 letras (nem sai do aparelho)
+       REC_SOC_CURTA,          // busca com menos de 3 letras (nem sai do aparelho)
+       REC_SOC_NEGADO };       // explicit 403; different from unavailable source/404
 
-// UMA OPERACAO SOCIAL POR VEZ (a mesma disciplina de vincular/remover): todas
-// devolvem 1 quando entraram na fila e o resultado sai em recomenda_soc_estado().
+// UMA OPERACAO SOCIAL DE TELA POR VEZ (como vincular/remover). Aceitar/recusar
+// ja confirmados tem fila propria; todas devolvem 1 quando entraram na fila
+// e o resultado da abertura atual sai em recomenda_soc_estado().
 int  recomenda_buscar(const char *texto);        // apelido (3+) ou codigo de 6
 int  recomenda_sugeridos_gosto(void);            // ver nota em recomenda.c
 // COMUNIDADE NUVIO NATIVE: todo mundo que publicou o perfil (servidor:
@@ -381,6 +432,10 @@ int  recomenda_ver_perfil(const char *pub);
 int  recomenda_pedir_amizade(const char *pub);
 int  recomenda_aceitar(const char *pub);
 int  recomenda_recusar(const char *pub);
+// Captura a identidade no OK. A resposta confirmada termina com esses
+// cabecalhos mesmo depois de trocar de perfil; o resultado so aparece na
+// abertura que a originou. 1 = enfileirada, 0 = nao entrou na fila.
+int  recomenda_responder_pedido(const char *pub, int aceitar);
 int  recomenda_cancelar_pedido(const char *pub);
 int  recomenda_bloquear(const char *pubOuId);
 int  recomenda_desbloquear(const char *pub);
@@ -421,13 +476,16 @@ void recomenda_atividade_fim(const CatItem *ci, int concluiu);
 typedef struct { char imdb[24]; char titulo[160]; char tipo[8]; int agora; long long criado; } RecAtivAmigo;
 int  recomenda_amigo_atividades(const char *id, RecAtivAmigo *saida, int max);
 int  recomenda_social_mesclar(CatItem *itens, int nTrakt, int max);
+int  recomenda_social_mesclar_sessao(CatItem *itens, int nTrakt, int max, uint64_t sessao);
 // Funde `novos` (n) em `itens`(nTrakt) SEM rede: a regra de uniao, separada
 // para o teste. Devolve o novo total.
 int  rec_social_unir(CatItem *itens, int nTrakt, const CatItem *nuvio, int nNuvio, int max);
 
-// Apaga cache, cursor e marca do cartao do aparelho. Chamar de
-// sync_esquecer_usuario: recomendacao e tao pessoal quanto a lista de salvos.
+// Esquece somente a identidade social do perfil atual (por exemplo, Trakt
+// ligado/desligado). Logout da conta inteira usa recomenda_esquecer_conta.
 void recomenda_esquecer(void);
+// Changes when the account/profile is forgotten. UI caches consume it on their thread.
+unsigned recomenda_geracao(void);
 
 // --- CARTAO DE ABERTURA ------------------------------------------------------
 //
@@ -435,6 +493,8 @@ void recomenda_esquecer(void);
 // recomendacao, so com a home de pe, e NUNCA por cima de quem esta assistindo.
 void recomenda_mostrar_se_houver(void);
 int  recomenda_aberta(void);
+void recomenda_abrir_cartao(void);   // abre agora, de proposito (sem a marca de "uma vez")
+int  recomenda_tecla(const SDL_Event *e);   // 1 = o cartao pegou a tecla
 void recomenda_evento(const SDL_Event *e);
 void recomenda_atualizar(float dt, Uint32 agora);
 void recomenda_desenhar(Uint32 agora);
@@ -443,5 +503,229 @@ void recomenda_desenhar(Uint32 agora);
 // Quem resolve o id e abre o detalhe e o roteador (app.c) — este modulo nao
 // conhece detail.c, pela mesma razao que salvospainel.c nao conhece.
 const char *recomenda_pediu_abrir(void);
+
+
+// =============================================================================
+// REDESENHO DO SOCIAL (02/10/2026) — API para quem desenha. Contrato completo
+// com o servidor em docs/social-contrato.md; fontes em docs/social-fontes.md.
+//
+// TUDO AQUI SEGUE A DISCIPLINA DO RESTO DO MODULO: nenhuma funcao bloqueia,
+// pedidos so ENFILEIRAM e acordam o fio de rede, leituras COPIAM de tras do
+// mutex. Sem NUVIO_REC_URL tudo devolve 0/vazio.
+//
+// IDENTIDADE: cada PERFIL Nuvio e uma pessoa. O fio manda `X-Nuvio-Perfil` com
+// o profile_index quando o perfil ativo NAO e o principal (o principal continua
+// `nuvio:<sub>`). Trocar de perfil = trocar de pessoa: o modulo esquece tudo,
+// como em sair da conta. Em /v1/eu vao o nome e a foto do perfil ativo.
+// =============================================================================
+
+// Nome que a TV escreve para uma pessoa. `nome` quando ha; senao o slug (id
+// "trakt:<slug>"); senao "Amigo #<n>" (n curto, derivado do id). NUNCA o id
+// cru — era assim que um amigo por codigo aparecia como "5269539e-...".
+void rec_nome_exibicao(char *dst, size_t tam, const char *nome, const char *id);
+
+// O meu nome como os amigos o veem (resposta do servidor; "" antes do 1o ciclo).
+const char *recomenda_meu_nome(void);
+// O que eu digitei como nome de exibicao ("" = uso o nome do perfil).
+const char *recomenda_minha_exibicao(void);
+// Enfileira POST /v1/eu/nome. "" volta ao nome do perfil. 1 = enfileirou.
+// Resultado: recomenda_meu_nome() muda no ciclo seguinte.
+int  recomenda_definir_nome(const char *nome);
+
+// QUEM VE O QUE EU ASSISTO. Tres respostas e o "nao perguntado", pela mesma
+// razao dos tres estados de REC_APARECER_*: a tela pergunta enquanto for
+// REC_ALCANCE_NAO_PERGUNTADO, e nada sai da TV ate a pessoa responder.
+//   NINGUEM (0)   nada e enviado; o servidor apaga o que havia.
+//   AMIGOS (1)    contatos veem atividade, "assistindo agora", agregados e
+//                 reacoes; "gosto parecido" exige 1+ dos dois lados.
+//   AMIGOS2 (2)   tambem amigos de amigos (sem foto e sem o id da conta).
+// E SEPARADO do "aparecer"/descobrivel (quem pode me ACHAR) e do antigo
+// RecPerfil.ativ (rota velha /v1/amigos/atividade, mantida para TVs no ar).
+enum { REC_ALCANCE_NAO_PERGUNTADO = -1, REC_ALCANCE_NINGUEM = 0,
+       REC_ALCANCE_AMIGOS = 1, REC_ALCANCE_AMIGOS2 = 2 };
+int  recomenda_alcance(void);
+// Grava no aparelho NA HORA e enfileira POST /v1/alcance. Descer para 0 limpa
+// a fila de atividade que ainda nao saiu.
+void recomenda_responder_alcance(int nivel);
+
+
+// LIGACAO COM O MODULO DO PLAYER (src/atividade.c, branch agente/reacao): ele so
+// envia com atividade_definir_permitido(nivel) > 0. No merge, uma linha no
+// arranque: recomenda_ao_mudar_alcance(atividade_definir_permitido). O aviso
+// chama na hora com o nivel atual e de novo a cada mudanca (resposta da pessoa,
+// adocao do servidor, sair da conta), SEMPRE fora do mutex deste modulo.
+// "Nao perguntado" chega como 0.
+void recomenda_ao_mudar_alcance(void (*fn)(int nivel));
+
+// Os cabecalhos do servico para OUTRO modulo que fale com ele (atividade.c):
+// Authorization, X-Nuvio-Auth e, num perfil que nao e o principal,
+// X-Nuvio-Perfil — sem este, o evento cairia na pessoa do perfil principal.
+// `cab` precisa de 4 posicoes; os buffers sao do chamador. 0 = sem identidade.
+int  recomenda_cabecalhos(const char **cab, char *aut, size_t na, char *via, size_t nv,
+                          char *perfil, size_t np);
+
+// --- ATIVIDADE DO PLAYER (contrato com o agente do player) --------------------
+//
+// O player preenche e chama recomenda_atividade(); o modulo decide se sai (so
+// com alcance >= 1). "progresso" seguidos do mesmo titulo se fundem na fila
+// (somando `seg`), entao chamar a cada minuto e barato.
+typedef struct {
+  char ev[12];        // "inicio" | "progresso" | "fim" | "abandono" | "reacao" | "salvo"
+  char imdb[24];      // "tt..." (obrigatorio)
+  char midia[8];      // "movie" | "series"
+  char titulo[160];
+  char poster[NV_ARTE_URL_MAX];   // so sai no feed se for de host conhecido (servidor)
+  int  temporada, episodio;
+  int  pct;           // 0-100
+  int  seg;           // segundos assistidos NESTE trecho (desde o evento anterior)
+  int  reacao;        // 1 | 0 | -1, so em ev "reacao"
+  long long rec;      // id da recomendacao de origem (RecItem.id) ou 0
+} RecAtiv;
+int  recomenda_atividade(const RecAtiv *a);   // 1 = enfileirou
+
+// --- FEED UNIFICADO ------------------------------------------------------------
+enum { REC_FONTE_NUVIO = 1, REC_FONTE_TRAKT, REC_FONTE_SIMKL, REC_FONTE_LETTERBOXD };
+enum { REC_ACAO_INICIO = 1,     // comecou (nosso) / "assistindo agora" (Trakt)
+       REC_ACAO_FIM,            // terminou / "assistiu"
+       REC_ACAO_ABANDONO,
+       REC_ACAO_REACAO,         // `reacao` 1/0/-1
+       REC_ACAO_SALVO,
+       REC_ACAO_NOTA };         // nota de tracker (`nota` 0-100)
+typedef struct {
+  int  fonte, acao;
+  int  agora;           // explicit watching response; a check-in alone is not live
+  char pessoa[96];      // "nuvio:..", "trakt:<slug>" ou "pub:<handle>" (amigo de amigo)
+  char pessoaNome[64];  // ja pronto (rec_nome_exibicao)
+  char pessoaAvatar[256];
+  int  grau;            // 1 amigo, 2 amigo de amigo
+  char via[64];         // grau 2: nome do amigo em comum
+  char imdb[24];
+  char midia[8];        // "movie" | "series"
+  char titulo[160];
+  char poster[NV_ARTE_URL_MAX];
+  int  temporada, episodio, pct;
+  long long quando;     // epoch s; 0 = desconhecido (vai para o fim)
+  int  reacao;          // so REC_ACAO_REACAO
+  int  nota;            // so REC_ACAO_NOTA
+  long long id;         // id do evento no nosso servidor (0 nas outras fontes)
+  int  eps;             // REC_ACAO_FIM de serie agrupado no servidor: episodios distintos
+  int  temReacFim, reacFim;   // REC_ACAO_FIM: a reacao que veio junto (1/0/-1), se veio
+} RecEvento;
+#define REC_FEED_MAX 50
+
+// Pede GET /v1/feed agora (ETag/304). O feed tambem e relido a cada 10 min com
+// a lista de contatos e fica em disco: a tela abre com o ultimo no 1o quadro.
+void recomenda_feed_pedir(void);
+int  recomenda_feed_n(void);
+int  recomenda_feed_item(int i, RecEvento *saida);   // copia; mais novo primeiro
+
+// O FEED DA TELA: o nosso (cache) + os itens que o Trakt ja montou
+// (trakt_social), num formato so, sem duplicata, mais novo primeiro. Sem rede.
+// `quandoTrakt` e o epoch de cada item do Trakt ou NULL (trakt_social ainda nao
+// le `watched_at`: esses vao para o fim). Devolve quantos copiou.
+int  recomenda_feed_unido(RecEvento *saida, int max, const CatItem *trakt,
+                          const long long *quandoTrakt, int nTrakt);
+// As pecas, publicas para o teste e para fontes futuras (Simkl/Letterboxd):
+// converte um item de trakt_social; 0 se nao serve (sem imdb/pessoa).
+int  rec_evento_de_trakt(const CatItem *ci, long long quando, RecEvento *saida);
+// Funde `src` em `dst` (n itens, capacidade max): DEDUPE por pessoa + imdb +
+// acao + midia + temporada/episodio (INICIO e FIM NAO se fundem) com |dt| <= 1 h — ou
+// qualquer dt quando um dos dois nao tem hora. Na fusao fica o do NOSSO
+// servidor (tem reacao, grau, capa), completado com o que faltar. Ordena por
+// `quando` decrescente (0 por ultimo). Devolve o novo n.
+int  rec_eventos_unir(RecEvento *dst, int n, const RecEvento *src, int nsrc, int max);
+
+// --- PERFIL DO AMIGO (GET /v1/amigo?id=) ---------------------------------------
+enum { REC_REC_ENTREGUE = 0, REC_REC_ABERTA, REC_REC_COMECOU, REC_REC_TERMINOU,
+       REC_REC_REAGIU };
+#define REC_AMIGO_GOSTOU 10
+#define REC_AMIGO_RECS   20
+typedef struct {
+  char id[96];          // o que foi pedido (contato) ou "pub:<handle>"
+  char nome[64];
+  char avatar[256];     // vazio para amigo de amigo
+  int  grau;            // 1 contato, 2 amigo de amigo
+  char via[64];         // grau 2: amigo em comum
+  long long desde;      // contato desde (epoch s); 0 em grau 2
+  char origem[12];      // "codigo" | "trakt" | "sugestao" | "pedido" | ""
+  int  compartilha;     // 0: a pessoa nao compartilha atividade comigo
+  // agregados do mes corrente (so com compartilha)
+  int  temMes; char mes[8]; long long seg; int filmes, series;
+  // assistindo agora (some 15 min sem evento)
+  int  temAgora; RecEvento agora;
+  int  nGostou; RecEvento gostou[REC_AMIGO_GOSTOU];
+  // recs que EU mandei para ela, mais nova primeiro (so grau 1)
+  int  nRecs;
+  struct { long long id, criado; char imdb[24], tipo[8], titulo[160], poster[NV_ARTE_URL_MAX];
+           int estado, temReacao, reacao, terminou;
+           // resposta DIRETA de quem recebeu (POST /v1/rec/resposta): a mensagem
+           // curta ("" = nenhuma) e o epoch em que respondeu (0 = nao respondeu).
+           char resposta[64]; long long respondido; } recs[REC_AMIGO_RECS];
+  // gosto parecido: % de titulos com a MESMA reacao (so se os dois compartilham)
+  int  temGosto, gostoTotal, gostoIguais, gostoPct;
+  // F08: o detalhe da comparacao. temCmp = 0 quando o servidor nao o mandou
+  // (antigo) — a tela mostra "desconhecido", nunca zero.
+  int  temCmp, filmesTotal, filmesIguais, seriesTotal, seriesIguais;
+  int  comumFilmes, comumSeries, cobEu, cobEle;
+} RecAmigo;
+
+// Enfileira a leitura. Se o cache em disco for desta pessoa, ele ja fica
+// disponivel em recomenda_amigo() antes da rede. Estado em recomenda_amigo_estado.
+// Funde o estado de assistida/resposta de um corpo de GET /v1/rec em recresp.h.
+// E o que a rede faz a cada sondagem; exposta para o teste.
+void recomenda_fundir_respostas(const char *corpo);
+int  recomenda_amigo_pedir(const char *id);
+int  recomenda_amigo(RecAmigo *saida);    // 1 = ha dados (cache ou novos)
+int  recomenda_amigo_estado(void);        // REC_SOC_* (NADA/INDO/OK/FALHA/NAO_ACHOU/NEGADO)
+
+// --- IDENTIDADE UNIFICADA (F08) -----------------------------------------------
+// Contrato: docs/releases/1.8.0/F08-SOCIAL-IDENTIDADE.md. A pessoa canonica e o
+// PERFIL Nuvio; o Trakt e uma identidade LIGADA a ele, por pedido explicito, com
+// as duas provas (os dois tokens) no mesmo pedido. Servidor sem o recurso
+// ("identidade1" em /v1/eu): tudo aqui fica em REC_IDENT_INDISPONIVEL e a tela
+// nao oferece nada.
+enum { REC_IDENT_INDISPONIVEL = 0,  // servidor antigo, ou /v1/eu ainda nao respondeu
+       REC_IDENT_SEM_TRAKT,         // nao ha as duas contas no aparelho: nada a unir
+       REC_IDENT_PODE_UNIR,         // Trakt e conta Nuvio aqui; Trakt ainda nao ligado
+       REC_IDENT_UNIDA };           // o Trakt esta ligado a este perfil
+enum { REC_IDENT_OP_NADA = 0, REC_IDENT_OP_INDO, REC_IDENT_OP_OK,
+       REC_IDENT_OP_CONFLITO,       // essa conta ja e de outro perfil (409)
+       REC_IDENT_OP_FALHA,
+       REC_IDENT_OP_SEM_SERVICO,    // 501: o servidor nao tem SIMKL_CLIENT_ID
+       REC_IDENT_OP_RECUSADO };     // 401/403: o servidor nao aceitou a prova
+int  recomenda_identidade_situacao(void);
+int  recomenda_identidade_op(void);
+const char *recomenda_identidade_trakt(void);   // slug ligado, "" se nao ha
+int  recomenda_identidade_unir(void);           // 1 = enfileirou
+int  recomenda_identidade_separar(void);        // 1 = enfileirou
+void recomenda_identidade_op_limpar(void);
+
+// SIMKL E LETTERBOXD (linhas da aba Amigos). Um servico por vez na fila (um
+// pedido unico em voo, qualquer que seja o servico), um resultado por servico.
+//  - Simkl: o token e o de Ajustes (nunca pedido de novo, nunca logado). So e
+//    oferecido com login do Simkl nesta TV ou se ja ha um ligado (para desligar).
+//    501 do servidor = REC_IDENT_E_SEM_SERVICO: a linha some depois do aviso.
+//  - Letterboxd: o usuario e DECLARADO; o servidor nao confere e so a propria
+//    pessoa o ve.
+enum { REC_IDENT_TRAKT = 0, REC_IDENT_SIMKL, REC_IDENT_LETTERBOXD, REC_IDENT_N };
+enum { REC_IDENT_E_INDISPONIVEL = 0, // servidor antigo, sem login do Simkl, ou nao registrado
+       REC_IDENT_E_SEM_SERVICO,      // o servidor respondeu 501 (so Simkl)
+       REC_IDENT_E_PODE,             // da para ligar
+       REC_IDENT_E_LIGADO };
+int  recomenda_identidade_estado(int prov);      // so SIMKL e LETTERBOXD
+int  recomenda_identidade_op_de(int prov);       // REC_IDENT_OP_* do servico
+void recomenda_identidade_op_limpar_de(int prov);
+const char *recomenda_identidade_usuario_letterboxd(void);  // "" se nao ha
+int  recomenda_identidade_simkl_unir(void);      // 1 = enfileirou
+int  recomenda_identidade_simkl_separar(void);
+// Normaliza (minusculas, a-z 0-9 _) e enfileira. 0 se invalido (2..30) ou ocupado.
+int  recomenda_identidade_letterboxd_declarar(const char *usuario);
+int  recomenda_identidade_letterboxd_separar(void);
+// Id de uma pessoa vinda de outra fonte ("trakt:<slug>") -> o id do CONTATO
+// que provou ser ela. 1 quando trocou. Sem ids do servidor (antigo), 0 sempre.
+int  recomenda_pessoa_canonica(const char *id, char *dst, size_t tam);
+int  rec_contatos_canonica(const RecContato *c, int n, const char *id, char *dst, size_t tam);
+// Le "ids":["trakt:x",...] de um contato do servidor em [p,f). Exposta para o teste.
+int  rec_contato_ids(const char *p, const char *f, RecContato *c);
 
 #endif

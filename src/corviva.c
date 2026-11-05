@@ -72,8 +72,9 @@ static void lchParaSrgb(float L, float C, float h, float rgb[3]) {
       rgb[0] = srgbDeLin(l3[0]); rgb[1] = srgbDeLin(l3[1]); rgb[2] = srgbDeLin(l3[2]);
       return;
     }
-    C -= 0.005f;
-    if (C < 0.0f) C = 0.0f;
+    // x0,96 por passo, como C.lch do acentos-mockup.html: as cores dos
+    // acentos foram medidas la, e a mesma reducao da o mesmo hex aqui.
+    C *= 0.96f;
   }
   { float lab[3] = { L, 0, 0 }; corviva_oklab_para_srgb(lab, rgb); }
 }
@@ -83,51 +84,68 @@ static void lchDe(const float rgb[3], float *L, float *C, float *h) {
   *L = lab[0]; *C = sqrtf(lab[1] * lab[1] + lab[2] * lab[2]); *h = atan2f(lab[2], lab[1]);
 }
 
-// O DESTAQUE TEM DE CABER NA REGRA QUE JA EXISTE, e nao ganhar uma regra
-// propria. A tinta sobre o realce e BRANCA sempre que o realce nao e branco
-// (ajustes_acento_tinta, regra do dono de 21/09/2026), entao a cor extraida
-// precisa segurar texto branco; e do outro lado ela e anel de foco sobre
-// #0D0D0D, que abaixo de 3:1 some.
-//
-// A FAIXA ERA ESTREITA DEMAIS (L 0,50-0,57, croma 0,12-0,16) e foi o que o dono
-// viu na TV em 25/09: "as cores muito parecidas". Com L travado em 7 centesimos
-// todo destaque tinha o mesmo peso, e o laranja de pele e o vermelho do vestido
-// saiam primos. Agora L vai de 0,46 a 0,68 e o croma de 0,10 a 0,24, e o que
-// segura o texto e a conta de verdade: branco sobre o destaque a >= 3,2:1. E o
-// piso de TEXTO GRANDE do WCAG (3:1), com folga — o texto sobre o realce e o
-// rotulo de botao e de linha em foco, 26-30 px a 1080p vistos a 3 m, que e
-// texto grande pela regra. O 4,5:1 anterior condenava todo destaque ao escuro.
-#define CV_L_MIN 0.50f
-#define CV_L_MAX 0.68f
-#define CV_C_MIN 0.10f
-#define CV_C_MAX 0.24f
-#define CV_TEXTO_MIN 3.2f
-// As DUAS regras de contraste, na conta de verdade (WCAG) e nao em L: texto
-// branco por cima a >= 3,2:1 e o anel sobre #0D0D0D a >= 3:1. Juntas pedem
-// luminancia relativa entre ~0,11 e ~0,28, e o laco anda L ate caber.
-static void conferirContraste(float L, float C, float h, float saida[3]) {
-  static const float branco[3] = { 1, 1, 1 }, fundo[3] = { 0.051f, 0.051f, 0.051f };
-  int k;
-  lchParaSrgb(L, C, h, saida);
-  for (k = 0; k < 40 && corviva_contraste(saida, branco) < CV_TEXTO_MIN; k++) {
-    L -= 0.01f; lchParaSrgb(L, C, h, saida);
-  }
-  for (k = 0; k < 40 && corviva_contraste(saida, fundo) < 3.0f; k++) {
-    L += 0.01f; lchParaSrgb(L, C, h, saida);
-  }
+// AS TRAVAS DOS ACENTOS (acentos-mockup.html, aprovado pelo dono em 03/10).
+// A regra de 21/09 ("texto branco em toda cor") mandava o destaque segurar
+// texto branco a 3,2:1 e por isso empurrava todo amarelo para oliva. Agora ha
+// duas familias, como nos acentos fixos: CLAROS com tinta escura #121316 e
+// PROFUNDOS com tinta branca, ambos a 4,5:1 ou mais na pilula.
+static const float BRANCO_A[3] = { 1.0f, 1.0f, 1.0f };
+static const float TINTA_ESC[3] = { 0x12 / 255.0f, 0x13 / 255.0f, 0x16 / 255.0f };   // #121316
+static const float ILHA_A[3]   = { 0x12 / 255.0f, 0x13 / 255.0f, 0x16 / 255.0f };    // a ilha
+static const float CINZA_A[3]  = { 0xa3 / 255.0f, 0xa1 / 255.0f, 0x9c / 255.0f };    // "HDR" de grupo
+static const float BRANCO_ACENTO[3] = { 0xf4 / 255.0f, 0xf2 / 255.0f, 0xee / 255.0f }; // o acento Branco
+#define CV_GRAU 0.017453293f
+
+float corviva_contraste_y(float ya, float yb) {
+  ya += 0.05f; yb += 0.05f;
+  return ya > yb ? ya / yb : yb / ya;
 }
-static void ajustarCor(const float bruto[3], float saida[3], float lMin, float lMax) {
-  float L, C, h;
+// PROFUNDO: o MAIOR L em que o branco ainda le a >= 4,6:1 (folga sobre 4,5),
+// descendo de 0,78 em passos de 0,004 — C.profundo do mockup.
+static void profundo(float h, float c, float out[3]) {
+  float L = 0.78f;
+  lchParaSrgb(L, c, h, out);
+  while (corviva_contraste(out, BRANCO_A) < 4.6f && L > 0.3f) { L -= 0.004f; lchParaSrgb(L, c, h, out); }
+}
+// AMPLITUDE (dono, 14/10/2026: "o tom dos botoes nao casa com as cores da
+// logo, temos que deixar mais amplo as cores"): o croma saida de 0,17 no
+// teto — a logo vermelha de Stranger Things (C ~0,25) virava um tijolo
+// abafado. Agora o croma do bruto e mantido (x1,15, teto 0,24): o MATIZ e a
+// SATURACAO da cor dominante ficam, e a garantia de contraste nao sai do
+// lugar — o L continua sendo o da busca (profundo/claro) e nao o do bruto.
+#define CV_C_MIN 0.08f
+#define CV_C_MAX 0.24f
+// CLARO: amarelos (matiz 70-115) com tinta escura. L sobe (nao desce) ate a
+// tinta escura #121316 ler a >= 4,5:1 — a mesma folga do profundo, para o
+// croma novo (ate 0,16) nao derrubar a regra.
+static void claro(float h, float c, float out[3]) {
+  float L = 0.86f;
+  lchParaSrgb(L, c, h, out);
+  while (corviva_contraste(out, TINTA_ESC) < 4.5f && L < 0.97f) { L += 0.004f; lchParaSrgb(L, c, h, out); }
+}
+static float grausDe(float h) { float g = h / CV_GRAU; return g < 0.0f ? g + 360.0f : g; }
+void corviva_da_arte(const float bruto[3], float out[3]) {
+  float L, C, h, c, g;
   lchDe(bruto, &L, &C, &h);
-  if (L < lMin) L = lMin;
-  if (L > lMax) L = lMax;
-  // O balde carrega junto o tom apagado do mesmo matiz (a areia e o sofa
-  // laranja caem no mesmo balde), e a media sai mais cinza que a cor que o
-  // olho ve na arte: +15% de croma devolve parte do que a media tirou.
-  C *= 1.15f;
-  if (C < CV_C_MIN) C = CV_C_MIN;
-  if (C > CV_C_MAX) C = CV_C_MAX;
-  conferirContraste(L, C, h, saida);
+  (void)L;
+  if (C < 0.04f) { memcpy(out, BRANCO_ACENTO, sizeof BRANCO_ACENTO); return; }
+  c = C * 1.15f;
+  if (c < CV_C_MIN) c = CV_C_MIN;
+  if (c > CV_C_MAX) c = CV_C_MAX;
+  g = grausDe(h);
+  if (g >= 70.0f && g <= 115.0f) claro(h, c > 0.16f ? 0.16f : c, out);
+  else profundo(h, c, out);
+}
+void corviva_tokens(const float fill[3], CorvivaTokens *t) {
+  float L, C, h;
+  int k, claro;
+  lchDe(fill, &L, &C, &h);
+  claro = corviva_contraste(fill, TINTA_ESC) > corviva_contraste(fill, BRANCO_A);
+  t->tintaBranca = !claro;
+  if (claro && corviva_contraste(fill, ILHA_A) >= 8.0f) memcpy(t->marca, fill, sizeof t->marca);
+  else lchParaSrgb(0.84f, C * 0.85f < 0.14f ? C * 0.85f : 0.14f, h, t->marca);
+  for (k = 0; k < 3; k++) t->hdr[k] = 0.5f * (t->marca[k] + CINZA_A[k]);
+  lchParaSrgb(0.42f, C < 0.11f ? C : 0.11f, h, t->luz);
 }
 
 // A BASE do estilizado: o #0D0D0D (L ~0,16) com um sopro do matiz da arte.
@@ -161,11 +179,13 @@ static void ajustarBase(const float bruto[3], float saida[3]) {
 static void ajustarRegiao(const float bruto[3], float saida[3]) {
   float L, C, h;
   lchDe(bruto, &L, &C, &h);
-  if (L < 0.36f) L = 0.36f;
-  if (L > 0.60f) L = 0.60f;
+  // IMERSIVA NO VIDRO (03/10/2026, acentos-mockup.html quadro 5): a luz
+  // de canto e o matiz da regiao com L 0,42 e croma <= 0,11 — a L e o croma
+  // ficam travados, entao Branco vira nevoa neutra e Jade nao acende a tela.
+  (void)L;
   C *= 2.3f;
-  if (C > 0.21f) C = 0.21f;
-  lchParaSrgb(L, C, h, saida);
+  if (C > 0.11f) C = 0.11f;
+  lchParaSrgb(0.42f, C, h, saida);
 }
 
 // ------------------------------------------------------------------ extracao
@@ -215,9 +235,88 @@ static void mediaCel(const Celula *c, float out[3]) {
 static void pesoCheio(Celula *c) {
   c->w = c->wc; c->r = c->rc; c->g = c->gc; c->b = c->bc;
 }
-static int distMatiz(int a, int b) {
-  int d = a > b ? a - b : b - a;
-  return d > CV_NB / 2 ? CV_NB - d : d;
+
+// TEXTURA: O RECORTE (acentos-mockup.html, quadros 8-9). Uma grade propria de
+// 24 colunas (linhas na proporcao da imagem) pontua cada regiao:
+//   LOGO -> alfa x (0,35 + croma): o miolo opaco e com cor do glifo, numa
+//           janela de 20% da largura;
+//   ARTE -> croma x (1 - |L - 0,5|) - 1,5 x borda: a regiao mais colorida e
+//           de meio-tom, numa janela de 30% — a borda (diferenca de L com o
+//           vizinho) desconta, senao O Nevoeiro escolhia o caixilho preto da
+//           janela e a pilula saia com uma faixa preta no meio.
+// A janela tem a proporcao da pilula (3,2:1). Depois, 32x10 pontos DENTRO do
+// recorte dao a luminancia nos percentis 10 e 90 e a cor media; no logo, o
+// transparente entra composto sobre o destaque (o que fica por baixo).
+// Nada por quadro: sai na mesma passada da paleta e vai junto no corviva.txt.
+#define TX_GX 24
+#define TX_GYMAX 24
+static float yLin(float r, float g, float b) {
+  return 0.2126f * linDeSrgb(r) + 0.7152f * linDeSrgb(g) + 0.0722f * linDeSrgb(b);
+}
+static int cmpF(const void *a, const void *b) {
+  float x = *(const float *)a, y = *(const float *)b;
+  return x < y ? -1 : x > y;
+}
+static void recorteTextura(const unsigned char *px, int w, int h, int pitch, CorvivaPaleta *p) {
+  float sc[TX_GYMAX][TX_GX], Lg[TX_GYMAX][TX_GX], frac = p->transparente ? 0.20f : 0.30f;
+  float melhor = -1e9f, cwN, chN, cx, cy, ys[320], soma[3] = { 0, 0, 0 }, yAc;
+  int gy, i, j, ww, hh, bx = 0, by = 0, n = 0;
+  gy = (int)(TX_GX * (float)h / (float)w + 0.5f);
+  if (gy < 3) gy = 3;
+  if (gy > TX_GYMAX) gy = TX_GYMAX;
+  for (j = 0; j < gy; j++) for (i = 0; i < TX_GX; i++) {
+    const unsigned char *q = px + (size_t)((2 * j + 1) * h / (2 * gy)) * (size_t)pitch
+                                + (size_t)((2 * i + 1) * w / (2 * TX_GX)) * 4;
+    float rgb[3] = { q[0] / 255.0f, q[1] / 255.0f, q[2] / 255.0f }, L, C, hh2, a = q[3] / 255.0f;
+    lchDe(rgb, &L, &C, &hh2);
+    Lg[j][i] = a < 0.5f ? -1.0f : L;
+    sc[j][i] = p->transparente ? a * (0.35f + C) : C * (1.0f - fabsf(L - 0.5f));
+  }
+  if (!p->transparente)
+    for (j = 0; j < gy; j++) for (i = 0; i < TX_GX; i++) {
+      float b = 0.0f;
+      if (i + 1 < TX_GX) b = fabsf(Lg[j][i] - Lg[j][i + 1]);
+      if (j + 1 < gy && fabsf(Lg[j][i] - Lg[j + 1][i]) > b) b = fabsf(Lg[j][i] - Lg[j + 1][i]);
+      sc[j][i] -= 1.5f * b;
+    }
+  cwN = frac;
+  chN = frac * (float)w / (3.2f * (float)h);
+  if (chN > 1.0f) { cwN *= 1.0f / chN; chN = 1.0f; }
+  ww = (int)(cwN * TX_GX + 0.5f); if (ww < 1) ww = 1;
+  hh = (int)(chN * gy + 0.5f);    if (hh < 1) hh = 1;
+  if (hh > gy) hh = gy;
+  for (j = 0; j + hh <= gy; j++) for (i = 0; i + ww <= TX_GX; i++) {
+    float t = 0.0f; int a2, b2;
+    for (b2 = 0; b2 < hh; b2++) for (a2 = 0; a2 < ww; a2++) t += sc[j + b2][i + a2];
+    if (t > melhor) { melhor = t; bx = i; by = j; }
+  }
+  cx = (bx + ww * 0.5f) / TX_GX; cy = (by + hh * 0.5f) / gy;
+  cx -= cwN * 0.5f; cy -= chN * 0.5f;
+  if (cx < 0.0f) cx = 0.0f;
+  if (cy < 0.0f) cy = 0.0f;
+  if (cx + cwN > 1.0f) cx = 1.0f - cwN;
+  if (cy + chN > 1.0f) cy = 1.0f - chN;
+  p->tx[0] = cx; p->tx[1] = cy; p->tx[2] = cwN; p->tx[3] = chN;
+  yAc = yLin(p->acento[0], p->acento[1], p->acento[2]);
+  for (j = 0; j < 10; j++) for (i = 0; i < 32; i++) {
+    int xx = (int)((cx + cwN * (i + 0.5f) / 32.0f) * w), yy = (int)((cy + chN * (j + 0.5f) / 10.0f) * h);
+    const unsigned char *q;
+    float a, r, g, b;
+    if (xx >= w) xx = w - 1;
+    if (yy >= h) yy = h - 1;
+    q = px + (size_t)yy * (size_t)pitch + (size_t)xx * 4;
+    a = q[3] / 255.0f;
+    r = q[0] / 255.0f; g = q[1] / 255.0f; b = q[2] / 255.0f;
+    ys[n++] = a * yLin(r, g, b) + (1.0f - a) * yAc;
+    soma[0] += a * r + (1.0f - a) * p->acento[0];
+    soma[1] += a * g + (1.0f - a) * p->acento[1];
+    soma[2] += a * b + (1.0f - a) * p->acento[2];
+  }
+  qsort(ys, (size_t)n, sizeof *ys, cmpF);
+  p->txY[0] = ys[n / 10];
+  p->txY[1] = ys[(n * 9) / 10];
+  for (i = 0; i < 3; i++) p->txMedia[i] = soma[i] / (float)n;
+  p->txOk = 1;
 }
 
 int corviva_extrair(const unsigned char *px, int w, int h, int pitch,
@@ -229,8 +328,8 @@ int corviva_extrair(const unsigned char *px, int w, int h, int pitch,
   if (!p) return 0;
   memset(p, 0, sizeof *p);
   for (i = 0; i < 3; i++) {
-    p->acento[i] = 1.0f; p->base[i] = 0.051f;
-    for (j = 0; j < 3; j++) p->grad[j][i] = 1.0f;
+    p->acento[i] = BRANCO_ACENTO[i]; p->base[i] = 0.051f;
+    for (j = 0; j < 3; j++) p->grad[j][i] = BRANCO_ACENTO[i];
     for (j = 0; j < 4; j++) p->regiao[j][i] = 0.051f;
   }
   if (!px || w <= 0 || h <= 0 || pitch < w * 4) return 0;
@@ -302,7 +401,7 @@ int corviva_extrair(const unsigned char *px, int w, int h, int pitch,
     matizWc[i] = cel[i * 2].wc + cel[i * 2 + 1].wc;
   }
   {
-    int melhor = 0, usarCheio = 0, a, z, prim, seg = -1, ter = -1;
+    int melhor = 0, usarCheio = 0, a, z;
     float sc, melhorSc = -1.0f, W, bruto[3];
     for (i = 0; i < CV_NB; i++) {
       sc = matizW[i] + 0.5f * (matizW[(i + CV_NB - 1) % CV_NB] + matizW[(i + 1) % CV_NB]);
@@ -326,64 +425,46 @@ int corviva_extrair(const unsigned char *px, int w, int h, int pitch,
     bruto[0] = (cel[melhor*2].r + cel[melhor*2+1].r + 0.5f * (cel[a*2].r + cel[a*2+1].r + cel[z*2].r + cel[z*2+1].r)) / W;
     bruto[1] = (cel[melhor*2].g + cel[melhor*2+1].g + 0.5f * (cel[a*2].g + cel[a*2+1].g + cel[z*2].g + cel[z*2+1].g)) / W;
     bruto[2] = (cel[melhor*2].b + cel[melhor*2+1].b + 0.5f * (cel[a*2].b + cel[a*2+1].b + cel[z*2].b + cel[z*2+1].b)) / W;
-    ajustarCor(bruto, p->acento, CV_L_MIN, CV_L_MAX);
+    corviva_da_arte(bruto, p->acento);
 
-    // DEGRADE: ate tres celulas. A primeira e a mais pesada do matiz vencedor
-    // (ou dos vizinhos dele); as outras, as mais pesadas que sejam OUTRA cor —
-    // matiz a 2+ baldes (30 graus) ou o mesmo matiz no outro brilho — e que
-    // tenham ao menos 20% do peso da primeira. Menos que isso e ruido, e o
-    // degrade inventa as que faltam a partir da primeira.
-    prim = melhor * 2;
-    for (i = -1; i <= 1; i++) {
-      int kk = (melhor + i + CV_NB) % CV_NB, f;
-      for (f = 0; f < 2; f++) if (cel[kk * 2 + f].w > cel[prim].w) prim = kk * 2 + f;
-    }
-    // E NO MAXIMO A 60 GRAUS (4 baldes) da primeira: degrade de cores
-    // ANALOGAS. A primeira folha de contato (25/09) tinha laranja -> vermelho
-    // -> azul no "Batman" e ouro -> azul na "Chegada" — duas cores da arte,
-    // sim, mas o botao virava bandeira. Complementar fica para a luz ambiente.
-    for (i = 0; i < CV_NC; i++) {
-      int dm = distMatiz(i / 2, prim / 2);
-      if (i == prim || cel[i].w < 0.20f * cel[prim].w || dm > 4) continue;
-      if (!(dm >= 2 || (dm <= 1 && (i & 1) != (prim & 1)))) continue;
-      if (seg < 0 || cel[i].w > cel[seg].w) seg = i;
-    }
-    if (seg >= 0) for (i = 0; i < CV_NC; i++) {
-      int d1 = distMatiz(i / 2, prim / 2), d2 = distMatiz(i / 2, seg / 2);
-      if (i == prim || i == seg || cel[i].w < 0.12f * cel[prim].w || d1 > 4) continue;
-      if (!((d1 >= 2 || (i & 1) != (prim & 1)) && (d2 >= 2 || (i & 1) != (seg & 1)))) continue;
-      if (ter < 0 || cel[i].w > cel[ter].w) ter = i;
-    }
-    {
-      float st[3][3], L[3], C, hh;
-      int n = 0, x, y;
-      mediaCel(&cel[prim], bruto); ajustarCor(bruto, st[n++], 0.44f, 0.70f);
-      if (seg >= 0) { mediaCel(&cel[seg], bruto); ajustarCor(bruto, st[n++], 0.44f, 0.70f); }
-      if (ter >= 0) { mediaCel(&cel[ter], bruto); ajustarCor(bruto, st[n++], 0.44f, 0.70f); }
-      // O QUE FALTA SE INVENTA DA PRIMEIRA: um passo mais claro e outro mais
-      // escuro, com o matiz girado 10 graus para cada lado — e o que o olho le
-      // como "a mesma cor com luz", e nao como duas cores.
-      if (n < 3) {
-        float L0, C0, h0, t2[3];
-        lchDe(st[0], &L0, &C0, &h0);
-        if (n == 1) {
-          conferirContraste(L0 + 0.09f > 0.70f ? 0.70f : L0 + 0.09f, C0 * 0.95f, h0 - 0.17f, st[1]);
-          n = 2;
+    // GRADIENTE (acentos-mockup.html, C.grad): DUAS paradas da mesma familia.
+    // A primeira e o Da arte; a segunda e a proxima cor da arte (a celula mais
+    // pesada, de croma >= 0,04) que esteja a 20-60 graus da primeira — cor
+    // ANALOGA, nunca bandeira. Nenhuma assim (arte de um matiz so) = o mesmo
+    // matiz girado 24 graus. A parada do meio e a metade em OKLab, para o
+    // shader de tres paradas (GFX_COR_GRAD) desenhar a reta entre as duas.
+    { float La, ca, ha, hb, cb, B[3], la[3], lb[3], lm[3];
+      int k, x, usados[CV_NC];
+      lchDe(p->acento, &La, &ca, &ha);
+      hb = ha + 24.0f * CV_GRAU; cb = ca;
+      memset(usados, 0, sizeof usados);
+      for (k = 0; k < CV_NC; k++) {
+        int m = -1;
+        float L2, c2, h2, d;
+        for (x = 0; x < CV_NC; x++)
+          if (!usados[x] && cel[x].w > 0.0f && (m < 0 || cel[x].w > cel[m].w)) m = x;
+        if (m < 0) break;
+        usados[m] = 1;
+        mediaCel(&cel[m], bruto);
+        lchDe(bruto, &L2, &c2, &h2);
+        d = fabsf(grausDe(h2) - grausDe(ha));
+        if (d > 180.0f) d = 360.0f - d;
+        if (c2 >= 0.04f && d >= 20.0f && d <= 60.0f) {
+          hb = h2; cb = c2 * 1.15f;
+          if (cb < CV_C_MIN) cb = CV_C_MIN;
+          if (cb > CV_C_MAX) cb = CV_C_MAX;
+          break;
         }
-        conferirContraste(L0 - 0.10f < 0.40f ? 0.40f : L0 - 0.10f, C0, h0 + 0.17f, t2);
-        memcpy(st[2], t2, sizeof t2);
-        n = 3;
       }
-      // Do mais claro ao mais escuro: o degrade anda sempre de cima-esquerda
-      // (luz) para baixo-direita (sombra).
-      for (x = 0; x < 3; x++) { lchDe(st[x], &L[x], &C, &hh); }
-      for (x = 0; x < 3; x++) for (y = x + 1; y < 3; y++) if (L[y] > L[x]) {
-        float tl = L[x], tc[3];
-        L[x] = L[y]; L[y] = tl;
-        memcpy(tc, st[x], sizeof tc); memcpy(st[x], st[y], sizeof tc); memcpy(st[y], tc, sizeof tc);
-      }
-      memcpy(p->grad, st, sizeof st);
-    }
+      if (corviva_contraste(p->acento, TINTA_ESC) > corviva_contraste(p->acento, BRANCO_A))
+        lchParaSrgb(0.80f, cb > 0.16f ? 0.16f : cb, hb, B);
+      else profundo(hb, cb, B);
+      corviva_srgb_para_oklab(p->acento, la);
+      corviva_srgb_para_oklab(B, lb);
+      for (k = 0; k < 3; k++) lm[k] = 0.5f * (la[k] + lb[k]);
+      memcpy(p->grad[0], p->acento, sizeof p->grad[0]);
+      corviva_oklab_para_srgb(lm, p->grad[1]);
+      memcpy(p->grad[2], B, sizeof p->grad[2]); }
 
     // A BASE sai da celula mais POPULOSA (contagem, nao peso): o destaque e a
     // cor que salta da arte, o fundo e a que a arte mais TEM (o azul do ceu
@@ -405,6 +486,7 @@ int corviva_extrair(const unsigned char *px, int w, int h, int pitch,
       ajustarBase(bruto, p->base); }
   }
   p->ok = 1;
+  recorteTextura(px, w, h, pitch, p);
   return 1;
 }
 
@@ -460,6 +542,11 @@ int corviva_paleta(const char *chave, CorvivaPaleta *p) {
 }
 
 // ------------------------------------------------------------- quem manda
+// As URLs andam junto dos hashes so para a TEXTURA: o desenho precisa da
+// textura do titulo em cena (tex_cache, pela url), e a paleta so guarda o hash.
+#define CV_URL 512
+static char pedidoUrl[CV_URL], pedidoLogoUrl[CV_URL], pendUrl[CV_URL], pendLogoUrl[CV_URL];
+static char cenaUrl[CV_URL], cenaLogoUrl[CV_URL];
 static unsigned int pedidoH, pedidoLogoH;   // os pedidos de maior prioridade DESTE quadro
 static int pedidoPrio, pedidoLogoPrio;
 static unsigned int pendH, pendLogoH;       // o que esta pedido, esperando assentar
@@ -478,15 +565,23 @@ static double ultGravacao = -1e9;
 // chega junto com a arte, nem antes nem muito depois.
 #define CV_DURACAO_S   0.45f
 
+int corviva_cena_paleta(CorvivaPaleta *p) {
+  if (!p || !temCena || !cena.ok) return 0;
+  *p = cena;
+  return 1;
+}
+
 void corviva_definir(const char *chave, int prioridade) {
   if (!chave || !chave[0] || prioridade <= pedidoPrio) return;
   pedidoH = hashDe(chave);
   pedidoPrio = prioridade;
+  snprintf(pedidoUrl, sizeof pedidoUrl, "%s", chave);
 }
 void corviva_definir_logo(const char *chave, int prioridade) {
   if (!chave || !chave[0] || prioridade <= pedidoLogoPrio) return;
   pedidoLogoH = hashDe(chave);
   pedidoLogoPrio = prioridade;
+  snprintf(pedidoLogoUrl, sizeof pedidoLogoUrl, "%s", chave);
 }
 
 // ----------------------------------------------------------------- movimento
@@ -495,11 +590,15 @@ void corviva_definir_logo(const char *chave, int prioridade) {
 // degrade e as quatro luzes de regiao. Mais a forca da luz ambiente, que e um
 // numero so (entra e sai com o modo imersivo).
 #define CV_NCOR 9
-static const float BRANCO[3] = { 1.0f, 1.0f, 1.0f };
+// Sem titulo (ou arte cinza): o acento Branco (#f4f2ee), e nao o #ffffff —
+// e a mesma cor do acento fixo 0.
+static const float BRANCO[3] = { 0xf4 / 255.0f, 0xf2 / 255.0f, 0xee / 255.0f };
 static const float FUNDO[3]  = { 0.051f, 0.051f, 0.051f };   // NV_COR_FUNDO
 float nv_cor_fundo_viva[3] = { 0.051f, 0.051f, 0.051f };
-float nv_acento_viva[3] = { 1.0f, 1.0f, 1.0f };
+float nv_acento_viva[3] = { 0xf4 / 255.0f, 0xf2 / 255.0f, 0xee / 255.0f };
 float nv_grad_viva[3][3] = { { 1, 1, 1 }, { 1, 1, 1 }, { 1, 1, 1 } };
+float nv_luz_viva[3] = { 0.30f, 0.30f, 0.29f };
+CorvivaTextura nv_textura_viva;
 int   nv_grad_ativo;
 float nv_ambiente_viva[4][3];
 float nv_ambiente_forca;
@@ -523,6 +622,14 @@ void corviva_acento(float *r, float *g, float *b) {
   if (g) *g = nv_acento_viva[1];
   if (b) *b = nv_acento_viva[2];
 }
+// A cor do LOGO do titulo em cena, a mesma fonte que a Imersiva usa com "Cor da
+// logo" (corviva_quadro: logo de cor, senao a arte). 0 = ainda sem paleta.
+int corviva_logo_acento(float *r, float *g, float *b) {
+  const CorvivaPaleta *p = (temLogo && cenaLogo.ok) ? &cenaLogo : (temCena && cena.ok) ? &cena : NULL;
+  if (!p) return 0;
+  *r = p->acento[0]; *g = p->acento[1]; *b = p->acento[2];
+  return 1;
+}
 int corviva_retargets(void) { return retargets; }
 
 void corviva_quadro(float dt, int modo, int usarLogo, int reduzido) {
@@ -536,7 +643,9 @@ void corviva_quadro(float dt, int modo, int usarLogo, int reduzido) {
   // O pedido do quadro que ACABOU de ser desenhado vira o pendente.
   if (pedidoPrio) {
     if (pedidoH != pendH) { pendH = pedidoH; pendDesde = relogio; }
+    memcpy(pendUrl, pedidoUrl, sizeof pendUrl);
     pendLogoH = (pedidoLogoPrio == pedidoPrio) ? pedidoLogoH : 0;
+    if (pendLogoH) memcpy(pendLogoUrl, pedidoLogoUrl, sizeof pendLogoUrl);
   }
   pedidoPrio = 0; pedidoLogoPrio = 0;
   if (pendH && pendH != cenaH && relogio - pendDesde >= CV_ASSENTAR_MS) {
@@ -545,6 +654,7 @@ void corviva_quadro(float dt, int modo, int usarLogo, int reduzido) {
     // anterior de pe. Assim que o fio de decode anotar, este teste passa.
     if (buscar(pendH, &p)) {
       cenaH = pendH; cena = p; temCena = 1;
+      memcpy(cenaUrl, pendUrl, sizeof cenaUrl);
       cenaLogoH = 0; temLogo = 0;
       travar(); sujo = 1; soltar();
     }
@@ -554,22 +664,61 @@ void corviva_quadro(float dt, int modo, int usarLogo, int reduzido) {
   // inteiros, so enquanto falta.
   if (cenaH && cenaH == pendH && pendLogoH != cenaLogoH) {
     cenaLogoH = pendLogoH; temLogo = 0;
+    memcpy(cenaLogoUrl, pendLogoUrl, sizeof cenaLogoUrl);
     travar(); sujo = 1; soltar();
   }
   if (cenaLogoH && !temLogo) temLogo = buscar(cenaLogoH, &cenaLogo);
 
   // A FONTE DA COR: o logo, quando o ajuste pede e ele tem cor (logo branco ou
   // preto nao tem, e ai vale a arte); senao a arte.
-  fonte = (usarLogo && temLogo && cenaLogo.ok) ? &cenaLogo : &cena;
+  // TEXTURA: com logo de cor e recorte, a fonte e o logo (a cor lisa por
+  // baixo do glifo tem de ser a dele), com ou sem "Cor da logo".
+  { int tx = modo == CORVIVA_TEXTURA || modo == CORVIVA_TEXTURA_SUTIL;
+    int logoTx = tx && temLogo && cenaLogo.ok && cenaLogo.txOk && cenaLogoUrl[0];
+    fonte = ((usarLogo || logoTx) && temLogo && cenaLogo.ok) ? &cenaLogo : &cena;
+    memset(&nv_textura_viva, 0, sizeof nv_textura_viva);
+    if (tx && (logoTx || (temCena && cena.ok && cena.txOk && cenaUrl[0]))) {
+      const CorvivaPaleta *f = logoTx ? &cenaLogo : &cena;
+      CorvivaTextura *T = &nv_textura_viva;
+      T->ok = 1; T->logo = logoTx;
+      snprintf(T->url, sizeof T->url, "%s", logoTx ? cenaLogoUrl : cenaUrl);
+      memcpy(T->janela, f->tx, sizeof T->janela);
+      memcpy(T->base, f->acento, sizeof T->base);
+      memcpy(T->media, f->txMedia, sizeof T->media);
+      T->forca = modo == CORVIVA_TEXTURA_SUTIL ? 0.35f : 1.0f;
+      corviva_textura_tinta(f->txY[0], f->txY[1], f->acento, T->forca,
+                            &T->tintaBranca, &T->veu, &T->contraste);
+      // (14/10, dono: "os com textura tem alguns que sao muito bons e outros
+      // nao") O RECORTE CHAPADO e o que nao presta: p90 - p10 de luminancia
+      // abaixo de 0,12 nao tem material nenhum (glifo liso, faixa unica) e a
+      // pilula sai como cor lisa com o tema fazendo nada. Ajustes troca estes
+      // pelo MATERIAL CC0 embutido (ajustes_textura_quadro).
+      T->fraca = (f->txY[1] - f->txY[0]) < 0.12f;
+    } }
   fonteOk = modo != CORVIVA_DESLIGADA && temCena && fonte->ok;
   if (!fonteOk && modo != CORVIVA_DESLIGADA && temLogo && cenaLogo.ok) {
     fonte = &cenaLogo; fonteOk = 1;   // arte P&B com logo colorido
   }
   memcpy(novo[0], fonteOk ? fonte->acento : BRANCO, sizeof novo[0]);
-  memcpy(novo[1], (fonteOk && modo >= CORVIVA_ESTILIZADA && cena.ok) ? cena.base : FUNDO, sizeof novo[1]);
+  if (fonteOk && modo == CORVIVA_SIMPLES_CLARO) {
+    float L, C, h;
+    lchDe(novo[0], &L, &C, &h);
+    // Lift lightness and halve chroma without rotating hue; gamut mapping
+    // only lowers chroma further. Existing tokens select contrasting ink.
+    lchParaSrgb(L + (1.0f - L) * 0.65f, C * 0.45f, h, novo[0]);
+  }
+  memcpy(novo[1], FUNDO, sizeof novo[1]);   // o estilizado (base tingida) saiu
   for (k = 0; k < 3; k++) memcpy(novo[2 + k], fonteOk ? fonte->grad[k] : BRANCO, sizeof novo[0]);
   for (k = 0; k < 4; k++) memcpy(novo[5 + k], temCena ? cena.regiao[k] : FUNDO, sizeof novo[0]);
-  grad = fonteOk && modo >= CORVIVA_GRADIENTE;
+  // "Cor da logo" tambem vale para a LUZ da Imersiva (dono, 05/10: "o imersivo
+  // da logo nao ta pegando a cor da logo"): as quatro luzes saiam sempre das
+  // regioes da ARTE, e so o destaque seguia o logo. Com logo de cor, sao o
+  // destaque e o degrade dele, na mesma faixa de luz das regioes.
+  if (usarLogo && temCena && temLogo && cenaLogo.ok) {
+    ajustarRegiao(cenaLogo.acento, novo[5]);
+    for (k = 0; k < 3; k++) ajustarRegiao(cenaLogo.grad[k], novo[6 + k]);
+  }
+  grad = fonteOk && modo == CORVIVA_GRADIENTE;
   forca = (modo == CORVIVA_IMERSIVA && temCena) ? 1.0f : 0.0f;
 
   if (memcmp(novo, alvo, sizeof alvo) || forca != alvoForca || !iniciado) {
@@ -608,15 +757,51 @@ void corviva_quadro(float dt, int modo, int usarLogo, int reduzido) {
     nv_ambiente_forca = deForca + (paraForca - deForca) * e;
   }
   if (t >= 1.0f) nv_grad_ativo = alvoGrad;
+  { static float ultimo[3] = { -1, -1, -1 };
+    if (memcmp(ultimo, nv_acento_viva, sizeof ultimo)) {
+      CorvivaTokens tk;
+      memcpy(ultimo, nv_acento_viva, sizeof ultimo);
+      corviva_tokens(nv_acento_viva, &tk);
+      memcpy(nv_luz_viva, tk.luz, sizeof nv_luz_viva);
+    } }
+}
+
+// A tinta da textura (txTinta do mockup). Luminancia relativa -> cinza sRGB e
+// de volta: o veu e uma mistura em sRGB, como o radial-gradient do CSS.
+static float sG(float y) { return y <= 0.0031308f ? 12.92f * y : 1.055f * powf(y, 1.0f / 2.4f) - 0.055f; }
+void corviva_textura_tinta(float p10, float p90, const float base[3], float forca,
+                           int *tintaBranca, float *veu, float *contraste) {
+  float yi = 0.2126f * linDeSrgb(TINTA_ESC[0]) + 0.7152f * linDeSrgb(TINTA_ESC[1]) + 0.0722f * linDeSrgb(TINTA_ESC[2]);
+  float cw, cd, cr, a = 0.0f;
+  int branca;
+  if (forca < 0.999f) {   // Textura sutil: o recorte a `forca` sobre a cor lisa
+    float bY = sG(0.2126f * linDeSrgb(base[0]) + 0.7152f * linDeSrgb(base[1]) + 0.0722f * linDeSrgb(base[2]));
+    p10 = linDeSrgb(forca * sG(p10) + (1.0f - forca) * bY);
+    p90 = linDeSrgb(forca * sG(p90) + (1.0f - forca) * bY);
+  }
+  cw = corviva_contraste_y(1.0f, p90);
+  cd = corviva_contraste_y(yi, p10);
+  branca = cw >= cd;
+  cr = branca ? cw : cd;
+  while (cr < 4.5f && a < 0.7f) {
+    a += 0.05f;
+    cr = branca ? corviva_contraste_y(1.0f, linDeSrgb(sG(p90) * (1.0f - a)))
+                : corviva_contraste_y(yi, linDeSrgb(sG(p10) * (1.0f - a) + a));
+  }
+  if (tintaBranca) *tintaBranca = branca;
+  if (veu) *veu = a;
+  if (contraste) *contraste = cr;
 }
 
 // ------------------------------------------------------------- corviva.txt
 //
 // Texto e nao binario, como todo arquivo de dados deste app: da para abrir no
 // ssh e ler. "leve" (dados_gravar_leve): e cache re-obtivel, e no Tizen a
-// descarga para o IndexedDB pode esperar o relogio longo. Formato 2 (25/09):
-// "p" + hash + ok + transparente + as nove cores; linhas do formato 1 sao
-// ignoradas (e cache: a arte refaz a paleta no proximo decode).
+// descarga para o IndexedDB pode esperar o relogio longo. Formato 3 (03/10):
+// "p3" + hash + ok + transparente + as nove cores + o recorte da Textura, e as
+// urls da cena ("url", "urllogo"). As linhas "p" do formato 2 tem o destaque
+// da regra antiga (tudo segurando texto branco) e sao ignoradas, como as do 1
+// (e cache: a arte refaz a paleta no proximo decode).
 static void corHex(const float c[3], char *d) {
   snprintf(d, 7, "%02x%02x%02x", (int)(c[0] * 255.0f + 0.5f),
            (int)(c[1] * 255.0f + 0.5f), (int)(c[2] * 255.0f + 0.5f));
@@ -639,11 +824,22 @@ void corviva_carregar(void) {
     fim = strchr(p, '\n');
     if (!fim) fim = p + strlen(p); else *fim++ = 0;
     if ((lidos = sscanf(p, "cena %x %x", &h, &h2)) >= 1) { atual = h; atualLogo = lidos == 2 ? h2 : 0; continue; }
-    if (sscanf(p, "p %x %d %d %7s %7s %7s %7s %7s %7s %7s %7s %7s", &h, &ok, &tr,
+    if (!strncmp(p, "url ", 4)) { snprintf(cenaUrl, sizeof cenaUrl, "%s", p + 4); continue; }
+    if (!strncmp(p, "urllogo ", 8)) { snprintf(cenaLogoUrl, sizeof cenaLogoUrl, "%s", p + 8); continue; }
+    if (sscanf(p, "p3 %x %d %d %7s %7s %7s %7s %7s %7s %7s %7s %7s", &h, &ok, &tr,
                c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]) == 12 && h) {
       CorvivaPaleta pal;
-      int k, bom = 1;
+      int k, bom = 1, txOk = 0;
+      float t4[4], y2[2];
+      char med[8], *q = p;
       memset(&pal, 0, sizeof pal);
+      // TEXTURA, depois das nove cores: ok x y w h p10 p90 media.
+      for (k = 0; k < 13 && q; k++) { q = strchr(q, ' '); if (q) q++; }
+      if (q && sscanf(q, "%d %f %f %f %f %f %f %7s", &txOk, &t4[0], &t4[1], &t4[2], &t4[3],
+                      &y2[0], &y2[1], med) == 8 && txOk && lerHex(med, pal.txMedia)) {
+        pal.txOk = 1;
+        memcpy(pal.tx, t4, sizeof t4); memcpy(pal.txY, y2, sizeof y2);
+      }
       pal.ok = ok ? 1 : 0; pal.transparente = tr ? 1 : 0;
       bom &= lerHex(c[0], pal.acento);
       bom &= lerHex(c[1], pal.base);
@@ -657,7 +853,7 @@ void corviva_carregar(void) {
   free(txt);
   if (atual) {
     CorvivaPaleta pal;
-    if (buscar(atual, &pal)) { cenaH = pendH = atual; cena = pal; temCena = 1; }
+    if (buscar(atual, &pal)) { cenaH = pendH = atual; cena = pal; temCena = 1; memcpy(pendUrl, cenaUrl, sizeof pendUrl); }
     if (atualLogo && buscar(atualLogo, &cenaLogo)) { cenaLogoH = pendLogoH = atualLogo; temLogo = 1; }
   }
   printf("[cor] %d paleta(s) de corviva.txt%s\n", n, temCena ? ", com a ultima cena" : "");
@@ -665,26 +861,31 @@ void corviva_carregar(void) {
 }
 
 void corviva_gravar_se_preciso(int forcar) {
-  static char buf[CV_TAB * 80 + 64];
+  static char buf[CV_TAB * 140 + 2 * CV_URL + 64];
   size_t w = 0;
   int i, k;
   if (!sujo) return;
   if (!forcar && relogio - ultGravacao < 20000.0) return;
   ultGravacao = relogio;
   w += (size_t)snprintf(buf + w, sizeof buf - w, "cena %08x %08x\n", cenaH, cenaLogoH);
+  if (cenaUrl[0]) w += (size_t)snprintf(buf + w, sizeof buf - w, "url %s\n", cenaUrl);
+  if (cenaLogoUrl[0] && w < sizeof buf) w += (size_t)snprintf(buf + w, sizeof buf - w, "urllogo %s\n", cenaLogoUrl);
   travar();
   // Do mais antigo ao mais novo, para o anel voltar na mesma ordem.
   for (k = 0; k < CV_TAB; k++) {
     const Entrada *e = &tab[(tabProx + k) % CV_TAB];
-    char c[9][8];
+    char c[9][8], med[8];
     int j;
     if (!e->h) continue;
+    corHex(e->p.txMedia, med);
     corHex(e->p.acento, c[0]); corHex(e->p.base, c[1]);
     for (j = 0; j < 3; j++) corHex(e->p.grad[j], c[2 + j]);
     for (j = 0; j < 4; j++) corHex(e->p.regiao[j], c[5 + j]);
-    i = snprintf(buf + w, sizeof buf - w, "p %08x %d %d %s %s %s %s %s %s %s %s %s\n",
+    i = snprintf(buf + w, sizeof buf - w, "p3 %08x %d %d %s %s %s %s %s %s %s %s %s %d %.4f %.4f %.4f %.4f %.4f %.4f %s\n",
                  e->h, e->p.ok, e->p.transparente,
-                 c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8]);
+                 c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8],
+                 e->p.txOk, e->p.tx[0], e->p.tx[1], e->p.tx[2], e->p.tx[3],
+                 e->p.txY[0], e->p.txY[1], med);
     if (i < 0 || (size_t)i >= sizeof buf - w) break;
     w += (size_t)i;
   }
@@ -699,6 +900,8 @@ void corviva_zerar(void) {
   memset(tab, 0, sizeof tab); tabProx = 0; sujo = 0;
   soltar();
   pedidoH = pendH = cenaH = pedidoLogoH = pendLogoH = cenaLogoH = 0;
+  pedidoUrl[0] = pedidoLogoUrl[0] = pendUrl[0] = pendLogoUrl[0] = cenaUrl[0] = cenaLogoUrl[0] = 0;
+  memset(&nv_textura_viva, 0, sizeof nv_textura_viva);
   pedidoPrio = pedidoLogoPrio = 0; temCena = temLogo = 0;
   relogio = 0; pendDesde = 0; ultGravacao = -1e9;
   memcpy(nv_acento_viva, BRANCO, sizeof nv_acento_viva);

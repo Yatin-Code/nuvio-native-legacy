@@ -1,8 +1,9 @@
 // Tela AGENDA: a LINHA DO TEMPO das series que o dono acompanha.
 //
-// Uma coluna, um eixo vertical, uma estacao por serie, ordenada pela data do
-// proximo episodio. O D-pad so sobe e desce; OK abre o MODAL da linha (acoes,
-// historico de lancamentos desde o lembrete, noticias). Ver agendaui.c.
+// Layout C1 (o mesmo dos Ajustes A3): a esquerda o episodio em foco grande, a
+// direita uma ilha com a lista agrupada sobre o fio do tempo. O D-pad so sobe
+// e desce; OK abre o MODAL da linha (acoes, lembrete, historico, noticias).
+// Ver agendaui.c.
 //
 // Os dados vem inteiros de agenda.c — esta tela nao sabe de rede, de TMDB nem
 // de arquivo. Ela pede agenda_montar() ao abrir e desenha o que voltar.
@@ -11,12 +12,14 @@
 #include <SDL2/SDL.h>
 #include "gfx.h"
 #include "text.h"
+#include "agenda.h"
 
 int  agendaui_iniciar(void);
 void agendaui_evento(const SDL_Event *e);
 void agendaui_atualizar(float dt, Uint32 agora);
 void agendaui_desenhar(Uint32 agora);
 int  agendaui_quer_sair(void);   // 1 quando o Back deve fechar a tela
+int  agendaui_pediu_relogio(void);
 // IMDb do titulo que o menu de contexto (segurar OK) pediu para abrir, ou
 // NULL. Consumido uma vez — o mesmo contrato de avisos_pediu_abrir.
 const char *agendaui_pediu_abrir(void);
@@ -25,6 +28,12 @@ int  agendaui_menu_aberto(void);
 // Consumido uma vez. Quem abre o titulo e pede a reproducao e o roteador
 // (app.c), pelo mesmo caminho do cartao de Continuar assistindo.
 const char *agendaui_pediu_tocar(int *temporada, int *episodio);
+// TESTE (#99): o foco de agora, para conferir o ponteiro de fora. NULL = nao
+// quer. `modal` 0 lista/mes, 1 modal, 2 manchetes, 3 noticia; `modalFoco` e
+// a acao (1) ou a manchete (2); `celula` -1 com o painel do dia em foco;
+// `evento` -1 fora dele.
+void agendaui_teste_foco(int *linha, int *cabecalho, int *modal, int *modalFoco,
+                         int *celula, int *evento);
 
 // O DESPERTADOR, desenhado em qualquer tela que fale de lembrete (a estacao da
 // agenda, o botao do hero, o cartao de abertura). Mora aqui porque as tres
@@ -102,4 +111,13 @@ int agendaui_sinopse(TxtEstilo estilo, const char *s, float x, float y,
 int agendaui_sinopse_linhas(TxtEstilo estilo, const char *s, float larg,
                             int maxLinhas, int r, int g, int b);
 
+// A lista C1 desta tela, desenhada pelo painel Social (aba Agenda) com as mesmas
+// pecas: linha (com o ponto no fio), cabecalho de grupo e o fio. Unidade = pixel
+// de 1920x1080. A linha do painel desenha o proprio realce de foco (`f` 0..1).
+float agendaui_painel_linha_h(void);
+float agendaui_painel_grupo_h(void);
+int   agendaui_painel_grupo_de(const AgItem *it);
+void  agendaui_painel_grupo(float lsX, float lsW, int g, float y);
+void  agendaui_painel_linha(float lsX, float lsW, const AgItem *it, float y, float f);
+void  agendaui_painel_fio(float lsX, float clipY, float clipH, float y0, float y1);
 #endif

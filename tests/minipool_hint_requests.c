@@ -1,0 +1,471 @@
+#define NV_ANDROID 1
+#include "../src/minipool.c"
+#include "../src/minipool_fallback.h"
+#include <unistd.h>
+
+static int status[4], calls;
+static char urls[4][2048], methods[4][8], captured_headers[4][256];
+static char request_pins[4][64];
+static int request_redirects[4], request_tls_personal[4];
+static char request_bodies[4][256];
+static size_t request_body_bytes[4];
+static const char *bodies[4];
+static const char *response_headers[4];
+static unsigned char response_binary[4][512];
+static size_t response_binary_size[4];
+
+int rede_pedir(const RedePedido *p, RedeResposta *r) {
+  int i = calls++;
+  if (!p || !r || i >= 4) return 0;
+  snprintf(methods[i], sizeof methods[i], "%s", p->metodo ? p->metodo : "GET");
+  snprintf(urls[i], sizeof urls[i], "%s", p->url ? p->url : "");
+  snprintf(request_pins[i], sizeof request_pins[i], "%s", p->tls_pin ? p->tls_pin : "");
+  request_redirects[i] = p->seguir;
+  request_tls_personal[i] = p->tls_pessoal;
+  if (p->cabecalhos) for (int h = 0; p->cabecalhos[h]; h++) {
+    size_t have = strlen(captured_headers[i]);
+    snprintf(captured_headers[i] + have, sizeof captured_headers[i] - have, "%s%s", have ? "\n" : "", p->cabecalhos[h]);
+  }
+  request_body_bytes[i] = p->n_corpo;
+  if (p->corpo && p->n_corpo < sizeof request_bodies[i]) {
+    memcpy(request_bodies[i], p->corpo, p->n_corpo);
+    request_bodies[i][p->n_corpo] = 0;
+  }
+  r->status = status[i];
+  if (response_binary_size[i]) {
+    r->corpo = malloc(response_binary_size[i]);
+    if (r->corpo) memcpy(r->corpo, response_binary[i], response_binary_size[i]);
+    r->n_corpo = response_binary_size[i];
+  } else {
+    r->corpo = strdup(bodies[i] ? bodies[i] : "");
+    r->n_corpo = strlen(r->corpo);
+  }
+  r->cabecalhos = strdup(response_headers[i] ? response_headers[i] : "");
+  return r->corpo && r->cabecalhos;
+}
+
+void rede_resposta_limpar(RedeResposta *r) {
+  if (!r) return;
+  free(r->corpo);
+  free(r->cabecalhos);
+  memset(r, 0, sizeof *r);
+}
+
+static void reset(void) {
+  calls = 0;
+  memset(status, 0, sizeof status);
+  memset(urls, 0, sizeof urls);
+  memset(methods, 0, sizeof methods);
+  memset(captured_headers, 0, sizeof captured_headers);
+  memset(request_pins, 0, sizeof request_pins);
+  memset(request_redirects, 0, sizeof request_redirects);
+  memset(request_tls_personal, 0, sizeof request_tls_personal);
+  memset(request_bodies, 0, sizeof request_bodies);
+  memset(request_body_bytes, 0, sizeof request_body_bytes);
+  memset(bodies, 0, sizeof bodies);
+  memset(response_headers, 0, sizeof response_headers);
+  memset(response_binary, 0, sizeof response_binary);
+  memset(response_binary_size, 0, sizeof response_binary_size);
+  strcpy(mp_url, "https://pool.example");
+  strcpy(mp_pin, "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
+  strcpy(mp_token, "paired-device-token");
+}
+
+static void put32(unsigned char *p, uint32_t v) {
+  p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
+  p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+
+static void one_tile_package(unsigned char package[157], uint32_t grid,
+                             uint32_t n_slots, uint32_t slot) {
+  memset(package, 0, 157);
+  memcpy(package, "NVMT", 4); put32(package + 4, 1); put32(package + 8, grid);
+  put32(package + 12, n_slots); put32(package + 16, 1);
+  put32(package + 20, slot); put32(package + 24, slot * grid); put32(package + 28, 125);
+  package[32] = 0xff; package[33] = 0xd8; package[155] = 0xff; package[156] = 0xd9;
+}
+
+typedef struct { int lookup_started, lookup_available, local_started; } FallbackProbe;
+
+static void start_optional_lookup(void *context) {
+  FallbackProbe *probe = context;
+  probe->lookup_started++;
+  probe->lookup_available = 0;
+}
+
+static int start_local_generation(void *context) {
+  FallbackProbe *probe = context;
+  probe->local_started++;
+  return 1;
+}
+
+static int test_local_generation_is_independent_of_pool_lookup(void) {
+  FallbackProbe probe = {.lookup_available = 1};
+  // The optional lookup can miss or be offline; local work still starts.
+  if (!minipool_start_local_fallback(&probe, start_optional_lookup,
+                                     start_local_generation) ||
+      probe.lookup_started != 1 || probe.lookup_available || probe.local_started != 1) return 0;
+  probe = (FallbackProbe){0};
+  // Local-only mode has no pool lookup callback and still starts generation.
+  return minipool_start_local_fallback(&probe, NULL, start_local_generation) &&
+         probe.lookup_started == 0 && probe.local_started == 1;
+}
+
+static int test_linear_mapping(void) {
+  static const struct {
+    int64_t pts, a_num, a_den, b_ms, duration, expected;
+  } cases[] = {
+    { 25000, 24, 25, 0, 60000, 24000 },
+    { 25000, 25, 24, 0, 60000, 26041 },
+    { 12345, 1, 1, 0, 60000, 12345 },
+    { 10000, 1, 1, 1500, 60000, 11500 },
+    { -100, 1, 1, 0, 60000, 0 },
+    { 65000, 1, 1, 0, 60000, 60000 },
+  };
+  for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+    long mapped = -1;
+    if (!minipool_map_pts(cases[i].pts, cases[i].a_num, cases[i].a_den,
+                          cases[i].b_ms, cases[i].duration, &mapped) ||
+        mapped != cases[i].expected) return 0;
+  }
+  long mapped = -1;
+  return !minipool_map_pts(1000, 1, 0, 0, 60000, &mapped) && mapped == -1;
+}
+
+static int test_log_error_redaction(void) {
+  RedeResposta r = {0};
+  char output[256] = "";
+  FILE *capture = tmpfile();
+  int saved;
+  if (!capture) return 0;
+  r.erro = REDE_TRANSPORTE; r.curl_erro = 28;
+  r.corpo = "{\"error\":\"secret\\nAuthorization: bearer-token\"}";
+  fflush(stdout);
+  saved = dup(STDOUT_FILENO);
+  if (saved < 0 || dup2(fileno(capture), STDOUT_FILENO) < 0) { if (saved >= 0) close(saved); fclose(capture); return 0; }
+  mp_log_failure("candidate index", 0, &r);
+  fflush(stdout);
+  if (saved >= 0) { dup2(saved, STDOUT_FILENO); close(saved); }
+  rewind(capture);
+  fread(output, 1, sizeof output - 1, capture);
+  fclose(capture);
+  return strstr(output, "OpenSeek candidate index failed: HTTP 0 transport=transport curl=28 api=invalid_code") &&
+         !strstr(output, "Authorization") && !strstr(output, "bearer-token");
+}
+
+int main(void) {
+  if (!test_local_generation_is_independent_of_pool_lookup()) return 29;
+  if (!test_linear_mapping()) return 15;
+  if (!test_log_error_redaction()) return 23;
+  MiniMeta meta = {0};
+  MpoolCandidate candidates[8];
+  int count = 0;
+  strcpy(meta.fp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  strcpy(meta.imdb, "tt1234567");
+  meta.temporada = 0;
+  meta.episodio = 0;
+  meta.durMs = 7200000L;
+
+  reset();
+  status[0] = 200;
+  bodies[0] = "{\"candidates\":[{\"fp\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":88,\"relation\":\"same_length\",\"a_num\":24,\"a_den\":25,\"b_ms\":1200}]}";
+  if (!minipool_candidates(1, &meta, "Caf\xc3\xa9 & Friends #1.mkv", 1500000000,
+                           candidates, &count, NULL) || count != 1 ||
+      candidates[0].score != 88 || strcmp(candidates[0].relation, "same_length") ||
+      candidates[0].a_num != 24 || candidates[0].a_den != 25 || candidates[0].b_ms != 1200) return 1;
+  if (strcmp(methods[0], "GET") || strncmp(urls[0], "https://pool.example/v1/pool/candidates?", 40) ||
+      !strstr(urls[0], "imdb=tt1234567") || !strstr(urls[0], "season=0") ||
+      !strstr(urls[0], "episode=0") || !strstr(urls[0], "duration_ms=7200000") ||
+      !strstr(urls[0], "exclude_fp=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") ||
+      !strstr(urls[0], "work_key=") ||
+      !strstr(urls[0], "size_bytes=1500000000") ||
+      !strstr(urls[0], "filename=Caf%C3%A9%20%26%20Friends%20%231.mkv") ||
+      !strstr(captured_headers[0], "Authorization: Bearer paired-device-token") ||
+      strstr(urls[0], "paired-device-token") ||
+      strcmp(request_pins[0], "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") ||
+      request_redirects[0] != 0 || request_tls_personal[0] != 1) return 2;
+
+  // Episode suffixes are sent as a base catalog ID plus explicit season/episode.
+  strcpy(meta.imdb, "tt1234567:3:1"); meta.temporada = 0; meta.episodio = 0;
+  reset(); status[0] = 200; bodies[0] = "{\"candidates\":[]}";
+  minipool_candidates(1, &meta, "show.s03e01.mkv", 1500000000,
+                      candidates, &count, NULL);
+  if (calls != 1 || !strstr(urls[0], "imdb=tt1234567&season=3&episode=1") ||
+      strstr(urls[0], "imdb=tt1234567%3A3%3A1")) return 22;
+  strcpy(meta.imdb, "tt1234567"); meta.temporada = 0; meta.episodio = 0;
+
+  reset(); status[0] = 200;
+  bodies[0] = "{\"candidates\":[{\"fp\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":59,\"relation\":\"same_length\"},{\"fp\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":100,\"relation\":\"same_length\"}]}";
+  if (minipool_candidates(1, &meta, "Film.mkv", 1000, candidates, &count, NULL) ||
+      count || calls != 1) return 13;
+  reset(); status[0] = 200;
+  bodies[0] = "{\"candidates\":[{\"fp\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":90,\"relation\":\"length_differs\"}]}";
+  if (minipool_candidates(1, &meta, "Film.mkv", 1000, candidates, &count, NULL) ||
+      count || calls != 1) return 14;
+  reset(); status[0] = 200;
+  bodies[0] = "{\"candidates\":[{\"fp\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":90,\"relation\":\"same_length\",\"a_num\":24,\"a_den\":0,\"b_ms\":0}]}";
+  if (minipool_candidates(1, &meta, "Film.mkv", 1000, candidates, &count, NULL) ||
+      count || calls != 1) return 16;
+
+  // Without a catalog ID, filename and duration still reach the ranked lookup.
+  meta.imdb[0] = 0;
+  reset(); status[0] = 200; bodies[0] = "{\"candidates\":[]}";
+  minipool_candidates(1, &meta, "Film.mkv", 0, candidates, &count, NULL);
+  if (calls != 1 || !strstr(urls[0], "filename=Film.mkv") || strstr(urls[0], "imdb=")) return 3;
+
+  char long_filename[202]; memset(long_filename, 'x', 201); long_filename[201] = 0;
+  reset(); status[0] = 200; bodies[0] = "{\"candidates\":[]}";
+  minipool_candidates(1, &meta, long_filename, 0, candidates, &count, NULL);
+  char *filename_param = strstr(urls[0], "filename=");
+  if (!filename_param || strlen(filename_param + strlen("filename=")) != 200) return 4;
+
+  char utf8_boundary[205]; memset(utf8_boundary, 'x', 198);
+  memcpy(utf8_boundary + 198, "\xf0\x9f\x98\x80", 4); utf8_boundary[202] = 'z'; utf8_boundary[203] = 0;
+  reset(); status[0] = 200; bodies[0] = "{\"candidates\":[]}";
+  minipool_candidates(1, &meta, utf8_boundary, 0, candidates, &count, NULL);
+  filename_param = strstr(urls[0], "filename=");
+  if (!filename_param || strlen(filename_param + strlen("filename=")) != 198) return 5;
+
+  // A missing candidate route never falls back to the legacy episode endpoint.
+  strcpy(meta.imdb, "tt4158110"); meta.temporada = 3; meta.episodio = 1;
+  reset(); status[0] = 404; bodies[0] = "{\"error\":\"not_found\"}";
+  minipool_candidates(1, &meta, "show.mkv", 1000, candidates, &count, NULL);
+  char key[65] = "";
+  if (calls != 1 || count || !strcmp(methods[0], "") || strstr(urls[0], "/v1/pool/episodes/") ||
+      !minipool_work_key(&meta, key)) return 6;
+
+  // A legacy server rejecting unknown query fields still gets the D2 fallback.
+  reset(); status[0] = 400; bodies[0] = "{\"error\":\"bad_request\"}";
+  status[1] = 200;
+  bodies[1] = "{\"candidates\":[{\"fp\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"profile\":\"nvmt-v1-g5\",\"duration_ms\":7200000,\"n_slots\":1440,\"n_tiles\":100,\"score\":75,\"relation\":\"same_length\"}]}";
+  if (!minipool_candidates(1, &meta, "show.mkv", 1000, candidates, &count, NULL) ||
+      calls != 2 || count != 1 || !strstr(urls[1], "/v1/pool/episodes/")) return 9;
+
+  // Candidate fetch rejects corrupt structure, then accepts a structurally
+  // valid package. Each failure leaves the caller free to try the next rank.
+  MpoolCandidate candidate = {0}; unsigned char *download = NULL; size_t download_size = 0;
+  strcpy(candidate.fp, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+  strcpy(candidate.profile, "nvmt-v1-g5"); candidate.durationMs = 5000;
+  candidate.nSlots = candidate.nTiles = 1;
+  unsigned char package[157] = {0}; char digest[65], headers[160];
+  memcpy(package, "NVMT", 4); put32(package + 4, 1); put32(package + 8, 5000);
+  put32(package + 12, 1); put32(package + 16, 1);
+  put32(package + 20, 1); put32(package + 24, 5000); put32(package + 28, 125);
+  package[32] = 0xff; package[33] = 0xd8; package[155] = 0xff; package[156] = 0xd9;
+  reset(); status[0] = status[1] = 200;
+  bodies[0] = "{\"duration_ms\":5000,\"n_slots\":1,\"n_tiles\":1,\"tile_slots\":[0]}";
+  response_binary_size[1] = sizeof package;
+  memcpy(response_binary[1], package, sizeof package); // slot 1 is outside the one-slot package.
+  admin_sha256_hex(response_binary[1], (unsigned long)response_binary_size[1], digest);
+  snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 5000\nX-OpenSeek-Sha256: %s\n", digest);
+  response_headers[1] = headers;
+  if (minipool_buscar_candidato(1, &candidate, &download, &download_size, NULL) ||
+      download || calls != 2) return 10;
+  candidate.nTiles = 0; // manifest tile count cannot exceed the ranked candidate.
+  reset(); status[0] = status[1] = 200;
+  bodies[0] = "{\"duration_ms\":5000,\"n_slots\":1,\"n_tiles\":1,\"tile_slots\":[0]}";
+  put32(package + 20, 0); memcpy(response_binary[1], package, sizeof package);
+  response_binary_size[1] = sizeof package;
+  admin_sha256_hex(response_binary[1], (unsigned long)response_binary_size[1], digest);
+  snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 5000\nX-OpenSeek-Sha256: %s\n", digest);
+  response_headers[1] = headers;
+  if (minipool_buscar_candidato(1, &candidate, &download, &download_size, NULL) ||
+      download || calls != 1) return 11;
+  candidate.nTiles = 1;
+  reset(); status[0] = status[1] = 200;
+  bodies[0] = "{\"duration_ms\":5000,\"n_slots\":1,\"n_tiles\":1,\"tile_slots\":[0]}";
+  memcpy(response_binary[1], package, sizeof package);
+  response_binary_size[1] = sizeof package;
+  admin_sha256_hex(response_binary[1], (unsigned long)response_binary_size[1], digest);
+  snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 5000\nX-OpenSeek-Sha256: %s\n", digest);
+  response_headers[1] = headers;
+  if (!minipool_buscar_candidato(1, &candidate, &download, &download_size, NULL) ||
+      !download || download_size != sizeof package || calls != 2 ||
+      !strstr(urls[0], "/nvmt/manifest?") || !strstr(urls[1], "slots=0")) return 12;
+  free(download);
+
+  // Exact-fingerprint reads pass duration so channel nodes can reconstruct
+  // old tiles whose Telegram documents lack filename metadata.
+  MiniMeta exact_meta = {0}; char exact_profile[16] = "";
+  strcpy(exact_meta.fp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  strcpy(exact_meta.imdb, "tt1234567"); exact_meta.durMs = 5000;
+  reset(); status[0] = status[1] = 200;
+  bodies[0] = "{\"duration_ms\":5000,\"n_slots\":1,\"n_tiles\":1,\"tile_slots\":[0]}";
+  memcpy(response_binary[1], package, sizeof package);
+  response_binary_size[1] = sizeof package;
+  admin_sha256_hex(response_binary[1], (unsigned long)response_binary_size[1], digest);
+  snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 5000\nX-OpenSeek-Sha256: %s\n", digest);
+  response_headers[1] = headers;
+  if (!minipool_buscar(1, &exact_meta, &download, &download_size, exact_profile, NULL) ||
+      calls != 2 || !strstr(urls[0], "duration_ms=5000") ||
+      !strstr(urls[1], "slots=0") ||
+      strcmp(exact_profile, "nvmt-v1-g5")) return 24;
+  free(download);
+
+  // Sparse exact packages preserve the verified tile and expose missing
+  // slots for local generation. The exact path still checks g5 before g10.
+  MiniMeta sparse_meta = {0}; char sparse_profile[16] = "";
+  unsigned char sparse_package[157];
+  strcpy(sparse_meta.fp, "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+  sparse_meta.durMs = 20000;
+  one_tile_package(sparse_package, 10000, 2, 0);
+  reset(); status[0] = 404; status[1] = status[2] = 200;
+  bodies[0] = "{\"error\":\"not_found\"}";
+  bodies[1] = "{\"duration_ms\":20000,\"n_slots\":2,\"n_tiles\":1,\"tile_slots\":[0]}";
+  response_binary_size[2] = sizeof sparse_package;
+  memcpy(response_binary[2], sparse_package, sizeof sparse_package);
+  admin_sha256_hex(response_binary[2], (unsigned long)response_binary_size[2], digest);
+  snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 20000\nX-OpenSeek-Sha256: %s\n", digest);
+  response_headers[2] = headers;
+  if (!minipool_buscar(1, &sparse_meta, &download, &download_size, sparse_profile, NULL) ||
+      calls != 3 || strcmp(sparse_profile, "nvmt-v1-g10") || !download ||
+      !nvmt_ok(download, download_size, 20000, 10000) || read32(download + 12) != 2 ||
+      read32(download + 16) != 1 || read32(download + 20) != 0 ||
+      !strstr(urls[2], "slots=0")) return 25;
+  free(download); download = NULL; download_size = 0;
+
+  // Hint-matched candidates may also be sparse; the caller can merge these
+  // verified records into the exact result without replacing existing tiles.
+  MpoolCandidate sparse_candidate = {0};
+  strcpy(sparse_candidate.fp, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+  strcpy(sparse_candidate.profile, "nvmt-v1-g10");
+  sparse_candidate.durationMs = 20000; sparse_candidate.nSlots = 2; sparse_candidate.nTiles = 1;
+  reset(); status[0] = status[1] = 200;
+  bodies[0] = "{\"duration_ms\":20000,\"n_slots\":2,\"n_tiles\":1,\"tile_slots\":[1]}";
+  one_tile_package(sparse_package, 10000, 2, 1);
+  response_binary_size[1] = sizeof sparse_package;
+  memcpy(response_binary[1], sparse_package, sizeof sparse_package);
+  admin_sha256_hex(response_binary[1], (unsigned long)response_binary_size[1], digest);
+  snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 20000\nX-OpenSeek-Sha256: %s\n", digest);
+  response_headers[1] = headers;
+  if (!minipool_buscar_candidato(1, &sparse_candidate, &download, &download_size, NULL) ||
+      calls != 2 || !download || !nvmt_ok(download, download_size, 20000, 10000) ||
+      read32(download + 12) != 2 || read32(download + 16) != 1 ||
+      read32(download + 20) != 1 || !strstr(urls[1], "slots=1")) return 26;
+  free(download); download = NULL; download_size = 0;
+
+  // A corrupt shared tile is rejected and returns no package, leaving the
+  // independent local decoder as the complete fallback.
+  reset(); status[0] = 404; status[1] = status[2] = 200;
+  bodies[0] = "{\"error\":\"not_found\"}";
+  bodies[1] = "{\"duration_ms\":20000,\"n_slots\":2,\"n_tiles\":1,\"tile_slots\":[0]}";
+  one_tile_package(sparse_package, 10000, 2, 0);
+  sparse_package[32] = 0; // valid checksum, invalid JPEG marker
+  response_binary_size[2] = sizeof sparse_package;
+  memcpy(response_binary[2], sparse_package, sizeof sparse_package);
+  admin_sha256_hex(response_binary[2], (unsigned long)response_binary_size[2], digest);
+  snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 20000\nX-OpenSeek-Sha256: %s\n", digest);
+  response_headers[2] = headers;
+  if (minipool_buscar(1, &sparse_meta, &download, &download_size, sparse_profile, NULL) ||
+      download || download_size || calls != 3) return 27;
+
+  // A node outage fails the optional lookup but must not cancel the playback
+  // job; the separate local decoder remains responsible for missing tiles.
+  volatile int playback_cancelled = 0;
+  reset(); status[0] = status[1] = 503;
+  bodies[0] = bodies[1] = "{\"error\":\"pool_backend_unavailable\"}";
+  if (minipool_buscar(1, &sparse_meta, &download, &download_size, sparse_profile,
+                      &playback_cancelled) || download || download_size || playback_cancelled || calls != 2)
+    return 28;
+
+  // C3 correction writes use the pinned paired-device bearer transport and
+  // exact endpoint/body contract. An offline/unpaired device fails closed.
+  reset(); status[0] = 204;
+  const char *work = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const char *candidate_fp = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  if (minipool_candidato_offset(work, candidate_fp, -2500) != 1 || calls != 1 ||
+      strcmp(methods[0], "PUT") || strcmp(urls[0], "https://pool.example/v1/pool/candidates/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/offset") ||
+      !strstr(captured_headers[0], "Authorization: Bearer paired-device-token") ||
+      !strstr(captured_headers[0], "Content-Type: application/json") ||
+      strcmp(request_pins[0], "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") ||
+      request_redirects[0] != 0 || request_tls_personal[0] != 1 ||
+      strcmp(request_bodies[0], "{\"work_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"b_ms\":-2500}")) return 13;
+  reset(); status[0] = 200;
+  if (minipool_candidato_rejeitar(work, candidate_fp) != 1 || calls != 1 ||
+      strcmp(methods[0], "PUT") || !strstr(urls[0], "/reject") ||
+      !strstr(captured_headers[0], "Authorization: Bearer paired-device-token") ||
+      !strstr(captured_headers[0], "Content-Type: application/json") ||
+      strcmp(request_pins[0], "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=") ||
+      request_redirects[0] != 0 || request_tls_personal[0] != 1 ||
+      strcmp(request_bodies[0], "{\"work_key\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"days\":30}")) return 14;
+  reset(); status[0] = 403;
+  if (minipool_candidato_rejeitar(work, candidate_fp) != 0 || calls != 1) return 17;
+  reset(); status[0] = 500;
+  if (minipool_candidato_offset(work, candidate_fp, 2500) != 0 || calls != 1) return 18;
+  reset(); status[0] = 0;
+  if (minipool_candidato_offset(work, candidate_fp, 2500) != -1 || calls != 1) return 19;
+  reset(); status[0] = 300;
+  if (minipool_candidato_offset(work, candidate_fp, 2500) != 0 || calls != 1) return 21;
+  reset();
+  if (minipool_candidato_offset(work, "not-a-fingerprint", 2500) || calls != 0 ||
+      minipool_candidato_offset(work, candidate_fp, 86400001) || calls != 0) return 20;
+  reset(); mp_token[0] = 0;
+  if (minipool_candidato_offset(work, candidate_fp, 2500) != 0 || calls != 0) return 15;
+
+  // Vercel upload sends hints as JSON, then the NVMT bytes straight to the
+  // participant's temporary Supabase target without forwarding the node token.
+  unsigned char upload_package[20 + 12 + 125] = {0};
+  strcpy(meta.fp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  meta.durMs = 21000; meta.temporada = 0; meta.episodio = 0;
+  strcpy(meta.imdb, "tt1234567");
+  memcpy(upload_package, "NVMT", 4); put32(upload_package + 4, 1); put32(upload_package + 8, 5000);
+  put32(upload_package + 12, 5); put32(upload_package + 16, 1);
+  put32(upload_package + 20, 0); put32(upload_package + 24, 0); put32(upload_package + 28, 125);
+  upload_package[32] = 0xff; upload_package[33] = 0xd8; upload_package[sizeof upload_package - 2] = 0xff; upload_package[sizeof upload_package - 1] = 0xd9;
+  reset();
+  if (minipool_enviar(0, &meta, "film.mkv", 1500000000,
+                      upload_package, sizeof upload_package) != 0 || calls != 0) return 27;
+  reset(); status[0] = 201; bodies[0] = "{\"upload_id\":\"u_abcdefgh123\",\"put_url\":\"https://project.supabase.co/storage/v1/object/upload/sign/openseek-staging/uploads/x?token=secret\"}";
+  status[1] = 200; status[2] = 202; status[3] = 200; bodies[3] = "{\"state\":\"accepted\"}";
+  if (!minipool_enviar(1, &meta, "Caf\xc3\xa9 & Friends #1.mkv", 1500000000, upload_package, sizeof upload_package) ||
+      calls != 4 || strcmp(methods[0], "POST") || !strstr(urls[0], "/v1/pool/uploads") ||
+      !strstr(request_bodies[0], "\"imdb\":\"tt1234567\"") ||
+      !strstr(request_bodies[0], "\"season\":0") || !strstr(request_bodies[0], "\"episode\":0") ||
+      !strstr(request_bodies[0], "\"duration_ms\":21000") ||
+      !strstr(request_bodies[0], "\"size_bytes\":1500000000") ||
+      !strstr(request_bodies[0], "Caf\xc3\xa9 & Friends #1.mkv") ||
+      strcmp(methods[1], "PUT") || strcmp(urls[1], "https://project.supabase.co/storage/v1/object/upload/sign/openseek-staging/uploads/x?token=secret") ||
+      request_body_bytes[1] != sizeof upload_package || strstr(captured_headers[1], "Authorization:") ||
+      strcmp(methods[2], "POST") || !strstr(urls[2], "/finalize") ||
+      strcmp(methods[3], "GET") || !strstr(urls[3], "/v1/pool/uploads/u_abcdefgh123")) return 7;
+
+  strcpy(meta.imdb, "tt1234567:3:1"); meta.temporada = 0; meta.episodio = 0;
+  reset(); status[0] = 201; bodies[0] = "{\"upload_id\":\"u_abcdefgh123\",\"put_url\":\"https://project.supabase.co/storage/v1/object/upload/sign/openseek-staging/uploads/x?token=secret\"}";
+  status[1] = 200; status[2] = 202; status[3] = 200; bodies[3] = "{\"state\":\"accepted\"}";
+  if (!minipool_enviar(1, &meta, "show.s03e01.mkv", 1500000000,
+                       upload_package, sizeof upload_package) || calls != 4 ||
+      !strstr(request_bodies[0], "\"imdb\":\"tt1234567\"") ||
+      !strstr(request_bodies[0], "\"season\":3,\"episode\":1") ||
+      strstr(request_bodies[0], "tt1234567:3:1")) return 23;
+
+  // A durable Vercel queue acknowledgement is distinct from Telegram acceptance.
+  static const char *queued_states[] = { "pending", "retrying", "paused" };
+  for (size_t i = 0; i < sizeof queued_states / sizeof queued_states[0]; i++) {
+    reset(); status[0] = 201;
+    bodies[0] = "{\"upload_id\":\"u_abcdefgh123\",\"put_url\":\"https://project.supabase.co/storage/v1/object/upload/sign/openseek-staging/uploads/x?token=secret\"}";
+    status[1] = 200; status[2] = 202; status[3] = 200;
+    char queued_body[64]; snprintf(queued_body, sizeof queued_body,
+                                  "{\"state\":\"%s\"}", queued_states[i]);
+    bodies[3] = queued_body;
+    if (minipool_enviar(1, &meta, "show.s03e01.mkv", 1500000000,
+                        upload_package, sizeof upload_package) != 2 || calls != 4) return 25;
+  }
+  reset(); status[0] = 201;
+  bodies[0] = "{\"upload_id\":\"u_abcdefgh123\",\"put_url\":\"https://project.supabase.co/storage/v1/object/upload/sign/openseek-staging/uploads/x?token=secret\"}";
+  status[1] = 200; status[2] = 202; status[3] = 200;
+  bodies[3] = "{\"state\":\"failed\"}";
+  if (minipool_enviar(1, &meta, "show.s03e01.mkv", 1500000000,
+                      upload_package, sizeof upload_package) != 0 || calls != 4) return 26;
+
+  // A VPS reports staging_unavailable; Nuvio then uses the existing direct
+  // package route and its metadata compatibility retry.
+  reset(); status[0] = 400; bodies[0] = "{\"error\":\"staging_unavailable\"}";
+  status[1] = 400; bodies[1] = "{\"error\":\"bad_request\"}";
+  status[2] = 201; bodies[2] = "{}";
+  if (!minipool_enviar(1, &meta, "film.mkv", 1500000000, upload_package, sizeof upload_package) ||
+      calls != 3 || strcmp(methods[0], "POST") || strcmp(methods[1], "PUT") ||
+      strcmp(methods[2], "PUT") || strstr(urls[2], "imdb=") ||
+      strstr(urls[2], "filename=") || !strstr(urls[2], "duration_ms=21000")) return 8;
+
+  return 0;
+}

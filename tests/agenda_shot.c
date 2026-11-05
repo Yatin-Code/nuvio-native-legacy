@@ -55,6 +55,7 @@
 // NUVIO_DADOS), como em social_shot.c: assim a foto prova tambem o FORMATO do
 // arquivo — se ele mudar e a leitura nao acompanhar, a tela sai vazia.
 #include "agenda.h"
+#include "nvtmp.h"
 #include "agendaui.h"
 #include "noticias.h"
 #include "layout.h"
@@ -67,6 +68,7 @@
 #include "ajustes.h"
 #include "rail_shot.h"
 #include "perfis.h"
+#include "shot_arte.h"
 #include "gfx.h"
 #include "text.h"
 #include "tex_cache.h"
@@ -93,6 +95,12 @@ enum { DES_AGENDA = 0, DES_AVISO, DES_MENU, DES_DETALHE };
 // que e feita em portugues como o resto do repositorio, e o album do post em
 // ingles. Recompilar para trocar a lingua e o tipo de atrito que faz alguem
 // publicar a captura errada — NUVIO_SHOT_EN=1 resolve sem tocar no codigo.
+// FONTE DA INTERFACE POR VARIAVEL: NUVIO_SHOT_FONTE=3 (Montserrat, a da TV do
+// dono) grava a mesma chave "fonteInterface" do ajustes.txt do aparelho.
+static void fonteDeTeste(FILE *f) {
+  const char *fo = getenv("NUVIO_SHOT_FONTE");
+  if (fo && *fo) fprintf(f, "fonteInterface %d\n", atoi(fo));
+}
 static void ajustesDeTeste(int idiomaIngles, int animReduzidas) {
   char caminho[600];
   const char *temaEnv = getenv("NUVIO_SHOT_THEME");
@@ -103,6 +111,8 @@ static void ajustesDeTeste(int idiomaIngles, int animReduzidas) {
   f = fopen(caminho, "w");
   if (!f) return;
   fprintf(f, "idioma %d\nanimacoes %d\n", idiomaIngles, animReduzidas);
+  fonteDeTeste(f);
+  shot_arte_material(f);   // NUVIO_SHOT_VIDRO=0: o material solido
   if (temaEnv && *temaEnv) {
     char *fim;
     long tema = strtol(temaEnv, &fim, 10);
@@ -144,6 +154,20 @@ static void teclaDet(SDL_Keycode k) {
   detail_evento(&e);
 }
 
+// A ARTE DO MOCKUP ATRAS (so com NUVIO_SHOT_ARTE): o fundo do quadro 8 e a arte
+// com o veu em gradiente do .fundo do glass-ilha.html (preto a 70% no topo, 92%
+// dos 60% para baixo). Sem a variavel, o fundo liso de sempre.
+static void arteDeFundo(void) {
+  int y;
+  if (!getenv("NUVIO_SHOT_ARTE") || !*getenv("NUVIO_SHOT_ARTE")) return;
+  shot_arte_desenhar(0.0f);
+  for (y = 0; y < 1080; y += 6) {
+    float t = y / 648.0f, a;
+    a = t >= 1.0f ? 0.92f : 0.70f + 0.22f * t;
+    gfx_cor((GfxRect){ 0, (float)y, 1920, 6 }, 0, 0.0235f, 0.0275f, 0.035f, a);
+  }
+}
+
 static void captura(const char *nome, SDL_Window *win) {
   int i;
   rail_shot_aplicar();
@@ -165,6 +189,7 @@ static void captura(const char *nome, SDL_Window *win) {
     }
     glClearColor(0.051f, 0.051f, 0.051f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+    arteDeFundo();
     switch (oQue) {
       case DES_AVISO:   agendaviso_desenhar(SDL_GetTicks()); break;
       case DES_MENU:    menu_desenhar(SDL_GetTicks());       break;
@@ -361,6 +386,7 @@ static void idiomaDeTeste(int idioma) {
   f = fopen(caminho, "w");
   if (!f) return;
   fprintf(f, "idioma %d\nanimacoes 0\n", idioma);
+  fonteDeTeste(f);
   fclose(f);
   ajustes_dir(dados_dir());
 }
@@ -385,7 +411,7 @@ static void esperaFio(void) {
 }
 
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nuvio-agenda";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nuvio-agenda");
   char nome[600];
   char cache[20000] = "";
   SDL_Window *w;
@@ -437,9 +463,11 @@ int main(int argc, char **argv) {
   poeLinha(cache, sizeof cache, "tt10255564", "Foundation",
            "deploy/app/art/00.jpg", AG_VOLTANDO, 3, 9, "The Last Empress",
            "2026-09-16", "2026-09-12",
-           "Gaal and Salvor reach Trantor on the day the Empire announces the "
-           "end of the genetic dynasty, and the Foundation has to decide whether "
-           "the Plan is still worth anything after three hundred years.",
+           getenv("NUVIO_SHOT_SO")
+             ? "Gaal e Salvor chegam a Trantor no dia em que o Império anuncia o fim da linhagem genética."
+             : "Gaal and Salvor reach Trantor on the day the Empire announces the "
+               "end of the genetic dynasty, and the Foundation has to decide whether "
+               "the Plan is still worth anything after three hundred years.",
            "finale", "Apple TV+", 58, 3);
   poeLinha(cache, sizeof cache, "tt1520211", "The Last of Us",
            "deploy/app/art/01.jpg", AG_VOLTANDO, 2, 4, "Day One",
@@ -503,6 +531,9 @@ int main(int argc, char **argv) {
       snprintf(ci[i].tipo, sizeof ci[i].tipo, "%s", "series");
       snprintf(ci[i].titulo, sizeof ci[i].titulo, "%s", TIT[i]);
       snprintf(ci[i].poster, sizeof ci[i].poster, "deploy/app/art/0%d.jpg", i);
+      // A arte de paisagem da coluna da esquerda (C1) sai do backdrop do
+      // catalogo quando o registro nao tem still/backdrop proprio.
+      snprintf(ci[i].backdrop, sizeof ci[i].backdrop, "deploy/app/art/0%d.jpg", i);
       snprintf(ci[i].genero, sizeof ci[i].genero, "%s", GEN[i]);
       snprintf(ci[i].meta, sizeof ci[i].meta, "%s", "2026 · 3 temporadas");
       ci[i].nota = NOTA[i];
@@ -515,6 +546,36 @@ int main(int argc, char **argv) {
   agendaui_iniciar();
   snprintf(nome, sizeof nome, "%s-hoje.bmp", saida);
   captura(nome, w);
+  // So a captura comparada ao mockup (iteracao rapida): NUVIO_SHOT_SO=hoje.
+  if (getenv("NUVIO_SHOT_SO") && !strcmp(getenv("NUVIO_SHOT_SO"), "hoje")) {
+    printf("PASS: captura -hoje gravada.\n");
+    return 0;
+  }
+  if (getenv("NUVIO_SHOT_SO") && !strcmp(getenv("NUVIO_SHOT_SO"), "calendario")) {
+    // O FOCO NO SEGMENTADO da ilha (C1): "Mes" focado, "Lista" ainda ativa.
+    tecla(SDLK_UP); tecla(SDLK_RIGHT);
+    snprintf(nome, sizeof nome, "%s-cabecalho.bmp", saida);
+    captura(nome, w);
+    tecla(SDLK_RETURN);
+    snprintf(nome, sizeof nome, "%s-calendario.bmp", saida);
+    captura(nome, w);
+    tecla(SDLK_RETURN); tecla(SDLK_RETURN);
+    assert(agendaui_menu_aberto());
+    tecla(SDLK_ESCAPE);
+    assert(!agendaui_menu_aberto());
+    tecla(SDLK_LEFT);
+    tecla(SDLK_UP); tecla(SDLK_UP); tecla(SDLK_UP);
+    // O dia selecionado deve ser preservado ao avançar o mês.
+    tecla(SDLK_RIGHT); tecla(SDLK_RETURN);
+    snprintf(nome, sizeof nome, "%s-calendario-proximo-mes.bmp", saida);
+    captura(nome, w);
+    tecla(SDLK_UP); tecla(SDLK_UP); tecla(SDLK_UP);
+    tecla(SDLK_RIGHT); tecla(SDLK_RIGHT); tecla(SDLK_RETURN);
+    snprintf(nome, sizeof nome, "%s-calendario-lista.bmp", saida);
+    captura(nome, w);
+    printf("PASS: captura -calendario gravada.\n");
+    return 0;
+  }
 
   // --- 2b. A ULTIMA NOTICIA como citacao, o menu de contexto e o painel ------
   // Rede de verdade (Google News): espera ate 8 s pela resposta da primeira
@@ -667,7 +728,7 @@ int main(int argc, char **argv) {
     f = fopen(caminho, "w");
     if (f) { fprintf(f, "idioma %d\nanimacoes 0\ntmdb_enabled 1\n",
                      getenv("NUVIO_SHOT_EN") && *getenv("NUVIO_SHOT_EN") != '0');
-             fclose(f); ajustes_dir(dados_dir()); } }
+             fonteDeTeste(f); fclose(f); ajustes_dir(dados_dir()); } }
   printf("chave TMDB para o fio: [%s]\n", desc_chave_tmdb()[0] ? "sim" : "nao");
   agendaui_iniciar();
   snprintf(nome, sizeof nome, "%s-tmdbdesligado.bmp", saida);

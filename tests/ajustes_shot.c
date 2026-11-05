@@ -10,19 +10,33 @@
 // de quem nunca abriu o app) e a captura nao mexe no fileirasui.txt de quem
 // roda o teste.
 #include "ajustes.h"
+#include "nvtmp.h"
+#include "ajustes_ux.h"
 #include "atualizacao.h"
 #include "badges.h"
 #include "rail_shot.h"
+#include "spotlight.h"
 #include "fileiras.h"
+#include "catalogo.h"
+#include "dados.h"
 #include "gfx.h"
+#include "gpunivel.h"
+#include "ilha.h"
+#include "ltv.h"
+#include "perfis.h"
+#include "iconeapp.h"
+#include "logoapp.h"
 #include "text.h"
 #include "tex_cache.h"
+#include "vidro_telas.h"
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
+#include "menu_frost_probe.h"
 
 static const char *const AJ_IDS[] = {
   "AJ_QUALIDADE", "AJ_DV", "AJ_ATMOS", "AJ_LEG_LINGUA",
@@ -57,11 +71,18 @@ static const char *const AJ_IDS[] = {
 };
 
 extern int ajustes_teste_focar_opcao(int op);
+extern int ajustes_teste_cena_item(int i, int *op, int *sec, const char **chave, const char **rot);
+extern void ajustes_teste_cena_desenhar(int op, float t, float x, float y, float w);
+extern void ajustes_teste_ux_captura(int cenario);
 extern void atualizacao_teste_estado(int busca, const char *tag);
 extern int ajustes_teste_op_atualizar(void);
+extern int ajustes_teste_op_icone(int escolha);
 extern int ajustes_teste_familia_previa(int op);
 extern void ajustes_teste_fonte_interface(int familia);
 extern void ajustes_teste_tema(int tema, int vidro);
+extern void ajustes_teste_vidro_env(void);
+extern void ajustes_teste_layout(int lista);
+extern int ajustes_teste_quadro(const char *id);
 static int quadrosCaptura = 60;
 
 static void tecla(SDL_Keycode k) {
@@ -76,14 +97,58 @@ static void captura(const char *nome, SDL_Window *win) {
   rail_shot_aplicar();
   for (i = 0; i < quadrosCaptura; i++) {
     SDL_PumpEvents();
+    if (getenv("NUVIO_SHOT_PERF") || getenv("NUVIO_SHOT_MENU_PROBE")) gfx_novo_quadro();   // os contadores do quadro, como app.c
     txt_novo_quadro();
+    gfx_rastro_grandes = getenv("NUVIO_SHOT_RASTRO") && i == quadrosCaptura - 1;
     tex_novo_quadro();
     tex_bombear(6);
     ajustes_atualizar(1.0f / 60.0f, SDL_GetTicks());
+    if (getenv("NUVIO_SHOT_UPSCALE")) gpun_quadro_inicio();   // 720p target, as on the C9
     glClearColor(0.025f, 0.025f, 0.03f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
     ajustes_desenhar(SDL_GetTicks());
     rail_shot_desenhar(MENU_AJUSTES);
+    if (getenv("NUVIO_SHOT_UPSCALE")) gpun_quadro_fim();
+    // NUVIO_SHOT_MENU=1: the app menu drawn in its own fixed factor (0.9) on
+    // top, as app.c does every frame on the TV.
+    if (getenv("NUVIO_SHOT_MENU")) {
+      menu_definir_destino(MENU_AJUSTES);
+      menu_pilula_mostrar(1.0f);
+      if (atoi(getenv("NUVIO_SHOT_MENU")) == 2) {   // 2 = sidebar open over Settings
+        if (!menu_aberto()) menu_abrir();
+        menu_atualizar(1.0f / 60.0f, SDL_GetTicks());
+      }
+      menu_probe_draw();
+      menu_desenhar(SDL_GetTicks());
+      if (getenv("NUVIO_SHOT_MENU_OPAQUE")) gfx_cor((GfxRect){330, 175, 81, 605}, 0, .1f, .1f, .1f, 1);
+    }
+    if (spot_visivel()) {   // "Buscar no guia" (o Spotlight no modo guia)
+      spot_atualizar(1.0f / 60.0f, SDL_GetTicks());
+      spot_desenhar(SDL_GetTicks(), 0);   // o veu de 55% e do proprio Spotlight
+    }
+    if (getenv("NUVIO_AJ_QUADROS")) {   // a ilha do relogio, como o app poe
+      ilha_relogio_visivel(ajustes_relogio_cabe());
+      ilha_posicionar(1);
+      ilha_desenhar(SDL_GetTicks());
+    }
+    // NUVIO_SHOT_TXT=1: text lines rasterized per frame once the screen has
+    // settled. A static screen must reach 0; a steady non-zero count starves
+    // later lines on a slow TV (the 4-lines-per-frame floor).
+    if (getenv("NUVIO_SHOT_TXT") && i >= quadrosCaptura - 4) {
+      static int r0, p0, d0;
+      if (i > quadrosCaptura - 4)
+        printf("txt %s quadro %d: +%d rasterizadas +%d pendentes +%d despejos\n", nome, i,
+               txt_rasterizadas - r0, txt_pendentes - p0, txt_despejos - d0);
+      r0 = txt_rasterizadas; p0 = txt_pendentes; d0 = txt_despejos;
+    }
+    if (getenv("NUVIO_SHOT_PERF") && i == quadrosCaptura - 1)
+      printf("perf %s fill=%.3f rects=%d cheios=%d snap=%.3f cor=%.3f luz=%.3f sombra=%.3f gpu=%.3f mist=%.3f\n", nome,
+             gfx_fill, gfx_n_rect, gfx_n_cheio, gfx_fill_modo[GFX_SNAP], gfx_fill_modo[GFX_COR],
+             gfx_fill_modo[GFX_LUZ], gfx_fill_modo[GFX_SOMBRA], gfx_fill_gpu, gfx_fill_gpu_mist);
+    // #205: the C9 (no glass) must not blend Frost + island core full-screen: index fill <= 2.3x.
+    if (getenv("NUVIO_SHOT_FILL_MAX") && i == quadrosCaptura - 1 && strstr(nome, "indice")) {
+      if (gfx_fill > atof(getenv("NUVIO_SHOT_FILL_MAX"))) { printf("FAIL: fill %.3f > %s\n", gfx_fill, getenv("NUVIO_SHOT_FILL_MAX")); exit(1); }
+    }
     if (i == quadrosCaptura - 1) {
       unsigned char *pix = malloc(1920 * 1080 * 4);
       SDL_Surface *s;
@@ -96,15 +161,26 @@ static void captura(const char *nome, SDL_Window *win) {
         memcpy((char *)s->pixels + y * s->pitch, pix + (1079 - y) * 1920 * 4, 1920 * 4);
       assert(strstr(nome, ".png") ? IMG_SavePNG(s, nome) == 0 : SDL_SaveBMP(s, nome) == 0);
       SDL_FreeSurface(s);
+      // NUVIO_SHOT_MENU=2: blur proof, as in detalhe_glass_shot.c (fraction of
+      // pixels with a luma step > 6 in the empty right strip of the sidebar).
+      if (getenv("NUVIO_SHOT_MENU") && atoi(getenv("NUVIO_SHOT_MENU")) == 2) {
+        menu_probe_check(pix);
+      }
       free(pix);
     }
     SDL_GL_SwapWindow(win);
+    if (getenv("NUVIO_AJ_QUADROS")) SDL_Delay(16);   // a mola da ilha anda no relogio
   }
   printf("captura: %s\n", nome);
 }
 
+#ifdef AJUSTES_PERF
+extern int perf_uploads;
+#include "ajustes_perf.h"
+#endif
+
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nuvio-ajustes";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nuvio-ajustes");
   char nome[600];
   SDL_Window *w;
   SDL_GLContext gl;
@@ -127,13 +203,46 @@ int main(int argc, char **argv) {
   assert(txt_iniciar("deploy/app", 1));
   tex_iniciar(64);
   gfx_icones_dir("deploy/app/art");
+  ajustes_recursos("deploy/app/art");
   badges_carregar("deploy/app/art");   // marcas de formato (Dolby Vision, 4K...); no app quem faz e home_iniciar
+
+  // NUVIO_SHOT_URLS=1: duas fontes por URL (M9) para a linha "Listas e guias por URL".
+  if (getenv("NUVIO_SHOT_URLS")) {
+    ltv_urls_carregar(perfis_ativo());
+    ltv_urls_adicionar(LTV_URL_M3U, "iptv.exemplo.com", "https://iptv.exemplo.com/get.php?username=x&password=y&type=m3u");
+    ltv_urls_adicionar(LTV_URL_XMLTV, "epg.exemplo.org", "https://epg.exemplo.org/guia.xml.gz");
+  }
 
   // FILEIRAS DE MENTIRA cobrindo as origens que a folha sabe distinguir: o
   // catalogo de addon (com nome de addon e tipo), o grupo de colecoes, e as
   // fileiras que o proprio app monta.
+  // NUVIO_SHOT_DADOS=<pasta>: the rows of a real fileirasui*.txt (a COPY in a
+  // scratch folder, never the app's own) instead of the fake ones below.
+  if (getenv("NUVIO_SHOT_DADOS")) { setenv("NUVIO_DADOS", getenv("NUVIO_SHOT_DADOS"), 1); dados_iniciar("deploy/app/art"); goto fileiras_prontas; }
   fil_registrar("continue_watching", "Continuar assistindo", "", "", 12);
   fil_registrar("social_activity", "Entre amigos", "", "", 6);
+  // NUVIO_SHOT_CANAIS=iguais|mistos|distintos (mistos: os 8 primeiros repetem o logo): no lugar de "Popular", a fileira de
+  // canais de TV do FrostView (itens so com logo) e o catalogo que a alimenta.
+  if (getenv("NUVIO_SHOT_CANAIS")) {
+    static CatItem it[12];
+    CatFileira f;
+    int k, iguais = !strcmp(getenv("NUVIO_SHOT_CANAIS"), "iguais"), mistos = !strcmp(getenv("NUVIO_SHOT_CANAIS"), "mistos");
+    fil_registrar("frostview_channel_canais", "Canais de TV - Channels", "FrostView TV", "channel", 12);
+    memset(it, 0, sizeof it);
+    memset(&f, 0, sizeof f);
+    for (k = 0; k < 12; k++) {
+      snprintf(it[k].titulo, sizeof it[k].titulo, "Canal %d", k);
+      snprintf(it[k].imdb, sizeof it[k].imdb, "cs:channel:c%d", k);
+      snprintf(it[k].tipo, sizeof it[k].tipo, "channel");
+      snprintf(it[k].poster, sizeof it[k].poster, "deploy/app/art/logo/%02d.png", (iguais || (mistos && k < 8)) ? 0 : (k + 1) % 8);
+      snprintf(it[k].backdrop, sizeof it[k].backdrop, "%s", it[k].poster);
+    }
+    snprintf(f.chave, sizeof f.chave, "frostview_channel_canais");
+    snprintf(f.titulo, sizeof f.titulo, "Canais de TV - Channels");
+    snprintf(f.tipo, sizeof f.tipo, "channels");
+    f.ini = 0; f.n = 12;
+    cat_definir_tudo(it, 12, &f, 1);
+  } else
   fil_registrar("com.linvo.cinemeta_movie_top", "Popular", "Cinemeta", "movie", 40);
   fil_registrar("xperience_series_foryou", "For You", "Xperience", "series", 24);
   fil_registrar("collection_a24", "A24", "", "", 9);
@@ -153,13 +262,193 @@ int main(int argc, char **argv) {
   fil_remover(7);   // Anime
   fil_remover(9);   // sem nome
   fil_remover(12);  // Animes
+  fileiras_prontas:
 
   ajustes_iniciar();
+  // NUVIO_SHOT_UPSCALE=<algorithm 0..5> (NUVIO_SHOT_NITIDEZ=0..4): every capture
+  // is drawn at 720p and upscaled to 1920x1080 by gpunivel, as on the C9.
+  if (getenv("NUVIO_SHOT_UPSCALE")) {
+    gpun_iniciar(1920, 1080);
+    gpun_forcar_720();
+    gpun_ampliar_app(1);
+    gpun_ampliacao(atoi(getenv("NUVIO_SHOT_UPSCALE")),
+                   getenv("NUVIO_SHOT_NITIDEZ") ? atoi(getenv("NUVIO_SHOT_NITIDEZ")) : 2);
+  }
+  if (getenv("NV_TEXT_SCALE_NAV")) {
+    int op, sec, i, found = 0;
+    const char *key, *label;
+    for (i = 0; ajustes_teste_cena_item(i, &op, &sec, &key, &label); i++) {
+      if (strcmp(key, "escalaTextoLocal")) continue;
+      assert(ajustes_teste_focar_opcao(op));
+      found++;
+    }
+    assert(found == 1);
+    puts("PASS text scale settings navigation");
+    return 0;
+  }
+  if (getenv("NUVIO_SHOT_AJUSTES_ESCALA"))
+    ajustes_teste_escala(atoi(getenv("NUVIO_SHOT_AJUSTES_ESCALA")));
+  ajustes_teste_vidro_env();   // NUVIO_SHOT_VIDRO_OPAC / _FOSCO
+  // NUVIO_SHOT_LAYOUT=1: Settings as one stacked list (#339).
+  if (getenv("NUVIO_SHOT_LAYOUT")) ajustes_teste_layout(atoi(getenv("NUVIO_SHOT_LAYOUT")));
   // NUVIO_SHOT_TEMA=<indice> (0 branco, 12 Dinamica) e NUVIO_SHOT_VIDRO=1: o
   // foco no acento claro com e sem vidro (#202).
   if (getenv("NUVIO_SHOT_TEMA") || getenv("NUVIO_SHOT_VIDRO"))
     ajustes_teste_tema(getenv("NUVIO_SHOT_TEMA") ? atoi(getenv("NUVIO_SHOT_TEMA")) : -1,
                        getenv("NUVIO_SHOT_VIDRO") && atoi(getenv("NUVIO_SHOT_VIDRO")));
+
+  // NUVIO_VIDRO_TELAS=<dir> (tests/vidro_telas.sh): glass budget, first
+  // category (the settings list) static and while moving focus down it.
+  if (vt_ligado()) {
+    vt_vidro();
+    ajustes_teste_ux_captura(10);
+    for (i = 0; i < 150; i++) {
+      SDL_PumpEvents(); txt_novo_quadro(); tex_novo_quadro(); tex_bombear(6); gfx_novo_quadro(); vt_antes();
+      ajustes_atualizar(1.0f / 60.0f, SDL_GetTicks());
+      glClearColor(0.025f, 0.025f, 0.03f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
+      ajustes_desenhar(SDL_GetTicks()); vt_depois();
+      if (i == 119) vt_zerar();
+      if (i == 149) { vt_png("ajustes"); vt_relatar("settings", 1); }
+      SDL_Delay(2);
+    }
+    vt_zerar();
+    for (i = 0; i < 32; i++) {
+      if (i % 4 == 0) tecla(i % 8 ? SDLK_UP : SDLK_DOWN);
+      SDL_PumpEvents(); txt_novo_quadro(); tex_novo_quadro(); tex_bombear(6); gfx_novo_quadro(); vt_antes();
+      ajustes_atualizar(1.0f / 60.0f, SDL_GetTicks());
+      glClearColor(0.025f, 0.025f, 0.03f, 1.0f); glClear(GL_COLOR_BUFFER_BIT);
+      ajustes_desenhar(SDL_GetTicks()); vt_depois();
+    }
+    vt_relatar("settings", 0);
+    return vtFalhas ? 1 : 0;
+  }
+
+#ifdef AJUSTES_PERF
+  if (getenv("NUVIO_AJUSTES_PERF")) { perf_walk(w); return 0; }
+#endif
+
+  // NUVIO_SHOT_CENAS=<pasta>: the generated preview of EVERY visible option,
+  // drawn alone at a fixed instant (960x540 PNG each) plus indice.tsv, to find
+  // options that share the same scene.
+  if (getenv("NUVIO_SHOT_CENAS")) {
+    const char *dir = getenv("NUVIO_SHOT_CENAS");
+    float t = getenv("NUVIO_SHOT_CENAS_T") ? (float)atof(getenv("NUVIO_SHOT_CENAS_T")) : 1.7f;
+    int op, sec, n;
+    const char *chave, *rot;
+    FILE *ix;
+    snprintf(nome, sizeof nome, "%s/indice.tsv", dir);
+    ix = fopen(nome, "w");
+    assert(ix);
+    for (n = 0; ajustes_teste_cena_item(n, &op, &sec, &chave, &rot); n++) {
+      unsigned char *pix = malloc(960 * 540 * 4);
+      SDL_Surface *s;
+      int q, y;
+      assert(pix);
+      for (q = 0; q < 8; q++) {   // text lines rasterize over a few frames
+        SDL_PumpEvents();
+        txt_novo_quadro(); tex_novo_quadro(); tex_bombear(6);
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ajustes_teste_cena_desenhar(op, t, 0, 0, 960);
+        if (q == 7) glReadPixels(0, 1080 - 540, 960, 540, GL_RGBA, GL_UNSIGNED_BYTE, pix);
+        SDL_GL_SwapWindow(w);
+      }
+      s = SDL_CreateRGBSurfaceWithFormat(0, 960, 540, 32, SDL_PIXELFORMAT_RGBA32);
+      assert(s);
+      for (y = 0; y < 540; y++) memcpy((char *)s->pixels + y * s->pitch, pix + (539 - y) * 960 * 4, 960 * 4);
+      snprintf(nome, sizeof nome, "%s/%03d-%s.png", dir, n, chave && chave[0] ? chave : "sem");
+      assert(IMG_SavePNG(s, nome) == 0);
+      fprintf(ix, "%d\t%d\t%d\t%s\t%s\n", n, sec, op, chave ? chave : "", rot ? rot : "");
+      SDL_FreeSurface(s); free(pix);
+    }
+    fclose(ix);
+    printf("cenas: %d em %s\n", n, dir);
+    return 0;
+  }
+
+  // Reuse the compiled harness to compare Settings at 80% and 90%.
+  // NUVIO_AJUSTES_ESCALA_COMPARAR=1 /tmp/nuvio-ajustes-shot /tmp/settings
+  if (getenv("NUVIO_AJUSTES_ESCALA_COMPARAR")) {
+    static const int percentuais[] = {80, 90};
+    static const char *const cenas[] = {"v2-menu", "v2-aberto"};
+    const float zoomGlobal = gfx_escala_ui(), escalaAtiva = gfx_escala();
+    for (int p = 0; p < 2; p++) {
+      ajustes_teste_escala(percentuais[p]);
+      for (int c = 0; c < 2; c++) {
+        assert(ajustes_teste_quadro(cenas[c]));
+        assert(fabsf(ajustes_tamanho_ajustes() - percentuais[p] / 100.0f) < 0.001f);
+        snprintf(nome, sizeof nome, "%s-%d-%s.png", saida, percentuais[p], cenas[c]);
+        captura(nome, w);
+        assert(gfx_escala_ui() == zoomGlobal);
+        assert(gfx_escala() == escalaAtiva);
+      }
+    }
+    goto fim_capturas;
+  }
+
+  // OS QUADROS DO MOCKUP (ajustes-mockup.html): NUVIO_AJ_QUADROS="principal
+  // cor ..." grava <saida>-<id>.png de cada um, com a ilha do relogio.
+  if (getenv("NUVIO_AJ_QUADROS")) {
+    char lista[1024], *id, *ctx = NULL;
+    snprintf(lista, sizeof lista, "%s", getenv("NUVIO_AJ_QUADROS"));
+    for (id = strtok_r(lista, " ", &ctx); id; id = strtok_r(NULL, " ", &ctx)) {
+      // "id@N": grava o quadro N depois de chegar nele (o padrao e 60, a tela
+      // ja parada). Para ver a TROCA de cena no meio do caminho:
+      //   NUVIO_AJ_QUADROS="reproducao op:pausaOverlay@8"
+      { char *arroba = strchr(id, '@');
+        quadrosCaptura = 60;
+        if (arroba) { *arroba = 0; quadrosCaptura = atoi(arroba + 1) > 0 ? atoi(arroba + 1) : 60; } }
+      // "busca:<texto>": a busca de Ajustes (Spotlight no modo Ajustes) com o
+      // texto digitado, por cima do indice. '_' vira espaco.
+      if (!strncmp(id, "busca:", 6)) {
+        char q[128]; int k;
+        SDL_Event e = { 0 };
+        snprintf(q, sizeof q, "%s", id + 6);
+        for (k = 0; q[k]; k++) if (q[k] == '_') q[k] = ' ';
+        ajustes_teste_quadro("v2-menu");
+        spot_abrir_ajustes(0);
+        spot_texto_externo(q);
+        e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_DOWN;
+        for (k = 0; k < 4 && spot_linha_focada() < 0; k++) spot_evento(&e);
+        for (k = 0; id[k]; k++) if (id[k] == ':') id[k] = '-';
+        snprintf(nome, sizeof nome, "%s-%s.png", saida, id);
+        captura(nome, w);
+        if (spot_aberto()) spot_fechar();
+        continue;
+      }
+      if (!ajustes_teste_quadro(id)) { printf("quadro desconhecido: %s\n", id); continue; }
+      if (getenv("NUVIO_SHOT_LAYOUT")) ajustes_teste_layout(atoi(getenv("NUVIO_SHOT_LAYOUT")));
+      // NUVIO_SHOT_FONTE=3 (TXT_FAMILIA_*): the interface font the TV uses
+      // (Montserrat on the owner's Android TV), so truncation shows like there.
+      if (getenv("NUVIO_SHOT_FONTE")) ajustes_teste_fonte_interface(atoi(getenv("NUVIO_SHOT_FONTE")));
+      // NUVIO_SHOT_TECLAS="dddr": keys sent after the frame is set up (u d l r,
+      // o = OK, b = Back), to capture a scrolled list or a changed value.
+      if (getenv("NUVIO_SHOT_TECLAS")) {
+        const char *t;
+        // One frame first: the header pills measure their rows while drawing,
+        // and the navigation reads that layout.
+        ajustes_atualizar(1.0f / 60.0f, SDL_GetTicks());
+        ajustes_desenhar(SDL_GetTicks());
+        for (t = getenv("NUVIO_SHOT_TECLAS"); *t; t++)
+          tecla(*t == 'u' ? SDLK_UP : *t == 'd' ? SDLK_DOWN : *t == 'l' ? SDLK_LEFT : *t == 'r' ? SDLK_RIGHT
+                : *t == 'o' ? SDLK_RETURN : SDLK_ESCAPE);
+      }
+      if (!strcmp(id, "guia-busca")) {
+        int k;
+        SDL_Event e = { 0 };
+        spot_abrir_guia();
+        spot_texto_externo("legenda");
+        e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_DOWN;
+        for (k = 0; k < 4 && spot_linha_focada() < 0; k++) spot_evento(&e);
+      }
+      if (quadrosCaptura != 60) snprintf(nome, sizeof nome, "%s-%s-q%d.png", saida, id, quadrosCaptura);
+      else snprintf(nome, sizeof nome, "%s-%s.png", saida, id);
+      captura(nome, w);
+      quadrosCaptura = 60;
+      if (spot_aberto()) spot_fechar();
+    }
+    goto fim_capturas;
+  }
 
   // A LINHA "Procurar atualização" NOS ESTADOS (01/10/2026): sem versao nova
   // (antes de procurar, procurando, em dia, sem rede) e com versao nova.
@@ -177,6 +466,26 @@ int main(int argc, char **argv) {
       assert(ajustes_teste_focar_opcao(op));
       snprintf(nome, sizeof nome, "%s-atualizar-%s.png", saida, est[i].nome);
       captura(nome, w);
+    }
+    goto fim_capturas;
+  }
+
+  // A GALERIA DO "Ícone do app" (apoiadores), forcada pelo portao do dono:
+  // NUVIO_AJUSTES_ICONE=1 grava -icone-<id>.png com tres escolhas diferentes.
+  if (getenv("NUVIO_AJUSTES_ICONE")) {
+    static const int esc[] = { 0, 1, 7 };
+    setenv("NUVIO_APOIADOR", "1", 1);
+    apoiador_reler();
+    iconeapp_iniciar("deploy/app/art");
+    logoapp_iniciar("deploy/app/art");
+    for (i = 0; i < 3; i++) {
+      int op = ajustes_teste_op_icone(esc[i]);
+      assert(ajustes_teste_focar_opcao(op));
+      snprintf(nome, sizeof nome, "%s-icone-%s.png", saida, iconeapp_id(esc[i]));
+      SDL_Event e = {0}; e.type = SDL_KEYDOWN; e.key.keysym.sym = SDLK_RETURN;
+      ajustes_evento(&e);
+      captura(nome, w);
+      e.key.keysym.sym = SDLK_ESCAPE; ajustes_evento(&e);
     }
     goto fim_capturas;
   }
@@ -218,254 +527,42 @@ int main(int argc, char **argv) {
     goto fim_capturas;
   }
 
-  // A TELA ABRE COM O FOCO NA COLUNA DE CATEGORIAS, na primeira (Conta), e a
-  // lista mostra o que ha nela.
-  snprintf(nome, sizeof nome, "%s-lista.bmp", saida);
-  captura(nome, w);
-
-  // Todo caminho daqui em diante e o do CONTROLE: setas, OK e Voltar. As
-  // categorias sao as de TELA[] em ajustes.c, na ordem do web: 0 Conta,
-  // 1 Aparencia, 2 Layout, 3 Conteudo, 4 Integracoes, 5 Reproducao, 6 Trakt e
-  // Simkl, 7 Avancado, 8 Sobre. Quem mudar a ordem la conserta os numeros aqui.
-  tecla(SDLK_DOWN); tecla(SDLK_DOWN);          // Layout, ainda no indice
-  snprintf(nome, sizeof nome, "%s-indice.bmp", saida);
-  captura(nome, w);
-  tecla(SDLK_RETURN);                          // entra: foco no 1o grupo, fechado
-  snprintf(nome, sizeof nome, "%s-secao.bmp", saida);
-  captura(nome, w);
-  tecla(SDLK_RETURN);                          // abre "Layout da Home"
-  snprintf(nome, sizeof nome, "%s-grupo.bmp", saida);
-  captura(nome, w);
-  tecla(SDLK_DOWN);                            // Posteres horizontais: interruptor
-  snprintf(nome, sizeof nome, "%s-interruptor.bmp", saida);
-  captura(nome, w);
-
-  // Voltar fecha o grupo e devolve o foco ao cabecalho; o grupo seguinte e
-  // "Conteudo da Home", onde moram as fileiras.
-  tecla(SDLK_ESCAPE);
-  tecla(SDLK_DOWN);
-  tecla(SDLK_RETURN);
-  tecla(SDLK_DOWN);                            // Limite de fileiras
-  snprintf(nome, sizeof nome, "%s-previa-fileiras.bmp", saida);
-  captura(nome, w);
-  tecla(SDLK_DOWN);                            // Itens por fileira (#163)
-  snprintf(nome, sizeof nome, "%s-itens-fileira.bmp", saida);
-  captura(nome, w);
-  tecla(SDLK_DOWN);                            // Ordenar e ativar fileiras
-  snprintf(nome, sizeof nome, "%s-acao.bmp", saida);
-  captura(nome, w);
-  tecla(SDLK_RETURN);
-  snprintf(nome, sizeof nome, "%s-fileiras.bmp", saida);
-  captura(nome, w);
-
-  // Uma fileira de CATALOGO em foco, na coluna do card.
-  for (i = 0; i < 2; i++) tecla(SDLK_DOWN);
-  tecla(SDLK_RIGHT);
-  tecla(SDLK_RIGHT);
-  snprintf(nome, sizeof nome, "%s-fileiras-catalogo.bmp", saida);
-  captura(nome, w);
-  // NV_FIL_CICLOS=<n>: n OKs na coluna do card (cicla a forma), e a captura.
-  if (getenv("NV_FIL_CICLOS")) {
-    if (getenv("NV_FIL_DESCE")) for (i = 0; i < atoi(getenv("NV_FIL_DESCE")); i++) tecla(SDLK_DOWN);
-    for (i = 0; i < atoi(getenv("NV_FIL_CICLOS")); i++) tecla(SDLK_RETURN);
-    snprintf(nome, sizeof nome, "%s-fileiras-catalogo-ciclo.bmp", saida);
-    captura(nome, w);
+  // NUVIO_SHOT_PERFIL=1 (2.1): so as capturas de ajustes por perfil. Use com
+  // NUVIO_SHOT_DADOS=<pasta vazia> para as marcas de perfil infantil gravarem.
+  if (getenv("NUVIO_SHOT_PERFIL")) {
+    static const char *const nomes[] = { "chip", "selos", "menu", "copiar", "pin-admin", "bloqueio", "editando" };
+    static const int ordem[7] = { 0, 1, 2, 3, 5, 6, 4 };   /* o PIN por ultimo: o teclado fica aberto */
+    for (i = 0; i < 7; i++) {
+      ajustes_teste_ux_captura(30 + ordem[i]);
+      snprintf(nome, sizeof nome, "%s-perfil-%s.png", saida, nomes[ordem[i]]);
+      captura(nome, w);
+    }
+    goto fim_capturas;
   }
 
-  // A FILA: desce ate depois do separador.
-  for (i = 0; i < 7; i++) tecla(SDLK_DOWN);
-  snprintf(nome, sizeof nome, "%s-fileiras-fila.bmp", saida);
-  captura(nome, w);
-
-  // ABA "FORA DA HOME": sobe ate a barra, direita troca a aba, desce na lista.
-  for (i = 0; i < 12; i++) tecla(SDLK_UP);
-  tecla(SDLK_RIGHT);
-  tecla(SDLK_DOWN);
-  snprintf(nome, sizeof nome, "%s-fileiras-fora.bmp", saida);
-  captura(nome, w);
-
-  // OK adiciona: com a home cheia, entra na fila e a tela avisa.
-  tecla(SDLK_RETURN);
-  snprintf(nome, sizeof nome, "%s-fileiras-adicionada.bmp", saida);
-  captura(nome, w);
-  // Desce ate o ULTIMO botao ("Atualizar tudo"): tem de ser alcancavel.
-  for (i = 0; i < 12; i++) tecla(SDLK_DOWN);
-  snprintf(nome, sizeof nome, "%s-fileiras-botao.bmp", saida);
-  captura(nome, w);
-
-  // "MEMORIA USADA POR IMAGENS" (Avancado, 5a linha): o painel da direita
-  // ganha barra, grafico e estatisticas do cache. Tres Voltar: fecha a folha,
-  // fecha o grupo (o foco sobe ao cabecalho), vai ao indice.
-  tecla(SDLK_ESCAPE);
-  tecla(SDLK_ESCAPE);
-  tecla(SDLK_ESCAPE);
-  for (i = 0; i < 12; i++) tecla(SDLK_UP);
-  for (i = 0; i < 7; i++) tecla(SDLK_DOWN);    // Avancado
-  tecla(SDLK_RETURN);
-  for (i = 0; i < 4; i++) tecla(SDLK_DOWN);
-  snprintf(nome, sizeof nome, "%s-imagens.bmp", saida);
-  captura(nome, w);
-
-  // A PREVIA DO CARTAZ: Layout > Estilo dos cartoes (6o grupo) > Largura.
-  tecla(SDLK_LEFT);                            // a esquerda tambem leva ao indice
-  for (i = 0; i < 5; i++) tecla(SDLK_UP);      // Layout
-  tecla(SDLK_RETURN);
-  for (i = 0; i < 5; i++) tecla(SDLK_DOWN);    // grupos todos fechados
-  tecla(SDLK_RETURN);
-  tecla(SDLK_DOWN);
-  snprintf(nome, sizeof nome, "%s-previa-cartaz.bmp", saida);
-  captura(nome, w);
-
-  // MODO EDICAO numa lista de valores: Reproducao > Qualidade maxima.
-  tecla(SDLK_ESCAPE); tecla(SDLK_ESCAPE);      // grupo -> cabecalho -> indice
-  for (i = 0; i < 3; i++) tecla(SDLK_DOWN);    // Reproducao
-  tecla(SDLK_RETURN);
-  for (i = 0; i < 4; i++) tecla(SDLK_DOWN);    // pula os dois rotulos de bloco
-  tecla(SDLK_RETURN);
-  snprintf(nome, sizeof nome, "%s-edicao.bmp", saida);
-  captura(nome, w);
-  // O VALOR VIRA MARCA: um passo a direita e a qualidade maxima e "4K".
-  tecla(SDLK_RIGHT);
-  snprintf(nome, sizeof nome, "%s-edicao-4k.bmp", saida);
-  captura(nome, w);
-  tecla(SDLK_RETURN);                          // confirma e sai da edicao
-  snprintf(nome, sizeof nome, "%s-qualidade-4k.bmp", saida);
-  captura(nome, w);
-  tecla(SDLK_RETURN);                          // volta a editar para o passo seguinte
-  tecla(SDLK_LEFT);                            // devolve "Automatica", ainda em edicao
-
-  // SAIR DA CONTA PEDE DOIS OK: o primeiro so arma. A captura para no armado.
-  tecla(SDLK_ESCAPE); tecla(SDLK_ESCAPE);
-  for (i = 0; i < 12; i++) tecla(SDLK_UP);     // Conta
-  tecla(SDLK_RETURN);
-  // Perfil, Sincronizacao, Usar os addons do perfil principal, Sair.
-  tecla(SDLK_DOWN); tecla(SDLK_DOWN); tecla(SDLK_DOWN);
-  tecla(SDLK_RETURN);
-  snprintf(nome, sizeof nome, "%s-sair-armado.bmp", saida);
-  captura(nome, w);
-  assert(!ajustes_quer_sair());                // um OK nao sai
-
-  // COR DE DESTAQUE ROSA (a da captura aprovada no DESIGN.md), e as duas
-  // telas principais de novo com ela: Aparencia > Cor de destaque, seis passos.
-  tecla(SDLK_LEFT);
-  tecla(SDLK_DOWN);                            // Aparencia
-  tecla(SDLK_RETURN);
-  tecla(SDLK_RETURN);
-  for (i = 0; i < 6; i++) tecla(SDLK_RIGHT);
-  tecla(SDLK_RETURN);
-  snprintf(nome, sizeof nome, "%s-rosa-aparencia.bmp", saida);
-  captura(nome, w);
-  tecla(SDLK_LEFT);
-  tecla(SDLK_DOWN);                            // Layout
-  tecla(SDLK_RETURN);
-  tecla(SDLK_DOWN);                            // Conteudo da Home
-  tecla(SDLK_RETURN);
-  for (i = 0; i < 4; i++) tecla(SDLK_DOWN);    // Barra lateral moderna
-  snprintf(nome, sizeof nome, "%s-rosa-grupo.bmp", saida);
-  captura(nome, w);
-  tecla(SDLK_LEFT);
-  snprintf(nome, sizeof nome, "%s-rosa-indice.bmp", saida);
-  captura(nome, w);
-
-  // REMOVER O PORTAL tambem pede dois OK: Conteudo > Remover o portal Stalker,
-  // armado com um OK. A captura para no armado.
-  tecla(SDLK_DOWN);                            // Conteudo
-  tecla(SDLK_RETURN);
-  for (i = 0; i < 3; i++) tecla(SDLK_DOWN);    // Addons, portal, MAC, remover
-  tecla(SDLK_RETURN);
-  snprintf(nome, sizeof nome, "%s-remover-armado.bmp", saida);
-  captura(nome, w);
-
-  // APARENCIA COM AS LINHAS DA COR (merge da 1.5): "Cor de destaque" num tema
-  // dinamico (Dinamica gradiente) e "Cor da logo" logo abaixo, que so vale com
-  // ele — a captura para com o foco nela, para mostrar que ela esta ATIVA.
-  tecla(SDLK_ESCAPE);
-  for (i = 0; i < 12; i++) tecla(SDLK_UP);
-  tecla(SDLK_DOWN);                            // Aparencia
-  tecla(SDLK_RETURN);
-  tecla(SDLK_RETURN);                          // edita a cor (esta em Rosa)
-  for (i = 0; i < 8; i++) tecla(SDLK_RIGHT);   // Rosa(6) -> Dinamica gradiente(14)
-  tecla(SDLK_RETURN);
-  tecla(SDLK_DOWN);                            // Cor da logo
-  snprintf(nome, sizeof nome, "%s-aparencia-cor.bmp", saida);
-  captura(nome, w);
-  assert(ajustes_cor_viva() != 0);
-  // De volta ao Rosa: sem titulo em cena o dinamico nao tem arte de onde tirar
-  // a cor, e as paginas abaixo sao para julgar a tela, nao a cor viva.
-  tecla(SDLK_UP);
-  tecla(SDLK_RETURN);
-  for (i = 0; i < 8; i++) tecla(SDLK_LEFT);
-  tecla(SDLK_RETURN);
-  assert(ajustes_cor_viva() == 0);
-  tecla(SDLK_DOWN);
-
-  // AVANCADO > DIAGNOSTICO: o teste de velocidade colado no diagnostico.
-  tecla(SDLK_LEFT);
-  for (i = 0; i < 6; i++) tecla(SDLK_DOWN);    // Avancado
-  tecla(SDLK_RETURN);
-  for (i = 0; i < 6; i++) tecla(SDLK_DOWN);    // pula o rotulo "Diagnóstico"
-  snprintf(nome, sizeof nome, "%s-avancado-velocidade.bmp", saida);
-  captura(nome, w);
-  tecla(SDLK_RETURN);                          // OK pede a tela do teste
-  assert(ajustes_pediu_velocidade());
-
-  // TODAS AS LINHAS, categoria a categoria e grupo a grupo, para serem olhadas
-  // (o merge da 1.5 tirou o icone das linhas e o pos nas categorias e nos
-  // grupos). Paginas de 6 passos. `LINHAS` e quantos itens com foco a
-  // categoria tem no nivel de cima (grupos contam um); `GRUPOS`, as linhas de
-  // cada grupo — espelho de TELA[] em ajustes.c.
-  { static const int LINHAS[9] = { 3, 5, 8, 8, 3, 9, 3, 7, 4 };
-    static const int GRUPOS[9][8] = {
-      [2] = { 8, 15, 10, 9, 3, 11, 7, 4 },     // Layout (trailer: 8; Continuar: 10; posteres; arte do addon)
-      [4] = { 14, 10, 1 },                     // Integracoes
-    };
-    int c, g, p, k;
-    for (c = 0; c < 9; c++) {
-      tecla(SDLK_LEFT);
-      for (i = 0; i < 12; i++) tecla(SDLK_UP);
-      for (i = 0; i < c; i++) tecla(SDLK_DOWN);
-      snprintf(nome, sizeof nome, "%s-categoria-c%d.bmp", saida, c);
-      captura(nome, w);                         // painel de ajuda da categoria
-      tecla(SDLK_RETURN);
-      for (p = 0; p * 6 < LINHAS[c]; p++) {
-        snprintf(nome, sizeof nome, "%s-todas-c%d-%d.bmp", saida, c, p);
-        captura(nome, w);
-        for (k = 0; k < 6; k++) tecla(SDLK_DOWN);
-      }
-      // E A ULTIMA LINHA: os saltos de 6 param antes dela quando a conta nao
-      // fecha (Reproducao tem 9 — os idiomas ficavam de fora).
-      if (LINHAS[c] > 6) {
-        for (k = 0; k < 12; k++) tecla(SDLK_DOWN);
-        snprintf(nome, sizeof nome, "%s-todas-c%d-fim.bmp", saida, c);
-        captura(nome, w);
-      }
-      for (g = 0; g < 8 && GRUPOS[c][g]; g++) {
-        for (i = 0; i < 12; i++) tecla(SDLK_UP);
-        for (i = 0; i < g; i++) tecla(SDLK_DOWN);
-        tecla(SDLK_RETURN);                    // abre o grupo g
-        for (p = 0; p * 6 < GRUPOS[c][g]; p++) {
-          for (k = 0; k < (p ? 6 : 1); k++) tecla(SDLK_DOWN);
-          snprintf(nome, sizeof nome, "%s-todas-c%d-g%d-%d.bmp", saida, c, g, p);
-          captura(nome, w);
-        }
-        // Aqui SEM passar do fim: abaixo da ultima opcao vem o cabecalho do
-        // grupo seguinte, e dele o Voltar iria ao indice em vez de fechar.
-        if (GRUPOS[c][g] > 6 && GRUPOS[c][g] > 1 + 6 * (p - 1)) {
-          for (k = 1 + 6 * (p - 1); k < GRUPOS[c][g]; k++) tecla(SDLK_DOWN);
-          snprintf(nome, sizeof nome, "%s-todas-c%d-g%d-fim.bmp", saida, c, g);
-          captura(nome, w);
-        }
-        tecla(SDLK_ESCAPE);                    // fecha; foco volta ao cabecalho
-      }
-    } }
-
-  // "EXPERIMENTAR A COR VIVA" (cartao de novidades): a tela reabre ja em
-  // Aparencia, com o foco na lista, na linha da cor.
-  ajustes_abrir_na_cor();
-  ajustes_iniciar();
-  assert(!ajustes_foco_no_indice());
-  snprintf(nome, sizeof nome, "%s-abrir-na-cor.bmp", saida);
-  captura(nome, w);
+  // Cenários do novo contrato: categoria, seleção, cancelamento,
+  // dependência e restauração. Só fixtures em memória, sem dados pessoais.
+  static const char *const cenarios[] = {
+    "indice", "tela-inicial", "seletor", "dependencia", "diferencas", "restaurar", "avancados", "numero", "cabecalho", "english"
+  };
+  for (i = 0; i < (int)(sizeof cenarios / sizeof *cenarios); i++) {
+    ajustes_teste_ux_captura(i);
+    snprintf(nome, sizeof nome, "%s-%s.png", saida, cenarios[i]);
+    captura(nome, w);
+  }
+  for (i = 21; i <= 24; i++) {
+    static const char *const n[] = { "trailers", "trailer-seletor", "ampliacao", "ampliacao-seletor" };
+    ajustes_teste_ux_captura(i);
+    snprintf(nome, sizeof nome, "%s-%s.png", saida, n[i - 21]);
+    captura(nome, w);
+  }
+  if (!getenv("NUVIO_AJUSTES_UX")) {
+    for (i = 0; i < 11; i++) {
+      ajustes_teste_ux_captura(10 + i);
+      snprintf(nome, sizeof nome, "%s-categoria-%02d.png", saida, i + 1);
+      captura(nome, w);
+    }
+  }
 
   fim_capturas:
   tex_encerrar();

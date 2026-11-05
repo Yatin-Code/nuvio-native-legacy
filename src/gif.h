@@ -41,6 +41,10 @@ int gif_pode_animar(void);
 #define GIF_SEM_TETO ((size_t)-1)
 size_t gif_orcamento_para(double memGB);
 size_t gif_custo(int quadros, int telaW, int telaH, int nominalMs);
+// Camera lenta para caber no orcamento (#589): 1.0 se ja cabe (ou sem teto);
+// custo/orc ate GIF_ESTICA_MAX; 0.0 = pesado demais, fica o primeiro quadro.
+#define GIF_ESTICA_MAX 2.0
+double gif_estica(size_t custo, size_t orc);
 
 // Chamar UMA VEZ POR QUADRO de tela (main.c). Solta a animacao corrente
 // quando ninguem pediu gif_textura ha mais de NV_GIF_OCIOSO_MS: e o que
@@ -98,6 +102,10 @@ void gif_tamanho_saida(int telaW, int telaH, int largAlvo, int *saidaW, int *sai
 // 2+ quadros ou a tela passa de GIF_TELA_MAX pixels.
 #define GIF_TELA_MAX (1280 * 1280)
 GifDec *gif_dec_abrir(unsigned char *b, size_t n, int saidaW, int saidaH);
+// Foto de um GIF, inclusive de um quadro, sem SDL_image nem animacao.
+// Retorna RGBA reduzido (free pelo chamador), ou NULL. Mantem GIF_TELA_MAX.
+unsigned char *gif_primeiro_rgba(const unsigned char *b, size_t n, int largMax,
+                                 int *w, int *h, int *originalW, int *originalH);
 int  gif_dec_quadros(const GifDec *d);
 void gif_dec_tela(const GifDec *d, int *w, int *h);
 // Decodifica o PROXIMO quadro (volta ao 0 no fim). Devolve o indice dele e as

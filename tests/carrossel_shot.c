@@ -27,8 +27,11 @@
 // o numero de retangulos do quadro — o que da para medir no Mac do custo de
 // desenho; o custo em ms de GPU so existe na TV.
 #include "ajustes.h"
+#include "nvtmp.h"
+#include "agenda.h"
 #include "artehero.h"
 #include "catalogo.h"
+#include "addons.h"
 #include "colecoes.h"
 #include "corviva.h"
 #include "ctxmenu.h"
@@ -50,6 +53,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "../src/detail.c" // Capture exact background endpoints without changing the public app API.
 
 #define NA 40
 static const char *NOMES[] = {
@@ -76,6 +80,7 @@ static const Fil FILS[] = {
 static SDL_Window *janela;
 static const char *dirDados;
 static double fillUlt, fillVisUlt, modoUlt[GFX_NMODOS]; static int rectUlt;
+static float fundoShotCartao = -1.0f;
 
 static void gravar(const char *bmp) {
   unsigned char *pix = malloc(1920 * 1080 * 4);
@@ -103,6 +108,10 @@ static void quadros(int n, const char *bmp) {
       if (home_item_focado(&it)) detail_abrir(&it);
     }
     detail_atualizar(1.0f / 60.0f, agora);
+    if (fundoShotCartao >= 0.0f) {
+      cartao = fundoShotCartao; cartaoVel = 0;
+      pg = getenv("NV_CAR_PG") ? atof(getenv("NV_CAR_PG")) : 0; t = 1;
+    }
     corviva_quadro(1.0f / 60.0f, ajustes_cor_viva(), ajustes_cor_logo(), ajustes_animacoes_reduzidas());
     txt_novo_quadro();
     tex_novo_quadro();
@@ -112,7 +121,8 @@ static void quadros(int n, const char *bmp) {
     glClear(GL_COLOR_BUFFER_BIT);
     gfx_ambiente(1.0f);
     if (!detail_cobre_tela()) home_desenhar(agora);
-    detail_desenhar(agora);
+    if (fundoShotCartao >= 0.0f) detalheFundo(1.0f);
+    else detail_desenhar(agora);
     ctx_atualizar(1.0f / 60.0f, agora);
     ctx_desenhar(agora);
     if (i == n - 1) { fillUlt = gfx_fill; fillVisUlt = gfx_fill_vis; rectUlt = gfx_n_rect;
@@ -176,7 +186,7 @@ static void ajusta(int layout, int vidro) {
 }
 
 int main(int argc, char **argv) {
-  const char *saida = argc > 1 ? argv[1] : "/tmp/nv-carrossel/c";
+  const char *saida = argc > 1 ? argv[1] : nvt("/nv-carrossel/c");
   const char *camadas = argc > 2 ? argv[2] : "012";
   static CatItem itens[200];
   static CatFileira fils[8];
@@ -218,9 +228,15 @@ int main(int argc, char **argv) {
   snprintf(cache, sizeof cache, "%s/cache", dirDados);
   tex_cache_dir(cache);
   gfx_icones_dir("deploy/app/art");
-  ajusta(2, 0);
+  // NUVIO_SHOT_VIDRO=1: Interface de vidro ligada (o padrao desta captura e o solido).
+  ajusta(2, getenv("NUVIO_SHOT_VIDRO") && !strcmp(getenv("NUVIO_SHOT_VIDRO"), "1"));
   assert(home_iniciar("deploy/app/art"));
 
+  // A Home exige um addon ligado mesmo quando o catalogo e um fixture local
+  // (homelayouts_shot.c): sem ele o homevazio toma a tela e as capturas saem
+  // todas com o QR de "Sua Home está vazia".
+  { AddonRemoto addon = { .nome = "Fixture", .url = "http://127.0.0.1:1/manifest.json", .ativo = 1 };
+    assert(addons_definir_lista(&addon, 1)); }
   memset(itens, 0, sizeof itens);
   memset(fils, 0, sizeof fils);
   for (k = 0; k < NF; k++) {
@@ -278,11 +294,12 @@ int main(int argc, char **argv) {
              getenv("NV_COL_FORMA") ? getenv("NV_COL_FORMA") : "",
              getenv("NV_COL_FORMA") ? "\"," : "");
     snprintf(js, sizeof js,
-      "{\"collections\":[{\"id\":\"cs\",\"title\":\"Streaming\",\"backdropImageUrl\":\"deploy/app/art/07.jpg\",\"folders\":["
+      "{\"collections\":[{\"id\":\"cs\",\"title\":\"%s\",\"backdropImageUrl\":\"deploy/app/art/07.jpg\",\"folders\":["
       "{\"id\":\"a\",\"title\":\"Com hero e capa\",\"heroBackdropUrl\":\"deploy/app/art/03.jpg\",\"coverImageUrl\":\"deploy/app/art/poster/12.jpg\",%s},"
       "{\"id\":\"b\",\"title\":\"So capa\",\"coverImageUrl\":\"deploy/app/art/05.jpg\",%s},"
       "{\"id\":\"c\",\"title\":\"So fundo da colecao\",%s},"
       "{\"id\":\"d\",\"title\":\"Com hero sem capa\",\"heroBackdropUrl\":\"deploy/app/art/09.jpg\",%s}]}]}",
+      getenv("NV_COL_ORDEM") ? "Coleção" : "Streaming",
       fonte, fonte, fonte, fonte);
     // NV_COL_PACOTE=1: o pacote traz as pastas "a" e "b" com arte PROPRIA
     // (caminho absoluto: localiza nao mexe), para a captura de "Arte das
@@ -304,7 +321,26 @@ int main(int argc, char **argv) {
     }
     assert(col_definir_json(js) == 4);
   }
+  if (getenv("NV_AGENDA")) {
+    agenda_iniciar(); agenda_definir_hoje("2026-10-03");
+    for (int j = 0; j < total; j++) if (!strcmp(itens[j].tipo, "series"))
+      agenda_registrar(itens[j].imdb, itens[j].titulo, itens[j].poster,
+                        "Returning Series", 2, 5, "Episódio de ensaio",
+                        "2026-10-07", "2026-09-30");
+  }
   cat_definir_tudo(itens, total, fils, NF);
+  if (getenv("NV_EP_LIST")) for (int j=0;j<total;j++) if (!strcmp(itens[j].tipo,"series")) {
+    CatEp eps[6] = {0};
+    for (int e=0;e<6;e++) {
+      eps[e].temporada=1; eps[e].episodio=e+1;
+      snprintf(eps[e].nome,sizeof eps[e].nome,"Episódio de ensaio %d",e+1);
+      snprintf(eps[e].thumb,sizeof eps[e].thumb,"deploy/app/art/%02d.jpg",e%NA);
+      snprintf(eps[e].sinopse,sizeof eps[e].sinopse,"Uma sinopse de ensaio para conferir a leitura, o foco e a separação entre a imagem e as informações do episódio.");
+      snprintf(eps[e].duracao,sizeof eps[e].duracao,"50 min");
+      snprintf(eps[e].data,sizeof eps[e].data,"01/04/2022");
+    }
+    cat_definir_episodios(j,eps,6);
+  }
   quadros(90, NULL);
   {
     int q, r, n = 0;
@@ -318,10 +354,65 @@ int main(int argc, char **argv) {
 #define FOTO(nome) do { snprintf(bmp, sizeof bmp, "%s-%02d-%s.bmp", saida, n++, nome); quadros(1, bmp); \
     printf("[shot] %s: fill=%.2f vis=%.2f rects=%d\n", nome, fillUlt, fillVisUlt, rectUlt); } while (0)
     FOTO("home");
+    // NV_CTX=1: so o MENU DO CARTAZ (segurar OK), a segunda opcao em foco e a
+    // folha de estilo da fileira — as ilhas modais do Glass UI — e para.
+    if (getenv("NV_CTX")) {
+      int alvo = getenv("NV_FIL") ? atoi(getenv("NV_FIL")) : 3;
+      segurarOk();
+      quadros(60, NULL); FOTO("ctx");
+      teclaCtx(SDLK_DOWN);
+      quadros(40, NULL); FOTO("ctx-foco2");
+      teclaCtx(SDLK_ESCAPE);
+      quadros(40, NULL);
+      ctx_abrir_fileira(fils[alvo].chave, fils[alvo].titulo);
+      quadros(60, NULL); FOTO("estilos");
+      goto fim;
+    }
+    // NV_COL_ORDEM=1 (com NV_COL=1): a fileira de colecao em foco, segurando
+    // OK abre o modal de estilo dela — e a linha "Ordem" das pastas (2.0.5)
+    // em foco, com o ciclo de uma troca e o OK que aplica.
+    if (getenv("NV_COL_ORDEM")) {
+      for (r = 0; r < 14; r++) { tecla(SDLK_DOWN); quadros(6, NULL); }
+      FOTO("colecao-foco");
+      segurarOk();
+      quadros(60, NULL); FOTO("colecao-estilo");
+      teclaCtx(SDLK_DOWN); teclaCtx(SDLK_DOWN); teclaCtx(SDLK_DOWN); teclaCtx(SDLK_DOWN);
+      quadros(50, NULL); FOTO("colecao-ordem");
+      teclaCtx(SDLK_RIGHT);
+      quadros(40, NULL); FOTO("colecao-ordem-ano");
+      teclaCtx(SDLK_RIGHT);   // Alfabética: as pastas do fixture (Com hero e capa,
+      teclaCtx(SDLK_RETURN); // So capa...) trocam de lugar na fileira ao aplicar
+      quadros(50, NULL); FOTO("colecao-aplicada");
+      goto fim;
+    }
     // ABRIR: OK (keydown + keyup na home), quadros a cada 3.
     tecla(SDLK_RETURN);
     for (q = 0; q < 8; q++) { quadros(2, NULL); FOTO("abrindo"); }
     quadros(90, NULL); FOTO("cartao");
+    if (getenv("NV_CAR_LIMIAR")) {
+      static const float passos[] = {1.0f, .5f, .1f, .02f, .0021f, .0019f, 0.0f};
+      carOff = (float)carAplicado; carCheia = 1;
+      if (getenv("NV_CAR_SEM_ARTE")) {
+        CatItem *c = (CatItem *)cat_item(idx);
+        c->backdrop[0] = c->poster[0] = c->imdb[0] = arteFixa[0] = 0;
+        // O fixture remove a identidade junto com a arte: nao deixar o
+        // reconciliador reencontrar uma copia do titulo com imagem no catalogo.
+        idxImdb[0] = 0;
+        arteFixaPoster = 0;
+      } else if (getenv("NV_CAR_POSTER")) {
+        const CatItem *c = cat_item(idx);
+        snprintf(arteFixa, sizeof arteFixa, "%s", c->poster);
+        arteFixaPoster = 1;
+      }
+      for (size_t j=0; j<sizeof passos/sizeof passos[0]; j++) {
+        fundoShotCartao = passos[j];
+        snprintf(bmp, sizeof bmp, "%s-limiar-%zu.bmp", saida, j);
+        quadros(1, bmp);
+        printf("[carousel-background] card=%.5f branch=%s fill=%.3f rects=%d\n",
+               cartao, carDesenhaFundo() ? "window" : "detail", fillUlt, rectUlt);
+      }
+      goto fim;
+    }
     // ANDAR: direita ate a ponta dos botoes e mais uma = proximo titulo.
     for (r = 0; r < 8; r++) { tecla(SDLK_RIGHT); quadros(2, NULL); }
     for (q = 0; q < 8; q++) { quadros(3, NULL); FOTO("andando1"); }
@@ -330,13 +421,14 @@ int main(int argc, char **argv) {
     for (q = 0; q < 5; q++) { quadros(4, NULL); FOTO("andando2"); }
     quadros(90, NULL); FOTO("titulo3");
     // TELA CHEIA: a primeira seta para baixo so estica o cartao (o texto
-    // fica onde estava); a segunda desce para a pagina.
+    // vai para a margem); a segunda desce para a pagina.
     tecla(SDLK_DOWN);
     for (q = 0; q < 6; q++) { quadros(3, NULL); FOTO("esticando"); }
     quadros(90, NULL); FOTO("tela-cheia");
     tecla(SDLK_DOWN);
     for (q = 0; q < 3; q++) { quadros(4, NULL); FOTO("descendo"); }
     quadros(90, NULL); FOTO("pagina");
+    if (getenv("NV_EP_LIST")) { tecla(SDLK_DOWN); quadros(90,NULL); FOTO("episodios"); tecla(SDLK_UP); quadros(90,NULL); }
     // VOLTAR: pagina -> tela cheia no topo -> cartao -> fileira.
     tecla(SDLK_AC_BACK);
     quadros(90, NULL); FOTO("tela-cheia-de-novo");
@@ -346,8 +438,10 @@ int main(int argc, char **argv) {
     tecla(SDLK_AC_BACK);
     for (q = 0; q < 6; q++) { quadros(3, NULL); FOTO("fechando"); }
     quadros(90, NULL); FOTO("fileira");
+    for (int back=0; back<4 && detail_aberto(); back++) { tecla(SDLK_AC_BACK); quadros(90,NULL); }
     printf("[shot] detalhe aberto no fim: %d\n", detail_aberto());
   }
+fim:
 
   tex_encerrar();
   txt_encerrar();
