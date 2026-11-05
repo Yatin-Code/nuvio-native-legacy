@@ -7241,7 +7241,7 @@ static const char *textoLeitura(int op) {
     }
   }
   if (op == AJ_OPENPOOL_SERVIDOR) return minipool_servidor();
-  if (op == AJ_OPENPOOL_PIN) return i18n(minipool_pin_configurado() ? "Configurado" : "Não configurado");
+  if (op == AJ_OPENPOOL_PIN) return i18n(minipool_pin_configurado() ? "Configurado" : "Opcional em HTTPS público");
   if (op == AJ_OPENPOOL_VINCULAR) return minipool_estado_texto();
 #else
   if (op == AJ_SEEKR_CHAVE) return seekrMascarada();
@@ -8194,9 +8194,9 @@ static const char *ajudaOpcaoBase(int op) {
       return "A TV faz as miniaturas enquanto o vídeo toca: primeiro onde você procura, depois perto da posição atual e então o filme todo. Pausa sozinha se faltar memória.";
     case AJ_SEEKR_CHAVE:
       return "Guarda as miniaturas feitas nesta TV numa pasta oculta do seu Google Drive, para não refazer ao rever. Nada fica na TV. Miniaturas sem uso por 40 dias são apagadas.";
-    case AJ_OPENPOOL_SERVIDOR: return "Endereço HTTPS do servidor OpenSeek que guarda os pacotes compartilhados.";
-    case AJ_OPENPOOL_PIN: return "Pin SPKI TLS do servidor, obtido pelo dono em um canal confiável. Necessário para autenticar o certificado autoassinado.";
-    case AJ_OPENPOOL_VINCULAR: return "Digite o convite de 16 caracteres (4 grupos) ou o código temporário de 8 caracteres do dono. Ao tocar novamente, revoga o pareamento desta TV.";
+    case AJ_OPENPOOL_SERVIDOR: return "Endereço HTTPS do seu servidor OpenSeek. O assistente pode incluir o endereço no pacote de pareamento.";
+    case AJ_OPENPOOL_PIN: return "Opcional. Use o pin SPKI para um servidor com certificado autoassinado; endpoints Vercel usam validação HTTPS normal.";
+    case AJ_OPENPOOL_VINCULAR: return "Digite o pacote URL|convite de uso único mostrado pelo assistente. Ao tocar novamente, revoga o pareamento desta TV.";
     case AJ_OPENPOOL_RECEBER: return "Baixa um pacote de miniaturas do OpenSeek antes de gerar quadros localmente. Não exige conta pareada para leitura pública.";
     case AJ_OPENPOOL_CONTRIBUIR: return "Envia os quadros gerados nesta TV ao pool compartilhado. Exige convite com permissão de contribuição.";
     case AJ_OPENPOOL_LOGS: return "Abre o registro ao vivo filtrado para pedidos e erros do OpenSeek. Use para ver o motivo de uma falha no pool compartilhado.";
@@ -10045,7 +10045,7 @@ static void eventoTela(const SDL_Event *e) {
     if (focoOp == AJ_OPENPOOL_VINCULAR) {
       if (minipool_pareado()) { minipool_desvincular(); return; }
       stCampo = focoOp;
-      teclado_abrir_com("Código de convite OpenSeek", "Convite de 16 caracteres fornecido pelo dono.", 32, URL_ALFA, NULL);
+      teclado_abrir_com("Pacote de pareamento OpenSeek", "Cole o pacote URL|convite mostrado pelo assistente.", 512, URL_ALFA, NULL);
       return;
     }
 #endif

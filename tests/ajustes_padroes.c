@@ -45,6 +45,10 @@ int main(void) {
   assert(valor[AJ_XTREAM_CONEXOES] == 0 && valor[AJ_AMPLIAR_UI] == 2);
   assert(!strcmp(CHAVE[AJ_XTREAM_CONEXOES], "-xtreamConexoes"));
   assert(!strcmp(CHAVE[AJ_AMPLIAR_UI], "ampliarUiLocal"));
+#ifdef NV_MINIATURAS
+  assert(valor[AJ_OPENPOOL_RECEBER] == 1 && !ajustes_openseek_pool_receber());
+  assert(valor[AJ_OPENPOOL_CONTRIBUIR] == 1 && !ajustes_openseek_pool_contribuir());
+#endif
   // Upscaling: Automatic, sharpness 2; both device-local.
   assert(valor[AJ_AMPLIACAO_ALGO] == 0 && valor[AJ_AMPLIACAO_NITIDEZ] == 2);
   assert(!strcmp(CHAVE[AJ_AMPLIACAO_ALGO], "ampliarAlgoLocal") &&

@@ -1,5 +1,6 @@
 #define NV_ANDROID 1
 #include "../src/minipool.c"
+#include "../src/minipool_fallback.h"
 #include <unistd.h>
 
 static int status[4], calls;
@@ -10,8 +11,8 @@ static char request_bodies[4][256];
 static size_t request_body_bytes[4];
 static const char *bodies[4];
 static const char *response_headers[4];
-static unsigned char response_binary[512];
-static size_t response_binary_size;
+static unsigned char response_binary[4][512];
+static size_t response_binary_size[4];
 
 int rede_pedir(const RedePedido *p, RedeResposta *r) {
   int i = calls++;
@@ -31,10 +32,10 @@ int rede_pedir(const RedePedido *p, RedeResposta *r) {
     request_bodies[i][p->n_corpo] = 0;
   }
   r->status = status[i];
-  if (response_binary_size) {
-    r->corpo = malloc(response_binary_size);
-    if (r->corpo) memcpy(r->corpo, response_binary, response_binary_size);
-    r->n_corpo = response_binary_size;
+  if (response_binary_size[i]) {
+    r->corpo = malloc(response_binary_size[i]);
+    if (r->corpo) memcpy(r->corpo, response_binary[i], response_binary_size[i]);
+    r->n_corpo = response_binary_size[i];
   } else {
     r->corpo = strdup(bodies[i] ? bodies[i] : "");
     r->n_corpo = strlen(r->corpo);
@@ -64,7 +65,7 @@ static void reset(void) {
   memset(bodies, 0, sizeof bodies);
   memset(response_headers, 0, sizeof response_headers);
   memset(response_binary, 0, sizeof response_binary);
-  response_binary_size = 0;
+  memset(response_binary_size, 0, sizeof response_binary_size);
   strcpy(mp_url, "https://pool.example");
   strcpy(mp_pin, "sha256//AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
   strcpy(mp_token, "paired-device-token");
@@ -73,6 +74,41 @@ static void reset(void) {
 static void put32(unsigned char *p, uint32_t v) {
   p[0] = (unsigned char)v; p[1] = (unsigned char)(v >> 8);
   p[2] = (unsigned char)(v >> 16); p[3] = (unsigned char)(v >> 24);
+}
+
+static void one_tile_package(unsigned char package[157], uint32_t grid,
+                             uint32_t n_slots, uint32_t slot) {
+  memset(package, 0, 157);
+  memcpy(package, "NVMT", 4); put32(package + 4, 1); put32(package + 8, grid);
+  put32(package + 12, n_slots); put32(package + 16, 1);
+  put32(package + 20, slot); put32(package + 24, slot * grid); put32(package + 28, 125);
+  package[32] = 0xff; package[33] = 0xd8; package[155] = 0xff; package[156] = 0xd9;
+}
+
+typedef struct { int lookup_started, lookup_available, local_started; } FallbackProbe;
+
+static void start_optional_lookup(void *context) {
+  FallbackProbe *probe = context;
+  probe->lookup_started++;
+  probe->lookup_available = 0;
+}
+
+static int start_local_generation(void *context) {
+  FallbackProbe *probe = context;
+  probe->local_started++;
+  return 1;
+}
+
+static int test_local_generation_is_independent_of_pool_lookup(void) {
+  FallbackProbe probe = {.lookup_available = 1};
+  // The optional lookup can miss or be offline; local work still starts.
+  if (!minipool_start_local_fallback(&probe, start_optional_lookup,
+                                     start_local_generation) ||
+      probe.lookup_started != 1 || probe.lookup_available || probe.local_started != 1) return 0;
+  probe = (FallbackProbe){0};
+  // Local-only mode has no pool lookup callback and still starts generation.
+  return minipool_start_local_fallback(&probe, NULL, start_local_generation) &&
+         probe.lookup_started == 0 && probe.local_started == 1;
 }
 
 static int test_linear_mapping(void) {
@@ -118,6 +154,7 @@ static int test_log_error_redaction(void) {
 }
 
 int main(void) {
+  if (!test_local_generation_is_independent_of_pool_lookup()) return 29;
   if (!test_linear_mapping()) return 15;
   if (!test_log_error_redaction()) return 23;
   MiniMeta meta = {0};
@@ -215,29 +252,36 @@ int main(void) {
   put32(package + 12, 1); put32(package + 16, 1);
   put32(package + 20, 1); put32(package + 24, 5000); put32(package + 28, 125);
   package[32] = 0xff; package[33] = 0xd8; package[155] = 0xff; package[156] = 0xd9;
-  reset(); status[0] = 200; response_binary_size = sizeof package;
-  memcpy(response_binary, package, sizeof package); // slot 1 is outside the one-slot package.
-  admin_sha256_hex(response_binary, (unsigned long)response_binary_size, digest);
+  reset(); status[0] = status[1] = 200;
+  bodies[0] = "{\"duration_ms\":5000,\"n_slots\":1,\"n_tiles\":1,\"tile_slots\":[0]}";
+  response_binary_size[1] = sizeof package;
+  memcpy(response_binary[1], package, sizeof package); // slot 1 is outside the one-slot package.
+  admin_sha256_hex(response_binary[1], (unsigned long)response_binary_size[1], digest);
   snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 5000\nX-OpenSeek-Sha256: %s\n", digest);
-  response_headers[0] = headers;
+  response_headers[1] = headers;
   if (minipool_buscar_candidato(1, &candidate, &download, &download_size, NULL) ||
-      download || calls != 1) return 10;
-  candidate.nTiles = 2;
-  reset(); status[0] = 200; response_binary_size = sizeof package;
-  put32(package + 20, 0); memcpy(response_binary, package, sizeof package);
-  admin_sha256_hex(response_binary, (unsigned long)response_binary_size, digest);
+      download || calls != 2) return 10;
+  candidate.nTiles = 0; // manifest tile count cannot exceed the ranked candidate.
+  reset(); status[0] = status[1] = 200;
+  bodies[0] = "{\"duration_ms\":5000,\"n_slots\":1,\"n_tiles\":1,\"tile_slots\":[0]}";
+  put32(package + 20, 0); memcpy(response_binary[1], package, sizeof package);
+  response_binary_size[1] = sizeof package;
+  admin_sha256_hex(response_binary[1], (unsigned long)response_binary_size[1], digest);
   snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 5000\nX-OpenSeek-Sha256: %s\n", digest);
-  response_headers[0] = headers;
+  response_headers[1] = headers;
   if (minipool_buscar_candidato(1, &candidate, &download, &download_size, NULL) ||
       download || calls != 1) return 11;
   candidate.nTiles = 1;
-  reset(); status[0] = 200; response_binary_size = sizeof package;
-  memcpy(response_binary, package, sizeof package);
-  admin_sha256_hex(response_binary, (unsigned long)response_binary_size, digest);
+  reset(); status[0] = status[1] = 200;
+  bodies[0] = "{\"duration_ms\":5000,\"n_slots\":1,\"n_tiles\":1,\"tile_slots\":[0]}";
+  memcpy(response_binary[1], package, sizeof package);
+  response_binary_size[1] = sizeof package;
+  admin_sha256_hex(response_binary[1], (unsigned long)response_binary_size[1], digest);
   snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 5000\nX-OpenSeek-Sha256: %s\n", digest);
-  response_headers[0] = headers;
+  response_headers[1] = headers;
   if (!minipool_buscar_candidato(1, &candidate, &download, &download_size, NULL) ||
-      !download || download_size != sizeof package || calls != 1) return 12;
+      !download || download_size != sizeof package || calls != 2 ||
+      !strstr(urls[0], "/nvmt/manifest?") || !strstr(urls[1], "slots=0")) return 12;
   free(download);
 
   // Exact-fingerprint reads pass duration so channel nodes can reconstruct
@@ -245,15 +289,84 @@ int main(void) {
   MiniMeta exact_meta = {0}; char exact_profile[16] = "";
   strcpy(exact_meta.fp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
   strcpy(exact_meta.imdb, "tt1234567"); exact_meta.durMs = 5000;
-  reset(); status[0] = 200; response_binary_size = sizeof package;
-  memcpy(response_binary, package, sizeof package);
-  admin_sha256_hex(response_binary, (unsigned long)response_binary_size, digest);
+  reset(); status[0] = status[1] = 200;
+  bodies[0] = "{\"duration_ms\":5000,\"n_slots\":1,\"n_tiles\":1,\"tile_slots\":[0]}";
+  memcpy(response_binary[1], package, sizeof package);
+  response_binary_size[1] = sizeof package;
+  admin_sha256_hex(response_binary[1], (unsigned long)response_binary_size[1], digest);
   snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 5000\nX-OpenSeek-Sha256: %s\n", digest);
-  response_headers[0] = headers;
+  response_headers[1] = headers;
   if (!minipool_buscar(1, &exact_meta, &download, &download_size, exact_profile, NULL) ||
-      calls != 1 || !strstr(urls[0], "duration_ms=5000") ||
+      calls != 2 || !strstr(urls[0], "duration_ms=5000") ||
+      !strstr(urls[1], "slots=0") ||
       strcmp(exact_profile, "nvmt-v1-g5")) return 24;
   free(download);
+
+  // Sparse exact packages preserve the verified tile and expose missing
+  // slots for local generation. The exact path still checks g5 before g10.
+  MiniMeta sparse_meta = {0}; char sparse_profile[16] = "";
+  unsigned char sparse_package[157];
+  strcpy(sparse_meta.fp, "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd");
+  sparse_meta.durMs = 20000;
+  one_tile_package(sparse_package, 10000, 2, 0);
+  reset(); status[0] = 404; status[1] = status[2] = 200;
+  bodies[0] = "{\"error\":\"not_found\"}";
+  bodies[1] = "{\"duration_ms\":20000,\"n_slots\":2,\"n_tiles\":1,\"tile_slots\":[0]}";
+  response_binary_size[2] = sizeof sparse_package;
+  memcpy(response_binary[2], sparse_package, sizeof sparse_package);
+  admin_sha256_hex(response_binary[2], (unsigned long)response_binary_size[2], digest);
+  snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 20000\nX-OpenSeek-Sha256: %s\n", digest);
+  response_headers[2] = headers;
+  if (!minipool_buscar(1, &sparse_meta, &download, &download_size, sparse_profile, NULL) ||
+      calls != 3 || strcmp(sparse_profile, "nvmt-v1-g10") || !download ||
+      !nvmt_ok(download, download_size, 20000, 10000) || read32(download + 12) != 2 ||
+      read32(download + 16) != 1 || read32(download + 20) != 0 ||
+      !strstr(urls[2], "slots=0")) return 25;
+  free(download); download = NULL; download_size = 0;
+
+  // Hint-matched candidates may also be sparse; the caller can merge these
+  // verified records into the exact result without replacing existing tiles.
+  MpoolCandidate sparse_candidate = {0};
+  strcpy(sparse_candidate.fp, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+  strcpy(sparse_candidate.profile, "nvmt-v1-g10");
+  sparse_candidate.durationMs = 20000; sparse_candidate.nSlots = 2; sparse_candidate.nTiles = 1;
+  reset(); status[0] = status[1] = 200;
+  bodies[0] = "{\"duration_ms\":20000,\"n_slots\":2,\"n_tiles\":1,\"tile_slots\":[1]}";
+  one_tile_package(sparse_package, 10000, 2, 1);
+  response_binary_size[1] = sizeof sparse_package;
+  memcpy(response_binary[1], sparse_package, sizeof sparse_package);
+  admin_sha256_hex(response_binary[1], (unsigned long)response_binary_size[1], digest);
+  snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 20000\nX-OpenSeek-Sha256: %s\n", digest);
+  response_headers[1] = headers;
+  if (!minipool_buscar_candidato(1, &sparse_candidate, &download, &download_size, NULL) ||
+      calls != 2 || !download || !nvmt_ok(download, download_size, 20000, 10000) ||
+      read32(download + 12) != 2 || read32(download + 16) != 1 ||
+      read32(download + 20) != 1 || !strstr(urls[1], "slots=1")) return 26;
+  free(download); download = NULL; download_size = 0;
+
+  // A corrupt shared tile is rejected and returns no package, leaving the
+  // independent local decoder as the complete fallback.
+  reset(); status[0] = 404; status[1] = status[2] = 200;
+  bodies[0] = "{\"error\":\"not_found\"}";
+  bodies[1] = "{\"duration_ms\":20000,\"n_slots\":2,\"n_tiles\":1,\"tile_slots\":[0]}";
+  one_tile_package(sparse_package, 10000, 2, 0);
+  sparse_package[32] = 0; // valid checksum, invalid JPEG marker
+  response_binary_size[2] = sizeof sparse_package;
+  memcpy(response_binary[2], sparse_package, sizeof sparse_package);
+  admin_sha256_hex(response_binary[2], (unsigned long)response_binary_size[2], digest);
+  snprintf(headers, sizeof headers, "X-OpenSeek-Duration-Ms: 20000\nX-OpenSeek-Sha256: %s\n", digest);
+  response_headers[2] = headers;
+  if (minipool_buscar(1, &sparse_meta, &download, &download_size, sparse_profile, NULL) ||
+      download || download_size || calls != 3) return 27;
+
+  // A node outage fails the optional lookup but must not cancel the playback
+  // job; the separate local decoder remains responsible for missing tiles.
+  volatile int playback_cancelled = 0;
+  reset(); status[0] = status[1] = 503;
+  bodies[0] = bodies[1] = "{\"error\":\"pool_backend_unavailable\"}";
+  if (minipool_buscar(1, &sparse_meta, &download, &download_size, sparse_profile,
+                      &playback_cancelled) || download || download_size || playback_cancelled || calls != 2)
+    return 28;
 
   // C3 correction writes use the pinned paired-device bearer transport and
   // exact endpoint/body contract. An offline/unpaired device fails closed.
@@ -289,7 +402,8 @@ int main(void) {
   reset(); mp_token[0] = 0;
   if (minipool_candidato_offset(work, candidate_fp, 2500) != 0 || calls != 0) return 15;
 
-  // Local/VPS upload sends the same hints with the NVMT body in a direct PUT.
+  // Vercel upload sends hints as JSON, then the NVMT bytes straight to the
+  // participant's temporary Supabase target without forwarding the node token.
   unsigned char upload_package[20 + 12 + 125] = {0};
   strcpy(meta.fp, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
   meta.durMs = 21000; meta.temporada = 0; meta.episodio = 0;
@@ -298,27 +412,60 @@ int main(void) {
   put32(upload_package + 12, 5); put32(upload_package + 16, 1);
   put32(upload_package + 20, 0); put32(upload_package + 24, 0); put32(upload_package + 28, 125);
   upload_package[32] = 0xff; upload_package[33] = 0xd8; upload_package[sizeof upload_package - 2] = 0xff; upload_package[sizeof upload_package - 1] = 0xd9;
-  reset(); status[0] = 201; bodies[0] = "{}";
+  reset();
+  if (minipool_enviar(0, &meta, "film.mkv", 1500000000,
+                      upload_package, sizeof upload_package) != 0 || calls != 0) return 27;
+  reset(); status[0] = 201; bodies[0] = "{\"upload_id\":\"u_abcdefgh123\",\"put_url\":\"https://project.supabase.co/storage/v1/object/upload/sign/openseek-staging/uploads/x?token=secret\"}";
+  status[1] = 200; status[2] = 202; status[3] = 200; bodies[3] = "{\"state\":\"accepted\"}";
   if (!minipool_enviar(1, &meta, "Caf\xc3\xa9 & Friends #1.mkv", 1500000000, upload_package, sizeof upload_package) ||
-      calls != 1 || strcmp(methods[0], "PUT") || request_body_bytes[0] != sizeof upload_package ||
-      !strstr(urls[0], "imdb=tt1234567") || !strstr(urls[0], "season=0") ||
-      !strstr(urls[0], "episode=0") || !strstr(urls[0], "duration_ms=21000") ||
-      !strstr(urls[0], "size_bytes=1500000000") ||
-      !strstr(urls[0], "filename=Caf%C3%A9%20%26%20Friends%20%231.mkv")) return 7;
+      calls != 4 || strcmp(methods[0], "POST") || !strstr(urls[0], "/v1/pool/uploads") ||
+      !strstr(request_bodies[0], "\"imdb\":\"tt1234567\"") ||
+      !strstr(request_bodies[0], "\"season\":0") || !strstr(request_bodies[0], "\"episode\":0") ||
+      !strstr(request_bodies[0], "\"duration_ms\":21000") ||
+      !strstr(request_bodies[0], "\"size_bytes\":1500000000") ||
+      !strstr(request_bodies[0], "Caf\xc3\xa9 & Friends #1.mkv") ||
+      strcmp(methods[1], "PUT") || strcmp(urls[1], "https://project.supabase.co/storage/v1/object/upload/sign/openseek-staging/uploads/x?token=secret") ||
+      request_body_bytes[1] != sizeof upload_package || strstr(captured_headers[1], "Authorization:") ||
+      strcmp(methods[2], "POST") || !strstr(urls[2], "/finalize") ||
+      strcmp(methods[3], "GET") || !strstr(urls[3], "/v1/pool/uploads/u_abcdefgh123")) return 7;
 
   strcpy(meta.imdb, "tt1234567:3:1"); meta.temporada = 0; meta.episodio = 0;
-  reset(); status[0] = 201; bodies[0] = "{}";
+  reset(); status[0] = 201; bodies[0] = "{\"upload_id\":\"u_abcdefgh123\",\"put_url\":\"https://project.supabase.co/storage/v1/object/upload/sign/openseek-staging/uploads/x?token=secret\"}";
+  status[1] = 200; status[2] = 202; status[3] = 200; bodies[3] = "{\"state\":\"accepted\"}";
   if (!minipool_enviar(1, &meta, "show.s03e01.mkv", 1500000000,
-                       upload_package, sizeof upload_package) || calls != 1 ||
-      !strstr(urls[0], "imdb=tt1234567&season=3&episode=1") ||
-      strstr(urls[0], "imdb=tt1234567%3A3%3A1")) return 23;
+                       upload_package, sizeof upload_package) || calls != 4 ||
+      !strstr(request_bodies[0], "\"imdb\":\"tt1234567\"") ||
+      !strstr(request_bodies[0], "\"season\":3,\"episode\":1") ||
+      strstr(request_bodies[0], "tt1234567:3:1")) return 23;
 
-  // A server rejecting unknown query params receives one legacy direct PUT.
-  reset(); status[0] = 400; bodies[0] = "{\"error\":\"bad_request\"}";
-  status[1] = 201; bodies[1] = "{}";
+  // A durable Vercel queue acknowledgement is distinct from Telegram acceptance.
+  static const char *queued_states[] = { "pending", "retrying", "paused" };
+  for (size_t i = 0; i < sizeof queued_states / sizeof queued_states[0]; i++) {
+    reset(); status[0] = 201;
+    bodies[0] = "{\"upload_id\":\"u_abcdefgh123\",\"put_url\":\"https://project.supabase.co/storage/v1/object/upload/sign/openseek-staging/uploads/x?token=secret\"}";
+    status[1] = 200; status[2] = 202; status[3] = 200;
+    char queued_body[64]; snprintf(queued_body, sizeof queued_body,
+                                  "{\"state\":\"%s\"}", queued_states[i]);
+    bodies[3] = queued_body;
+    if (minipool_enviar(1, &meta, "show.s03e01.mkv", 1500000000,
+                        upload_package, sizeof upload_package) != 2 || calls != 4) return 25;
+  }
+  reset(); status[0] = 201;
+  bodies[0] = "{\"upload_id\":\"u_abcdefgh123\",\"put_url\":\"https://project.supabase.co/storage/v1/object/upload/sign/openseek-staging/uploads/x?token=secret\"}";
+  status[1] = 200; status[2] = 202; status[3] = 200;
+  bodies[3] = "{\"state\":\"failed\"}";
+  if (minipool_enviar(1, &meta, "show.s03e01.mkv", 1500000000,
+                      upload_package, sizeof upload_package) != 0 || calls != 4) return 26;
+
+  // A VPS reports staging_unavailable; Nuvio then uses the existing direct
+  // package route and its metadata compatibility retry.
+  reset(); status[0] = 400; bodies[0] = "{\"error\":\"staging_unavailable\"}";
+  status[1] = 400; bodies[1] = "{\"error\":\"bad_request\"}";
+  status[2] = 201; bodies[2] = "{}";
   if (!minipool_enviar(1, &meta, "film.mkv", 1500000000, upload_package, sizeof upload_package) ||
-      calls != 2 || strcmp(methods[1], "PUT") || strstr(urls[1], "imdb=") ||
-      strstr(urls[1], "filename=") || !strstr(urls[1], "duration_ms=21000")) return 8;
+      calls != 3 || strcmp(methods[0], "POST") || strcmp(methods[1], "PUT") ||
+      strcmp(methods[2], "PUT") || strstr(urls[2], "imdb=") ||
+      strstr(urls[2], "filename=") || !strstr(urls[2], "duration_ms=21000")) return 8;
 
   return 0;
 }

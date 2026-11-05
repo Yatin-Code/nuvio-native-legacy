@@ -38,6 +38,7 @@
 #include "ajustes.h"
 #include "minidrive.h"
 #include "minipool.h"
+#include "minipool_fallback.h"
 #include "miniatura_motor.h"
 #include "rede.h"
 #include "streams.h"
@@ -812,8 +813,8 @@ static void startPoolLookup(Job *j, const MiniMeta *meta, long playheadMs,
                             const char *filename, uint64_t sizeBytes) {
   PoolLookup *w; pthread_t thread;
   if (!ajustes_openseek_pool_receber() || j->parar) return;
-  if (!minipool_pin_configurado()) {
-    printf("[miniatura] OpenSeek lookup rejected: tls_pin_not_configured\n"); fflush(stdout);
+  if (!minipool_endpoint_configurado()) {
+    printf("[miniatura] OpenSeek lookup rejected: endpoint_not_configured\n"); fflush(stdout);
     return;
   }
   w = calloc(1, sizeof *w); if (!w) return;
@@ -822,6 +823,45 @@ static void startPoolLookup(Job *j, const MiniMeta *meta, long playheadMs,
   pthread_mutex_lock(&mu); j->refs++; pthread_mutex_unlock(&mu);
   if (pthread_create(&thread, NULL, poolLookupWorker, w) == 0) pthread_detach(thread);
   else { pthread_mutex_lock(&mu); soltarJob(j); pthread_mutex_unlock(&mu); free(w); }
+}
+
+typedef struct {
+  Job *job;
+  Leitor *leitor;
+  const MiniMeta *meta;
+  const char *filename;
+  uint64_t sizeBytes;
+  long playheadMs;
+  MiniMotor **motor;
+  char *error;
+  size_t errorSize;
+  Uint32 *stageTick;
+} ThumbnailStart;
+
+static void startOptionalThumbnailLookups(void *context) {
+  ThumbnailStart *start = context;
+  startPoolLookup(start->job, start->meta, start->playheadMs,
+                  start->filename, start->sizeBytes);
+  startDriveLookup(start->job, start->meta);
+}
+
+static int startLocalThumbnailDecoder(void *context) {
+  ThumbnailStart *start = context;
+  if (start->job->parar) return 0;
+  if (start->leitor->total <= 0) {
+    printf("[miniatura] stopped: source size unknown; fingerprint=%s\n",
+           start->meta->fp[0] ? "read" : "unreadable");
+    return 0;
+  }
+  *start->stageTick = SDL_GetTicks();
+  *start->motor = mini_motor_abrir(lerFonte, start->leitor, start->leitor->total,
+                                  start->error, start->errorSize);
+  printf("[miniatura] decoder open: %u ms, %s\n", SDL_GetTicks() - *start->stageTick,
+         *start->motor ? "ready" : "failed");
+  fflush(stdout);
+  if (!*start->motor)
+    printf("[miniatura] not made for this file: %s\n", start->error);
+  return *start->motor != NULL;
 }
 
 static int salvarPool(Job *j, const MiniMeta *meta, const char *filename, uint64_t sizeBytes) {
@@ -836,9 +876,11 @@ static int salvarPool(Job *j, const MiniMeta *meta, const char *filename, uint64
   if (!ha) return 0;
   unsigned char *b = empacotar(j, &n, &c);
   if (!b) return 0;
-  int ok = minipool_enviar(1, meta, filename, sizeBytes, b, n);
-  if (ok) {
+  int result = minipool_enviar(1, meta, filename, sizeBytes, b, n);
+  if (result == 1) {
     printf("[miniatura] OpenSeek pool: sent %d tile(s), %zu bytes in %u ms\n", c, n, SDL_GetTicks() - inicio); fflush(stdout);
+  } else if (result == 2) {
+    printf("[miniatura] OpenSeek pool: queued %d tile(s), %zu bytes for retry\n", c, n); fflush(stdout);
   } else {
     if (minipool_contribuicao_recusada())
       printf("[miniatura] OpenSeek pool upload denied: not_contribute; local thumbnails kept\n");
@@ -847,7 +889,7 @@ static int salvarPool(Job *j, const MiniMeta *meta, const char *filename, uint64
     fflush(stdout);
   }
   free(b);
-  return ok;
+  return result;
 }
 
 // Publish a partial NVMT while playback continues. Keep the same worker thread
@@ -865,7 +907,7 @@ static void checkpointPool(Job *j, const MiniMeta *meta, const char *filename, u
     if ((!due_by_tiles && !due_by_time) || (*lastAttempt && now - *lastAttempt < POOL_CHECKPOINT_MS)) return;
   }
   *lastAttempt = now;
-  if (salvarPool(j, meta, filename, sizeBytes)) { *uploadedTiles = nowTiles; *lastSuccess = SDL_GetTicks(); }
+  if (salvarPool(j, meta, filename, sizeBytes) > 0) { *uploadedTiles = nowTiles; *lastSuccess = SDL_GetTicks(); }
 }
 
 static void *trabalhar(void *u) {
@@ -922,19 +964,16 @@ static void *trabalhar(void *u) {
   }
 
   poolSizeBytes = l->total > 0 ? (uint64_t)l->total : w->bytes;
-  startPoolLookup(j, &meta, (long)(video_pos() * 1000.0), w->nome, poolSizeBytes);
-  startDriveLookup(j, &meta);
-
-  // Pool and personal Drive lookups are started after fingerprinting but run
-  // beside local decoding. A slow Telegram/Drive read must not hold the TV
-  // without local seek thumbnails.
   if (j->parar) goto fim;
-  if (l->total <= 0) { printf("[miniatura] stopped: source size unknown; fingerprint=%s\n", meta.fp[0] ? "read" : "unreadable"); goto semPrevia; }
-
-  etapaTick = SDL_GetTicks();
-  m = mini_motor_abrir(lerFonte, l, l->total, erro, sizeof erro);
-  printf("[miniatura] decoder open: %u ms, %s\n", SDL_GetTicks() - etapaTick, m ? "ready" : "failed");
-  if (!m) { printf("[miniatura] not made for this file: %s\n", erro); goto semPrevia; }
+  // Shared and Drive lookups start in the background. Their miss, outage, or
+  // failure to start never gates the local decoder or playback thumbnails.
+  ThumbnailStart start = {
+    .job = j, .leitor = l, .meta = &meta, .filename = w->nome,
+    .sizeBytes = poolSizeBytes, .playheadMs = (long)(video_pos() * 1000.0),
+    .motor = &m, .error = erro, .errorSize = sizeof erro, .stageTick = &etapaTick
+  };
+  if (!minipool_start_local_fallback(&start, startOptionalThumbnailLookups,
+                                    startLocalThumbnailDecoder)) goto semPrevia;
   {
     const MiniInfo *i = mini_motor_info(m);
     const char *porque = "";

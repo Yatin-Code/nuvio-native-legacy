@@ -44,6 +44,7 @@ typedef struct {
 void minipool_carregar(void);
 const char *minipool_servidor(void);
 int minipool_pin_configurado(void);
+int minipool_endpoint_configurado(void);
 int minipool_servidor_definir(const char *url);
 int minipool_pin_definir(const char *pin);
 int minipool_pareado(void);
@@ -81,6 +82,8 @@ int minipool_buscar_candidato(int enabled, const MpoolCandidate *candidate,
 int minipool_candidato_offset(const char *work_key, const char *fp, int64_t b_ms);
 int minipool_candidato_rejeitar(const char *work_key, const char *fp);
 // Blocking; uploads one NVMT package only when enabled and paired.
+// Returns 1 after publication is accepted, 2 when durable publication is queued,
+// and 0 when the package was rejected or could not be submitted.
 int minipool_enviar(int enabled, const MiniMeta *meta, const char *filename,
                     uint64_t sizeBytes, const unsigned char *data, size_t size);
 
