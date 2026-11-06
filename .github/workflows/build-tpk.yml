@@ -45,6 +45,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The OpenSeek client pieces are C. Run their unit tests before the long
+      # Tizen build, so a broken pairing or upload path fails in seconds.
+      - name: Run the OpenSeek client tests
+        run: make test-minipool
+
       # tools/tpk.sh compiles libnuvio.so inside a linux/arm/v5 container.
       - name: Enable ARM emulation for Docker
         uses: docker/setup-qemu-action@v3
